@@ -1,12 +1,15 @@
 # Build stage
-FROM golang:alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o dvb-web cmd/server/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o dvb-web cmd/server/main.go
 
 # Runtime stage
 FROM alpine:3.20
@@ -16,8 +19,10 @@ RUN apk add --no-cache \
     v4l-utils \
     ca-certificates \
     tzdata \
-    mesa-va-gallium \
-    libva-intel-driver
+    mesa-va-gallium && \
+    case "$(apk --print-arch)" in \
+        x86_64) apk add --no-cache libva-intel-driver || true ;; \
+    esac
 
 WORKDIR /app
 
