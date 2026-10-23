@@ -2,11 +2,13 @@ package tuner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -35,25 +37,54 @@ type ViewerSession struct {
 	KickChan    chan string `json:"-"`
 }
 
+type ActiveRecordingInfo struct {
+	RecordingID int64     `json:"recording_id"`
+	ChannelID   int64     `json:"channel_id"`
+	ChannelName string    `json:"channel_name"`
+	Title       string    `json:"title"`
+	StartTime   time.Time `json:"start_time"`
+	EndTime     time.Time `json:"end_time"`
+	FilePath    string    `json:"file_path"`
+}
+
+type TrackInfo struct {
+	Index    int    `json:"index"`
+	Type     string `json:"type"` // "audio" or "subtitle"
+	Codec    string `json:"codec"`
+	Language string `json:"language"`
+	Title    string `json:"title"`
+}
+
+type ChannelTracks struct {
+	AudioTracks    []TrackInfo `json:"audio_tracks"`
+	SubtitleTracks []TrackInfo `json:"subtitle_tracks"`
+}
+
 type TunerStatus struct {
-	ID               int              `json:"id"`
-	Name             string           `json:"name"`
-	FrontendPath     string           `json:"frontend_path"`
-	Status           string           `json:"status"` // "idle", "active", "scanning"
-	CurrentFrequency int64            `json:"current_frequency"`
-	CurrentChannel   string           `json:"current_channel"`
-	ActiveChannels   []string         `json:"active_channels,omitempty"`
-	Enabled          bool             `json:"enabled"`
-	Viewers          []*ViewerSession `json:"viewers"`
-	IsMock           bool             `json:"is_mock"`
-	Signal           *SignalInfo      `json:"signal,omitempty"`
+	ID               int                  `json:"id"`
+	Name             string               `json:"name"`
+	FrontendPath     string               `json:"frontend_path"`
+	Status           string               `json:"status"` // "idle", "active", "scanning"
+	CurrentFrequency int64                `json:"current_frequency"`
+	CurrentChannel   string               `json:"current_channel"`
+	ActiveChannels   []string             `json:"active_channels,omitempty"`
+	Enabled          bool                 `json:"enabled"`
+	Viewers          []*ViewerSession     `json:"viewers"`
+	IsMock           bool                 `json:"is_mock"`
+	Signal           *SignalInfo          `json:"signal,omitempty"`
+	ActiveRecording  *ActiveRecordingInfo `json:"active_recording,omitempty"`
 }
 
 type TunerConflictError struct {
-	ActiveTuners []TunerStatus `json:"active_tuners"`
+	ActiveTuners       []TunerStatus         `json:"active_tuners"`
+	HasActiveRecording bool                  `json:"has_active_recording"`
+	ActiveRecordings   []ActiveRecordingInfo `json:"active_recordings,omitempty"`
 }
 
 func (e *TunerConflictError) Error() string {
+	if e.HasActiveRecording {
+		return "tuner conflict: an active recording is in progress on this or another frequency"
+	}
 	return "tuner conflict: all tuners are active on different frequencies"
 }
 
@@ -133,6 +164,13 @@ func (cs *ChannelStream) Stop() {
 	log.Printf("[ChannelStream] Stopped stream for channel %s (ID: %d)", cs.ChannelName, cs.ChannelID)
 }
 
+func getStreamKey(channelID int64, audioTrack, subTrack int) string {
+	if audioTrack < 0 {
+		audioTrack = 0
+	}
+	return fmt.Sprintf("%d_a%d_s%d", channelID, audioTrack, subTrack)
+}
+
 type Tuner struct {
 	ID               int
 	Name             string
@@ -147,7 +185,8 @@ type Tuner struct {
 	currentChannelID int64
 	currentChannel   string
 	viewers          map[string]*ViewerSession
-	channels         map[int64]*ChannelStream
+	channels         map[string]*ChannelStream
+	activeRecording  *ActiveRecordingInfo
 	videoUDPPort     int
 	audioUDPPort     int
 	frontendFD       int
@@ -205,6 +244,7 @@ func (p *Pool) discover() {
 					DemuxPath:    filepath.Join(m, "demux0"),
 					status:       "idle",
 					viewers:      make(map[string]*ViewerSession),
+					channels:     make(map[string]*ChannelStream),
 					videoUDPPort: portCounter,
 					audioUDPPort: portCounter + 2,
 					epgParser:    p.epgParser,
@@ -227,6 +267,7 @@ func (p *Pool) discover() {
 			status:       "idle",
 			Enabled:      true,
 			viewers:      make(map[string]*ViewerSession),
+			channels:     make(map[string]*ChannelStream),
 			videoUDPPort: p.basePort,
 			audioUDPPort: p.basePort + 2,
 			epgParser:    p.epgParser,
@@ -271,12 +312,22 @@ func (p *Pool) GetStatus() []TunerStatus {
 			}
 		}
 		var activeChNames []string
+		seenCh := make(map[string]bool)
 		for _, cs := range t.channels {
-			activeChNames = append(activeChNames, cs.ChannelName)
+			if !seenCh[cs.ChannelName] {
+				seenCh[cs.ChannelName] = true
+				activeChNames = append(activeChNames, cs.ChannelName)
+			}
 		}
 		chDisplay := t.currentChannel
 		if len(activeChNames) > 0 {
 			chDisplay = strings.Join(activeChNames, ", ")
+		}
+
+		var recCopy *ActiveRecordingInfo
+		if t.activeRecording != nil {
+			c := *t.activeRecording
+			recCopy = &c
 		}
 
 		statuses = append(statuses, TunerStatus{
@@ -291,6 +342,7 @@ func (p *Pool) GetStatus() []TunerStatus {
 			Viewers:          viewersList,
 			IsMock:           t.IsMock,
 			Signal:           sig,
+			ActiveRecording:  recCopy,
 		})
 		t.mu.Unlock()
 	}
@@ -322,9 +374,9 @@ func (t *Tuner) stopHardwareLocked() {
 		t.tsCancel()
 		t.tsCancel = nil
 	}
-	for cid, cs := range t.channels {
+	for key, cs := range t.channels {
 		cs.Stop()
-		delete(t.channels, cid)
+		delete(t.channels, key)
 	}
 	if t.dvrFD > 0 {
 		_ = syscall.Close(t.dvrFD)
@@ -342,20 +394,30 @@ func (t *Tuner) stopHardwareLocked() {
 	t.currentFrequency = 0
 	t.currentChannel = ""
 	t.currentChannelID = 0
+	t.activeRecording = nil
 	t.viewers = make(map[string]*ViewerSession)
 }
 
 func (t *Tuner) Subscribe(channelID int64, sessionID string) chan []byte {
+	return t.SubscribeTrack(channelID, 0, -1, sessionID)
+}
+
+func (t *Tuner) SubscribeTrack(channelID int64, audioTrack, subTrack int, sessionID string) chan []byte {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.channels == nil {
 		return nil
 	}
-	cs, ok := t.channels[channelID]
-	if !ok {
-		return nil
+	key := getStreamKey(channelID, audioTrack, subTrack)
+	if cs, ok := t.channels[key]; ok {
+		return cs.Subscribe(sessionID)
 	}
-	return cs.Subscribe(sessionID)
+	for _, cs := range t.channels {
+		if cs.ChannelID == channelID {
+			return cs.Subscribe(sessionID)
+		}
+	}
+	return nil
 }
 
 func (t *Tuner) Unsubscribe(channelID int64, sessionID string) {
@@ -364,11 +426,13 @@ func (t *Tuner) Unsubscribe(channelID int64, sessionID string) {
 	if t.channels == nil {
 		return
 	}
-	if cs, ok := t.channels[channelID]; ok {
-		cs.Unsubscribe(sessionID)
-		if cs.ViewerCount() == 0 {
-			cs.Stop()
-			delete(t.channels, channelID)
+	for key, cs := range t.channels {
+		if cs.ChannelID == channelID {
+			cs.Unsubscribe(sessionID)
+			if cs.ViewerCount() == 0 {
+				cs.Stop()
+				delete(t.channels, key)
+			}
 		}
 	}
 }
@@ -391,7 +455,7 @@ func (p *Pool) StopAll() {
 	}
 }
 
-func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel) (*ChannelStream, error) {
+func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrack, subTrack int) (*ChannelStream, error) {
 	var inputPipe io.Reader
 	var pw *io.PipeWriter
 
@@ -402,14 +466,17 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel) (*Channel
 	}
 
 	cfg := transcoder.PipelineConfig{
-		InputPath:    t.DVRPath,
-		InputPipe:    inputPipe,
-		IsMock:       t.IsMock,
-		ServiceID:    channel.ServiceID,
-		VideoUDPPort: t.videoUDPPort,
-		AudioUDPPort: t.audioUDPPort,
-		HWType:       transcoder.HardwareType(p.db.GetSetting("transcoder_mode", "auto")),
-		VideoBitrate: p.db.GetSetting("video_bitrate", "2500k"),
+		InputPath:     t.DVRPath,
+		InputPipe:     inputPipe,
+		IsMock:        t.IsMock,
+		IsRadio:       channel.IsRadio,
+		ServiceID:     channel.ServiceID,
+		VideoUDPPort:  t.videoUDPPort,
+		AudioUDPPort:  t.audioUDPPort,
+		AudioTrackIdx: audioTrack,
+		SubtitleTrack: subTrack,
+		HWType:        transcoder.HardwareType(p.db.GetSetting("transcoder_mode", "auto")),
+		VideoBitrate:  p.db.GetSetting("video_bitrate", "2500k"),
 	}
 
 	pipeline, err := p.transcoder.StartPipeline(cfg)
@@ -475,14 +542,91 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel) (*Channel
 		}
 	}()
 
-	log.Printf("[TunerPool] Started ChannelStream for %s (SID: %d) on Tuner %d", channel.Name, channel.ServiceID, t.ID)
+	log.Printf("[TunerPool] Started ChannelStream for %s (SID: %d, Audio: %d, Sub: %d) on Tuner %d",
+		channel.Name, channel.ServiceID, audioTrack, subTrack, t.ID)
 	return cs, nil
 }
 
-// AllocateChannel matches or allocates a tuner for a viewer session
+func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
+	if t.IsMock || t.dvrFD <= 0 {
+		return
+	}
+	tsCtx, tsCancel := context.WithCancel(context.Background())
+	t.tsCancel = tsCancel
+
+	channels, _ := p.db.ListChannels()
+	channelMap := make(map[int]int64)
+	for _, c := range channels {
+		if c.Frequency == t.currentFrequency {
+			channelMap[c.ServiceID] = c.ID
+			if c.ServiceID >= 3100 && c.ServiceID <= 3700 {
+				channelMap[c.ServiceID-2000] = c.ID
+			} else if c.ServiceID >= 1100 && c.ServiceID <= 1700 {
+				channelMap[c.ServiceID+2000] = c.ID
+			}
+		}
+	}
+
+	dvrFD := t.dvrFD
+	ep := t.epgParser
+	tsQueue := make(chan []byte, 128)
+
+	// Hardware DVR reader goroutine
+	go func() {
+		defer close(tsQueue)
+		buf := make([]byte, 188*128) // 24KB chunk
+		for {
+			select {
+			case <-tsCtx.Done():
+				return
+			default:
+			}
+
+			n, err := syscall.Read(dvrFD, buf)
+			if err != nil {
+				if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				return
+			}
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				select {
+				case tsQueue <- chunk:
+				default:
+				}
+				if ep != nil {
+					ep.FeedTSChunk(buf[:n], channelMap)
+				}
+			}
+		}
+	}()
+
+	// Multiplex TS distributor: fans out raw TS chunks to all active channel streams
+	go func() {
+		for chunk := range tsQueue {
+			t.mu.Lock()
+			for _, cs := range t.channels {
+				cs.WriteTS(chunk)
+			}
+			t.mu.Unlock()
+		}
+	}()
+}
+
+// AllocateChannel matches or allocates a tuner for a viewer session with default tracks
 func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tuner, error) {
+	return p.AllocateChannelTrack(channel, 0, -1, session)
+}
+
+// AllocateChannelTrack matches or allocates a tuner with specific audio & subtitle tracks
+func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack int, session *ViewerSession) (*Tuner, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	streamKey := getStreamKey(channel.ID, audioTrack, subTrack)
 
 	// 1. Check if a tuner is ALREADY active on this exact frequency (channel group / multiplex)!
 	for _, t := range p.tuners {
@@ -503,48 +647,48 @@ func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tu
 				if other != t {
 					other.mu.Lock()
 					delete(other.viewers, session.ID)
-					for cid, cs := range other.channels {
+					for key, cs := range other.channels {
 						cs.Unsubscribe(session.ID)
 						if cs.ViewerCount() == 0 {
 							cs.Stop()
-							delete(other.channels, cid)
+							delete(other.channels, key)
 						}
 					}
-					if len(other.viewers) == 0 && other.status == "active" {
+					if len(other.viewers) == 0 && other.activeRecording == nil && other.status == "active" {
 						other.stopHardwareLocked()
 					}
 					other.mu.Unlock()
 				}
 			}
 
-			// Clean up this session from any other channel on this same tuner
-			for cid, cs := range t.channels {
-				if cid != channel.ID {
+			// Clean up this session from any other stream on this same tuner
+			for key, cs := range t.channels {
+				if key != streamKey {
 					cs.Unsubscribe(session.ID)
 					if cs.ViewerCount() == 0 {
 						cs.Stop()
-						delete(t.channels, cid)
+						delete(t.channels, key)
 					}
 				}
 			}
 
-			// Ensure this channel has an active ChannelStream on this multiplex!
-			if _, exists := t.channels[channel.ID]; !exists {
-				cs, err := p.startChannelStreamLocked(t, channel)
+			// Ensure this channel & track combination has an active ChannelStream on this multiplex!
+			if _, exists := t.channels[streamKey]; !exists {
+				cs, err := p.startChannelStreamLocked(t, channel, audioTrack, subTrack)
 				if err != nil {
 					delete(t.viewers, session.ID)
 					t.mu.Unlock()
 					return nil, err
 				}
-				t.channels[channel.ID] = cs
+				t.channels[streamKey] = cs
 			}
 
 			t.currentChannelID = channel.ID
 			t.currentChannel = channel.Name
 
 			t.mu.Unlock()
-			log.Printf("[TunerPool] Session %s (IP: %s) joined Tuner %d multiplex (%d Hz, Channel: %s). Total viewers on tuner: %d",
-				session.ID, session.IP, t.ID, channel.Frequency, channel.Name, len(t.viewers))
+			log.Printf("[TunerPool] Session %s (IP: %s) joined Tuner %d multiplex (%d Hz, Channel: %s, Stream: %s)",
+				session.ID, session.IP, t.ID, channel.Frequency, channel.Name, streamKey)
 			return t, nil
 		}
 		t.mu.Unlock()
@@ -555,14 +699,14 @@ func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tu
 		t.mu.Lock()
 		if _, exists := t.viewers[session.ID]; exists {
 			delete(t.viewers, session.ID)
-			for cid, cs := range t.channels {
+			for key, cs := range t.channels {
 				cs.Unsubscribe(session.ID)
 				if cs.ViewerCount() == 0 {
 					cs.Stop()
-					delete(t.channels, cid)
+					delete(t.channels, key)
 				}
 			}
-			if len(t.viewers) == 0 && t.status == "active" {
+			if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
 				t.stopHardwareLocked()
 			}
 		}
@@ -586,7 +730,7 @@ func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tu
 			t.currentChannelID = channel.ID
 			t.currentChannel = channel.Name
 			t.viewers[session.ID] = session
-			t.channels = make(map[int64]*ChannelStream)
+			t.channels = make(map[string]*ChannelStream)
 
 			if t.idleTimer != nil {
 				t.idleTimer.Stop()
@@ -649,85 +793,21 @@ func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tu
 			}
 
 			// Start channel stream for this channel
-			cs, err := p.startChannelStreamLocked(t, channel)
+			cs, err := p.startChannelStreamLocked(t, channel, audioTrack, subTrack)
 			if err != nil {
 				t.stopHardwareLocked()
 				delete(t.viewers, session.ID)
 				t.mu.Unlock()
 				return nil, fmt.Errorf("failed to start stream pipeline: %w", err)
 			}
-			t.channels[channel.ID] = cs
+			t.channels[streamKey] = cs
 
 			// Start multiplex TS pump for real DVB hardware
-			if !t.IsMock && t.dvrFD > 0 {
-				tsCtx, tsCancel := context.WithCancel(context.Background())
-				t.tsCancel = tsCancel
-
-				channels, _ := p.db.ListChannels()
-				channelMap := make(map[int]int64)
-				for _, c := range channels {
-					if c.Frequency == t.currentFrequency {
-						channelMap[c.ServiceID] = c.ID
-						if c.ServiceID >= 3100 && c.ServiceID <= 3700 {
-							channelMap[c.ServiceID-2000] = c.ID
-						} else if c.ServiceID >= 1100 && c.ServiceID <= 1700 {
-							channelMap[c.ServiceID+2000] = c.ID
-						}
-					}
-				}
-
-				dvrFD := t.dvrFD
-				ep := t.epgParser
-				tsQueue := make(chan []byte, 128)
-
-				// Hardware DVR reader goroutine
-				go func() {
-					defer close(tsQueue)
-					buf := make([]byte, 188*128) // 24KB chunk
-					for {
-						select {
-						case <-tsCtx.Done():
-							return
-						default:
-						}
-
-						n, err := syscall.Read(dvrFD, buf)
-						if err != nil {
-							if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-								time.Sleep(10 * time.Millisecond)
-								continue
-							}
-							return
-						}
-						if n > 0 {
-							chunk := make([]byte, n)
-							copy(chunk, buf[:n])
-							select {
-							case tsQueue <- chunk:
-							default:
-							}
-							if ep != nil {
-								ep.FeedTSChunk(buf[:n], channelMap)
-							}
-						}
-					}
-				}()
-
-				// Multiplex TS distributor: fans out raw TS chunks to all active channel streams
-				go func() {
-					for chunk := range tsQueue {
-						t.mu.Lock()
-						for _, cs := range t.channels {
-							cs.WriteTS(chunk)
-						}
-						t.mu.Unlock()
-					}
-				}()
-			}
+			p.startHardwareTSPumpLocked(t)
 
 			t.mu.Unlock()
-			log.Printf("[TunerPool] Allocated Tuner %d for Session %s (IP: %s) on Channel %s (Freq: %d Hz)",
-				t.ID, session.ID, session.IP, channel.Name, channel.Frequency)
+			log.Printf("[TunerPool] Allocated Tuner %d for Session %s (IP: %s) on Channel %s (%s)",
+				t.ID, session.ID, session.IP, channel.Name, streamKey)
 			return t, nil
 		}
 		t.mu.Unlock()
@@ -735,6 +815,9 @@ func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tu
 
 	// 4. All tuners busy on different frequencies -> Tuner Conflict
 	var activeStatuses []TunerStatus
+	var activeRecs []ActiveRecordingInfo
+	hasActiveRecording := false
+
 	for _, t := range p.tuners {
 		t.mu.Lock()
 		var viewersList []*ViewerSession
@@ -748,6 +831,13 @@ func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tu
 				ConnectedAt: v.ConnectedAt,
 			})
 		}
+		var recCopy *ActiveRecordingInfo
+		if t.activeRecording != nil {
+			c := *t.activeRecording
+			recCopy = &c
+			hasActiveRecording = true
+			activeRecs = append(activeRecs, c)
+		}
 		activeStatuses = append(activeStatuses, TunerStatus{
 			ID:               t.ID,
 			Name:             t.Name,
@@ -756,11 +846,164 @@ func (p *Pool) AllocateChannel(channel *db.Channel, session *ViewerSession) (*Tu
 			CurrentChannel:   t.currentChannel,
 			Viewers:          viewersList,
 			IsMock:           t.IsMock,
+			ActiveRecording:  recCopy,
 		})
 		t.mu.Unlock()
 	}
 
-	return nil, &TunerConflictError{ActiveTuners: activeStatuses}
+	return nil, &TunerConflictError{
+		ActiveTuners:       activeStatuses,
+		HasActiveRecording: hasActiveRecording,
+		ActiveRecordings:   activeRecs,
+	}
+}
+
+// AllocateRecording allocates a tuner for an active recording session
+func (p *Pool) AllocateRecording(channel *db.Channel, recInfo *ActiveRecordingInfo) (*Tuner, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	streamKey := getStreamKey(channel.ID, 0, -1)
+
+	// 1. Check if a tuner is already on this channel's multiplex
+	for _, t := range p.tuners {
+		t.mu.Lock()
+		if t.status == "active" && t.currentFrequency == channel.Frequency {
+			t.activeRecording = recInfo
+			if t.idleTimer != nil {
+				t.idleTimer.Stop()
+				t.idleTimer = nil
+			}
+
+			if _, exists := t.channels[streamKey]; !exists {
+				cs, err := p.startChannelStreamLocked(t, channel, 0, -1)
+				if err != nil {
+					t.activeRecording = nil
+					t.mu.Unlock()
+					return nil, err
+				}
+				t.channels[streamKey] = cs
+			}
+			t.mu.Unlock()
+			log.Printf("[TunerPool] Recording #%d joined Tuner %d multiplex (%d Hz, Channel: %s)",
+				recInfo.RecordingID, t.ID, channel.Frequency, channel.Name)
+			return t, nil
+		}
+		t.mu.Unlock()
+	}
+
+	// 2. Look for an idle tuner
+	for _, t := range p.tuners {
+		t.mu.Lock()
+		if !t.Enabled {
+			t.mu.Unlock()
+			continue
+		}
+		if t.status == "idle" {
+			t.status = "active"
+			t.currentFrequency = channel.Frequency
+			t.currentChannelID = channel.ID
+			t.currentChannel = channel.Name
+			t.activeRecording = recInfo
+			t.channels = make(map[string]*ChannelStream)
+
+			if t.idleTimer != nil {
+				t.idleTimer.Stop()
+				t.idleTimer = nil
+			}
+
+			if !t.IsMock {
+				if t.demuxFD > 0 {
+					StopDemuxWildcard(t.demuxFD)
+					t.demuxFD = 0
+				}
+				if t.dvrFD > 0 {
+					_ = syscall.Close(t.dvrFD)
+					t.dvrFD = 0
+				}
+				if t.frontendFD <= 0 {
+					feFD, err := syscall.Open(t.FrontendPath, syscall.O_RDWR, 0)
+					if err != nil {
+						t.status = "idle"
+						t.activeRecording = nil
+						t.mu.Unlock()
+						return nil, fmt.Errorf("failed to open frontend device: %w", err)
+					}
+					t.frontendFD = feFD
+				}
+
+				bw := channel.Bandwidth
+				if bw == 0 {
+					bw = 8000000
+				}
+				_ = TuneFrontendFD(t.frontendFD, uint32(channel.Frequency), uint32(bw), channel.DeliverySystem)
+
+				dmxFD, _ := StartDemuxWildcard(t.DemuxPath)
+				t.demuxFD = dmxFD
+
+				dvrFD, _ := syscall.Open(t.DVRPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+				t.dvrFD = dvrFD
+				drainBuf := make([]byte, 64*1024)
+				for {
+					n, _ := syscall.Read(dvrFD, drainBuf)
+					if n <= 0 {
+						break
+					}
+				}
+			}
+
+			cs, err := p.startChannelStreamLocked(t, channel, 0, -1)
+			if err != nil {
+				t.stopHardwareLocked()
+				t.activeRecording = nil
+				t.mu.Unlock()
+				return nil, err
+			}
+			t.channels[streamKey] = cs
+
+			p.startHardwareTSPumpLocked(t)
+
+			t.mu.Unlock()
+			log.Printf("[TunerPool] Allocated Tuner %d for Recording #%d on Channel %s",
+				t.ID, recInfo.RecordingID, channel.Name)
+			return t, nil
+		}
+		t.mu.Unlock()
+	}
+
+	return nil, ErrAllTunersBusy
+}
+
+// ReleaseRecording removes the recording lock from a tuner
+func (p *Pool) ReleaseRecording(tunerID int, channelID int64, recID int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, t := range p.tuners {
+		if t.ID == tunerID {
+			t.mu.Lock()
+			if t.activeRecording != nil && t.activeRecording.RecordingID == recID {
+				t.activeRecording = nil
+				log.Printf("[TunerPool] Released recording lock #%d from Tuner %d", recID, tunerID)
+			}
+			sessionID := fmt.Sprintf("rec_%d", recID)
+			for key, cs := range t.channels {
+				if cs.ChannelID == channelID {
+					cs.Unsubscribe(sessionID)
+					if cs.ViewerCount() == 0 {
+						cs.Stop()
+						delete(t.channels, key)
+					}
+				}
+			}
+			if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
+				log.Printf("[TunerPool] Tuner %d has 0 viewers and 0 recordings. Conserving 100%% CPU.", t.ID)
+				t.stopHardwareLocked()
+			}
+			t.mu.Unlock()
+			break
+		}
+	}
 }
 
 // ForceReleaseTuner kicks viewers from a tuner and frees it immediately
@@ -816,7 +1059,7 @@ func (p *Pool) GetTunerForSession(sessionID string) *Tuner {
 	return nil
 }
 
-// ReleaseSession frees a session and triggers power-saving idle teardown if 0 viewers remain
+// ReleaseSession frees a session and triggers power-saving idle teardown if 0 viewers and 0 recordings remain
 func (p *Pool) ReleaseSession(sessionID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -828,17 +1071,16 @@ func (p *Pool) ReleaseSession(sessionID string) {
 			log.Printf("[TunerPool] Session %s disconnected from Tuner %d. Remaining viewers: %d",
 				sessionID, t.ID, len(t.viewers))
 
-			for cid, cs := range t.channels {
+			for key, cs := range t.channels {
 				cs.Unsubscribe(sessionID)
 				if cs.ViewerCount() == 0 {
 					cs.Stop()
-					delete(t.channels, cid)
+					delete(t.channels, key)
 				}
 			}
 
-			// If no viewers remain, stop pipeline and sleep tuner
-			if len(t.viewers) == 0 {
-				log.Printf("[TunerPool] Tuner %d has 0 viewers. Stopping pipeline to conserve 100%% CPU.", t.ID)
+			if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
+				log.Printf("[TunerPool] Tuner %d has 0 viewers and 0 recordings. Stopping pipeline to conserve 100%% CPU.", t.ID)
 				t.stopHardwareLocked()
 			}
 		}
@@ -846,8 +1088,7 @@ func (p *Pool) ReleaseSession(sessionID string) {
 	}
 }
 
-// ReleaseStreamViewer cleans up a specific channel stream subscription.
-// If the viewer has already switched to another channel or tuner, it leaves the session active.
+// ReleaseStreamViewer cleans up a specific channel stream subscription
 func (p *Pool) ReleaseStreamViewer(tunerID int, channelID int64, sessionID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -857,22 +1098,23 @@ func (p *Pool) ReleaseStreamViewer(tunerID int, channelID int64, sessionID strin
 			continue
 		}
 		t.mu.Lock()
-		if cs, ok := t.channels[channelID]; ok {
-			cs.Unsubscribe(sessionID)
-			if cs.ViewerCount() == 0 {
-				cs.Stop()
-				delete(t.channels, channelID)
+		for key, cs := range t.channels {
+			if cs.ChannelID == channelID {
+				cs.Unsubscribe(sessionID)
+				if cs.ViewerCount() == 0 {
+					cs.Stop()
+					delete(t.channels, key)
+				}
 			}
 		}
 
 		if v, exists := t.viewers[sessionID]; exists {
-			// If session already switched to another channel on this tuner, do not delete session!
 			if v.ChannelID == channelID {
 				delete(t.viewers, sessionID)
 				log.Printf("[TunerPool] Session %s stream ended on Tuner %d (Channel %d). Remaining viewers: %d",
 					sessionID, t.ID, channelID, len(t.viewers))
-				if len(t.viewers) == 0 && t.status == "active" {
-					log.Printf("[TunerPool] Tuner %d has 0 viewers. Stopping pipeline to conserve 100%% CPU.", t.ID)
+				if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
+					log.Printf("[TunerPool] Tuner %d has 0 viewers and 0 recordings. Stopping pipeline to conserve 100%% CPU.", t.ID)
 					t.stopHardwareLocked()
 				}
 			} else {
@@ -882,6 +1124,153 @@ func (p *Pool) ReleaseStreamViewer(tunerID int, channelID int64, sessionID strin
 		}
 		t.mu.Unlock()
 	}
+}
+
+var (
+	tracksCacheMu sync.RWMutex
+	tracksCache   = make(map[int64]ChannelTracks)
+)
+
+type ffprobeJSON struct {
+	Streams []struct {
+		Index     int               `json:"index"`
+		CodecType string            `json:"codec_type"`
+		CodecName string            `json:"codec_name"`
+		Tags      map[string]string `json:"tags"`
+	} `json:"streams"`
+}
+
+func parseProbeOutput(data []byte, serviceID int) ChannelTracks {
+	var parsed ffprobeJSON
+	_ = json.Unmarshal(data, &parsed)
+
+	var audioList []TrackInfo
+	var subList []TrackInfo
+	aIdx := 0
+	sIdx := 0
+
+	for _, s := range parsed.Streams {
+		lang := s.Tags["language"]
+		if lang == "" {
+			lang = "und"
+		}
+		title := s.Tags["title"]
+		if s.CodecType == "audio" {
+			if title == "" {
+				title = fmt.Sprintf("Audio %d (%s)", aIdx+1, strings.ToUpper(lang))
+			}
+			audioList = append(audioList, TrackInfo{
+				Index:    aIdx,
+				Type:     "audio",
+				Codec:    s.CodecName,
+				Language: lang,
+				Title:    title,
+			})
+			aIdx++
+		} else if s.CodecType == "subtitle" {
+			if title == "" {
+				title = fmt.Sprintf("Subtitle %d (%s)", sIdx+1, strings.ToUpper(lang))
+			}
+			subList = append(subList, TrackInfo{
+				Index:    sIdx,
+				Type:     "subtitle",
+				Codec:    s.CodecName,
+				Language: lang,
+				Title:    title,
+			})
+			sIdx++
+		}
+	}
+
+	if len(audioList) == 0 {
+		audioList = append(audioList, TrackInfo{
+			Index:    0,
+			Type:     "audio",
+			Codec:    "aac",
+			Language: "und",
+			Title:    "Stereo (Default)",
+		})
+	}
+
+	return ChannelTracks{
+		AudioTracks:    audioList,
+		SubtitleTracks: subList,
+	}
+}
+
+// GetChannelTracks discovers or returns cached audio and subtitle tracks for a channel
+func (p *Pool) GetChannelTracks(channel *db.Channel) ChannelTracks {
+	tracksCacheMu.RLock()
+	cached, ok := tracksCache[channel.ID]
+	tracksCacheMu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	tracks := ChannelTracks{
+		AudioTracks: []TrackInfo{
+			{Index: 0, Type: "audio", Codec: "aac", Language: "und", Title: "Stereo (Default)"},
+		},
+		SubtitleTracks: []TrackInfo{},
+	}
+
+	if p.isMockMode {
+		subList := []TrackInfo{
+			{Index: 0, Type: "subtitle", Codec: "dvb_subtitle", Language: "eng", Title: "English [CC]"},
+		}
+		if channel.IsRadio {
+			subList = []TrackInfo{}
+		}
+		tracks = ChannelTracks{
+			AudioTracks: []TrackInfo{
+				{Index: 0, Type: "audio", Codec: "aac", Language: "eng", Title: "English (Stereo)"},
+				{Index: 1, Type: "audio", Codec: "aac", Language: "qaa", Title: "Original Audio (Secondary)"},
+			},
+			SubtitleTracks: subList,
+		}
+		tracksCacheMu.Lock()
+		tracksCache[channel.ID] = tracks
+		tracksCacheMu.Unlock()
+		return tracks
+	}
+
+	// For physical broadcast: check if a tuner is active on this frequency to probe live streams
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err == nil {
+		p.mu.RLock()
+		var activeDVR string
+		for _, t := range p.tuners {
+			if t.status == "active" && t.currentFrequency == channel.Frequency && t.dvrFD > 0 {
+				activeDVR = t.DVRPath
+				break
+			}
+		}
+		p.mu.RUnlock()
+
+		if activeDVR != "" {
+			cmd := exec.Command(ffprobePath,
+				"-v", "quiet",
+				"-probesize", "1000000",
+				"-analyzeduration", "1000000",
+				"-show_streams",
+				"-of", "json",
+				activeDVR,
+			)
+			out, err := cmd.Output()
+			if err == nil {
+				parsed := parseProbeOutput(out, channel.ServiceID)
+				if len(parsed.AudioTracks) > 0 {
+					tracks = parsed
+					tracksCacheMu.Lock()
+					tracksCache[channel.ID] = tracks
+					tracksCacheMu.Unlock()
+					return tracks
+				}
+			}
+		}
+	}
+
+	return tracks
 }
 
 func (t *Tuner) Ports() (int, int) {
@@ -953,6 +1342,8 @@ func (p *Pool) ScanFrequencies(adapterID int, onProgress func(freq int64, progre
 			{Name: "Channel 4 HD", Number: 4, Frequency: 538000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 202, VideoPID: 2021, AudioPID: 2022, Enabled: true},
 			{Name: "Channel 5", Number: 5, Frequency: 570000000, Bandwidth: 8000000, DeliverySystem: "DVBT", ServiceID: 301, VideoPID: 3011, AudioPID: 3012, Enabled: true},
 			{Name: "Sky News", Number: 11, Frequency: 570000000, Bandwidth: 8000000, DeliverySystem: "DVBT", ServiceID: 302, VideoPID: 3021, AudioPID: 3022, Enabled: true},
+			{Name: "BBC Radio 1", Number: 701, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 701, VideoPID: 0, AudioPID: 7012, Enabled: true, IsRadio: true},
+			{Name: "BBC Radio 4", Number: 704, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 704, VideoPID: 0, AudioPID: 7042, Enabled: true, IsRadio: true},
 		}, nil
 	}
 

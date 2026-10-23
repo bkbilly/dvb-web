@@ -368,6 +368,7 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 	defer syscall.Close(fd)
 
 	serviceNames := make(map[int]string)
+	serviceTypes := make(map[int]int)
 	servicePIDs := make(map[int]struct{ vPID, aPID int })
 
 	buf := make([]byte, 188*50)
@@ -413,7 +414,7 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 				ptr := int(pkt[offset])
 				secOffset := offset + 1 + ptr
 				if secOffset < 188 {
-					parseSDT(pkt[secOffset:], serviceNames)
+					parseSDT(pkt[secOffset:], serviceNames, serviceTypes)
 				}
 			}
 		}
@@ -426,6 +427,9 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 	var results []db.Channel
 	for sid, name := range serviceNames {
 		pids := servicePIDs[sid]
+		sType := serviceTypes[sid]
+		// ETSI EN 300 468: 0x02 = digital radio sound service, 0x07 = FM radio, 0x0A = advanced codec radio
+		isRadio := (sType == 0x02 || sType == 0x07 || sType == 0x0A)
 		results = append(results, db.Channel{
 			Name:           name,
 			Number:         *nextNum,
@@ -436,6 +440,7 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 			VideoPID:       pids.vPID,
 			AudioPID:       pids.aPID,
 			Enabled:        true,
+			IsRadio:        isRadio,
 		})
 		*nextNum++
 	}
@@ -443,8 +448,8 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 	return results
 }
 
-// parseSDT parses Service Names from DVB SDT section
-func parseSDT(sec []byte, serviceNames map[int]string) {
+// parseSDT parses Service Names and Types from DVB SDT section
+func parseSDT(sec []byte, serviceNames map[int]string, serviceTypes map[int]int) {
 	if len(sec) < 11 {
 		return
 	}
@@ -483,6 +488,7 @@ func parseSDT(sec []byte, serviceNames map[int]string) {
 			// Service Descriptor Tag 0x48
 			if tag == 0x48 && length >= 3 {
 				data := sec[offset : offset+length]
+				serviceTypes[serviceID] = int(data[0])
 				providerLen := int(data[1])
 				nameOffset := 2 + providerLen
 				if nameOffset < len(data) {

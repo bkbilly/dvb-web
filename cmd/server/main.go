@@ -15,6 +15,7 @@ import (
 	"dvb-web/internal/api"
 	"dvb-web/internal/db"
 	"dvb-web/internal/epg"
+	"dvb-web/internal/recorder"
 	"dvb-web/internal/transcoder"
 	"dvb-web/internal/tuner"
 	"dvb-web/internal/webrtc"
@@ -64,11 +65,18 @@ func main() {
 	// 4. Tuner Pool
 	pool := tuner.NewPool(database, detector, epgParser, *mock)
 
+	// 4.1. Background Recorder & Scheduler
+	rec := recorder.New(database, pool, *dataDir)
+	defer rec.Stop()
+
 	// 5. WebRTC Session Manager
 	rtcManager := webrtc.NewManager()
 
 	// 6. API Server
-	server = api.NewServer(database, pool, detector, rtcManager, epgParser)
+	server = api.NewServer(database, pool, detector, rtcManager, epgParser, rec)
+	rec.SetOnTunerChange(func() {
+		server.BroadcastTuners(pool.GetStatus())
+	})
 
 	// Only seed mock channels and EPG if mock mode was explicitly requested
 	if *mock {
@@ -109,6 +117,7 @@ func main() {
 	cancel()
 
 	rtcManager.CloseAll()
+	rec.Stop()
 	pool.StopAll()
 	epgParser.Stop()
 	log.Println("[Server] Stopped cleanly. Goodbye!")
@@ -171,6 +180,30 @@ func seedInitialChannels(database *db.Database) {
 			VideoPID:       3011,
 			AudioPID:       3012,
 			Enabled:        true,
+		},
+		{
+			Name:           "BBC Radio 1",
+			Number:         701,
+			Frequency:      506000000,
+			Bandwidth:      8000000,
+			DeliverySystem: "DVBT2",
+			ServiceID:      701,
+			VideoPID:       0,
+			AudioPID:       7012,
+			Enabled:        true,
+			IsRadio:        true,
+		},
+		{
+			Name:           "BBC Radio 4",
+			Number:         704,
+			Frequency:      506000000,
+			Bandwidth:      8000000,
+			DeliverySystem: "DVBT2",
+			ServiceID:      704,
+			VideoPID:       0,
+			AudioPID:       7042,
+			Enabled:        true,
+			IsRadio:        true,
 		},
 	}
 

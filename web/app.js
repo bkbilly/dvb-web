@@ -14,6 +14,109 @@ let pc = null;
 let conflictData = null;
 let scanDiff = null;
 
+// ==========================================================
+// TOAST NOTIFICATIONS (Non-intrusive popups)
+// ==========================================================
+function showToast(msg, type = 'info') {
+  let toast = document.getElementById('app-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'app-toast';
+    document.body.appendChild(toast);
+  }
+
+  let borderCol = 'rgba(59, 130, 246, 0.4)';
+  let bgCol = 'rgba(15, 23, 42, 0.95)';
+  let textCol = '#fff';
+
+  if (type === 'error' || msg.includes('⚠️') || msg.includes('Error') || msg.includes('Could not') || msg.includes('Failed')) {
+    borderCol = 'rgba(239, 68, 68, 0.6)';
+    bgCol = 'rgba(30, 10, 10, 0.95)';
+    textCol = '#fca5a5';
+  } else if (type === 'success' || msg.includes('✅') || msg.includes('started') || msg.includes('Scheduled') || msg.includes('Stopped')) {
+    borderCol = 'rgba(34, 197, 94, 0.6)';
+    bgCol = 'rgba(10, 30, 15, 0.95)';
+    textCol = '#86efac';
+  }
+
+  toast.style.cssText = `
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: ${bgCol};
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid ${borderCol};
+    color: ${textCol};
+    padding: 0.65rem 1.25rem;
+    border-radius: 8px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    z-index: 9999;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+    pointer-events: none;
+    opacity: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  `;
+
+  toast.textContent = msg;
+  if (toast._timer) clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => {
+    toast.style.opacity = '0';
+  }, 4000);
+}
+
+// Global modal confirmation popup replacing browser confirm()
+function showConfirm(message, title = 'Confirm Action', okText = 'Confirm', isDanger = true) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('app-confirm-modal');
+    const titleEl = document.getElementById('confirm-modal-title');
+    const msgEl = document.getElementById('confirm-modal-msg');
+    const btnOk = document.getElementById('btn-confirm-ok');
+    const btnCancel = document.getElementById('btn-confirm-cancel');
+    const btnClose = document.getElementById('btn-confirm-close');
+
+    if (!modal) {
+      resolve(true);
+      return;
+    }
+
+    if (titleEl) titleEl.textContent = title;
+    if (msgEl) msgEl.textContent = message;
+    if (btnOk) {
+      btnOk.textContent = okText;
+      btnOk.className = isDanger ? 'btn btn-danger' : 'btn btn-primary';
+    }
+
+    const cleanup = (result) => {
+      modal.classList.add('hidden');
+      btnOk.onclick = null;
+      btnCancel.onclick = null;
+      btnClose.onclick = null;
+      modal.onclick = null;
+      resolve(result);
+    };
+
+    btnOk.onclick = () => cleanup(true);
+    btnCancel.onclick = () => cleanup(false);
+    btnClose.onclick = () => cleanup(false);
+    modal.onclick = (e) => {
+      if (e.target.id === 'app-confirm-modal') cleanup(false);
+    };
+
+    modal.classList.remove('hidden');
+  });
+}
+
+// Redirect any stray browser alert() calls to toast popup
+window.alert = function(msg) {
+  showToast(String(msg), 'warning');
+};
+
 // Determine if a channel has a tuner conflict
 function getChannelConflict(channel) {
   if (!channel || !currentTuners || currentTuners.length === 0) return null;
@@ -35,10 +138,11 @@ function getChannelConflict(channel) {
     return null;
   }
 
-  // 3. If the current user is the ONLY viewer on an active tuner,
+  // 3. If the current user is the ONLY viewer on an active tuner WITHOUT an active recording,
   // that tuner belongs to this user and can be switched to any frequency freely without conflict!
   const mySoleTuner = enabled.find(t => 
     t.status === 'active' && 
+    !t.active_recording &&
     t.viewers && 
     t.viewers.length > 0 && 
     t.viewers.every(v => v.id === currentSessionID)
@@ -47,22 +151,30 @@ function getChannelConflict(channel) {
     return null;
   }
 
-  // 4. Check which tuners are busy with OTHER viewers
-  const busyWithOthers = enabled.filter(t => 
+  // 4. Check which tuners are busy with OTHER viewers or recordings
+  const busyWithOthersOrRec = enabled.filter(t => 
     t.status === 'active' && 
-    t.viewers && 
-    t.viewers.some(v => v.id !== currentSessionID)
+    (t.active_recording || (t.viewers && t.viewers.some(v => v.id !== currentSessionID)))
   );
 
-  // If all enabled tuners are occupied by other viewers, this channel has a conflict!
-  if (busyWithOthers.length === enabled.length) {
-    const busyInfo = busyWithOthers
-      .map(t => `${t.name}: ${t.current_channel || (t.current_frequency ? (t.current_frequency / 1e6).toFixed(1) + ' MHz' : 'Busy')}`)
+  // If all enabled tuners are occupied, this channel has a conflict!
+  if (busyWithOthersOrRec.length === enabled.length) {
+    const recTuners = enabled.filter(t => t.active_recording);
+    const hasActiveRec = recTuners.length > 0;
+    const busyInfo = busyWithOthersOrRec
+      .map(t => {
+        if (t.active_recording) {
+          return `${t.name}: ⏺ Recording "${t.active_recording.title}" (${t.active_recording.channel_name})`;
+        }
+        return `${t.name}: ${t.current_channel || (t.current_frequency ? (t.current_frequency / 1e6).toFixed(1) + ' MHz' : 'Busy')}`;
+      })
       .join(', ');
 
     return {
-      reason: `All tuners busy (${busyInfo})`,
-      busyTuners: busyWithOthers
+      reason: hasActiveRec ? `All tuners busy with active recording (${busyInfo})` : `All tuners busy (${busyInfo})`,
+      hasActiveRecording: hasActiveRec,
+      activeRecordings: recTuners.map(t => t.active_recording),
+      busyTuners: busyWithOthersOrRec
     };
   }
 
@@ -152,6 +264,8 @@ function switchTab(tabId) {
   // Trigger tab-specific loader
   if (tabId === 'epg') {
     loadEPGTimeline(true);
+  } else if (tabId === 'recordings') {
+    loadRecordings();
   } else if (tabId === 'settings') {
     refreshTunerStatus();
   } else if (tabId === 'tv') {
@@ -275,15 +389,38 @@ async function loadChannels() {
   }
 }
 
+let channelFilterType = 'all'; // 'all', 'tv', 'radio'
+
 // Render Channel Sidebar Cards with keyed in-place updates (no DOM flickering or click dropping)
 function renderChannelList(filterText = '', forceReorder = false) {
   const container = document.getElementById('channel-list');
   if (!container) return;
 
-  const filtered = channels.filter(c => 
-    c.name.toLowerCase().includes(filterText.toLowerCase()) || 
-    c.number.toString().includes(filterText)
-  );
+  // Only show the category selection if both TV and Radio channels exist
+  const filterContainer = document.querySelector('.channel-type-filters');
+  const hasTV = channels.some(c => !c.is_radio);
+  const hasRadio = channels.some(c => !!c.is_radio);
+
+  if (filterContainer) {
+    if (hasTV && hasRadio) {
+      filterContainer.classList.remove('hidden');
+    } else {
+      filterContainer.classList.add('hidden');
+      channelFilterType = 'all';
+      document.querySelectorAll('.ch-type-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.type === 'all');
+      });
+    }
+  }
+
+  const filtered = channels.filter(c => {
+    const matchesSearch = c.name.toLowerCase().includes(filterText.toLowerCase()) || 
+      c.number.toString().includes(filterText);
+    if (!matchesSearch) return false;
+    if (channelFilterType === 'tv') return !c.is_radio;
+    if (channelFilterType === 'radio') return !!c.is_radio;
+    return true;
+  });
 
   const filteredIds = new Set(filtered.map(c => c.id.toString()));
 
@@ -294,19 +431,50 @@ function renderChannelList(filterText = '', forceReorder = false) {
     }
   });
 
+  const activeRecordings = (currentTuners || [])
+    .filter(t => t.active_recording)
+    .map(t => t.active_recording);
+  const isAnyRecording = activeRecordings.length > 0;
+
   filtered.forEach(c => {
     let card = container.querySelector(`[data-channel-id="${c.id}"]`);
     const isActive = activeChannel && activeChannel.id === c.id;
+    const isRadio = !!c.is_radio;
     const conflict = getChannelConflict(c);
-    const nowTitle = c.now_playing ? getLocalized(c.now_playing.titles, currentLanguage) : 'No EPG Info';
+    const recTuner = (currentTuners || []).find(t => t.active_recording && t.active_recording.channel_id === c.id);
+    const isThisRecording = !!recTuner;
+
+    let nowTitle = c.now_playing ? getLocalized(c.now_playing.titles, currentLanguage) : (isRadio ? 'Digital Radio Stream' : 'No EPG Info');
+    if (isThisRecording && recTuner.active_recording.title) {
+      nowTitle = `🔴 Recording: ${recTuner.active_recording.title}`;
+    }
 
     const cardClasses = ['channel-card'];
     if (isActive) cardClasses.push('active');
-    if (conflict) cardClasses.push('has-conflict');
+    if (isThisRecording) cardClasses.push('is-recording');
+    if (conflict) {
+      cardClasses.push('has-conflict');
+    } else if (isAnyRecording && !isThisRecording) {
+      cardClasses.push('can-switch');
+    }
 
-    const conflictBadgeHtml = conflict ? 
-      `<span class="badge-conflict" title="${conflict.reason}">⚠️ Conflict</span>` : '';
-    const cardTitle = conflict ? `${c.name} — ${conflict.reason}` : c.name;
+    // Determine status badge
+    let statusBadgeHtml = '';
+    let cardTitle = c.name;
+    if (isThisRecording) {
+      statusBadgeHtml = `<span class="badge-rec" title="Recording: ${recTuner.active_recording.title}">🔴 REC</span>`;
+      cardTitle = `${c.name} — Recording "${recTuner.active_recording.title}"`;
+    } else if (conflict) {
+      const isRecConflict = conflict.hasActiveRecording;
+      const label = isRecConflict ? '⚠️ Stops Rec' : '⚠️ Conflict';
+      statusBadgeHtml = `<span class="badge-conflict" title="${conflict.reason}">${label}</span>`;
+      cardTitle = `${c.name} — ${conflict.reason}`;
+    } else if (isAnyRecording) {
+      statusBadgeHtml = `<span class="badge-watchable" title="Available to watch without stopping recording">🟢 Can Watch</span>`;
+      cardTitle = `${c.name} — Available to watch`;
+    }
+
+    const radioBadgeHtml = isRadio ? '<span class="badge-radio">📻 Radio</span>' : '';
 
     if (!card) {
       card = document.createElement('div');
@@ -319,7 +487,8 @@ function renderChannelList(filterText = '', forceReorder = false) {
           <div class="ch-top-row">
             <span class="badge ch-number-badge">${c.number}</span>
             <span class="ch-name">${c.name}</span>
-            ${conflictBadgeHtml}
+            ${radioBadgeHtml}
+            <span class="ch-status-wrap">${statusBadgeHtml}</span>
           </div>
           <div class="ch-now-show">${nowTitle}</div>
         </div>
@@ -346,24 +515,36 @@ function renderChannelList(filterText = '', forceReorder = false) {
         nameEl.textContent = c.name;
       }
 
+      const topRow = card.querySelector('.ch-top-row');
+      if (topRow) {
+        let rBadge = topRow.querySelector('.badge-radio');
+        if (isRadio && !rBadge) {
+          rBadge = document.createElement('span');
+          rBadge.className = 'badge-radio';
+          rBadge.textContent = '📻 Radio';
+          const statusWrap = topRow.querySelector('.ch-status-wrap');
+          topRow.insertBefore(rBadge, statusWrap);
+        } else if (!isRadio && rBadge) {
+          rBadge.remove();
+        }
+      }
+
       // Remove obsolete logo if still present
       const oldLogo = card.querySelector('.ch-logo-mini');
       if (oldLogo) oldLogo.remove();
 
-      const topRow = card.querySelector('.ch-top-row');
-      let badgeConflict = topRow ? topRow.querySelector('.badge-conflict') : null;
-      if (conflict) {
-        if (!badgeConflict && topRow) {
-          const span = document.createElement('span');
-          span.className = 'badge-conflict';
-          span.title = conflict.reason;
-          span.textContent = '⚠️ Conflict';
-          topRow.appendChild(span);
-        } else if (badgeConflict) {
-          badgeConflict.title = conflict.reason;
+      let statusWrap = card.querySelector('.ch-status-wrap');
+      if (!statusWrap) {
+        if (topRow) {
+          const oldConflict = topRow.querySelector('.badge-conflict');
+          if (oldConflict) oldConflict.remove();
+          statusWrap = document.createElement('span');
+          statusWrap.className = 'ch-status-wrap';
+          topRow.appendChild(statusWrap);
         }
-      } else if (badgeConflict) {
-        badgeConflict.remove();
+      }
+      if (statusWrap && statusWrap.innerHTML !== statusBadgeHtml) {
+        statusWrap.innerHTML = statusBadgeHtml;
       }
 
       const titleEl = card.querySelector('.ch-now-show');
@@ -374,9 +555,22 @@ function renderChannelList(filterText = '', forceReorder = false) {
   });
 }
 
-// Search Filter
-document.getElementById('channel-search').addEventListener('input', (e) => {
-  renderChannelList(e.target.value);
+// Search Filter & Channel Type Filter Chips
+const searchInputEl = document.getElementById('channel-search');
+if (searchInputEl) {
+  searchInputEl.addEventListener('input', (e) => {
+    renderChannelList(e.target.value);
+  });
+}
+
+document.querySelectorAll('.ch-type-btn').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.ch-type-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    channelFilterType = btn.dataset.type;
+    const searchInput = document.getElementById('channel-search');
+    renderChannelList(searchInput ? searchInput.value : '');
+  };
 });
 
 // WebSocket Connection (Signaling, Channel Zap, Kicks, EPG)
@@ -442,7 +636,7 @@ function updateSignalDisplay(sig) {
 function handleWSMessage(msg) {
   if (msg.error) {
     console.error('[WS Error]', msg.error);
-    alert('Tuning Error: ' + msg.error);
+    showToast('⚠️ Tuning Error: ' + msg.error, 'error');
     return;
   }
   switch (msg.event) {
@@ -471,10 +665,13 @@ function handleWSMessage(msg) {
       if (msg.tuners) {
         currentTuners = msg.tuners;
         renderChannelList();
+        updateHeaderTunerBadge();
+        updateInstantRecordButton();
         const settingsTab = document.getElementById('tab-settings');
         if (settingsTab && settingsTab.classList.contains('active')) {
           refreshTunerStatus();
         }
+        loadRecordings();
       }
       break;
 
@@ -526,8 +723,34 @@ function handleWSMessage(msg) {
 let player = null;
 let currentStreamingChannelId = null;
 
+function updateRadioOverlay(channel) {
+  const overlay = document.getElementById('radio-overlay');
+  const arWrap = document.getElementById('aspect-dropdown-wrap');
+  if (!overlay) return;
+
+  if (channel && channel.is_radio) {
+    overlay.classList.remove('hidden');
+    const stationName = document.getElementById('radio-station-name');
+    const nowPlaying = document.getElementById('radio-now-playing');
+    if (stationName) stationName.textContent = channel.name;
+    if (nowPlaying) {
+      const showTitle = channel.now_playing ? getLocalized(channel.now_playing.titles, currentLanguage) : 'Digital Audio Broadcast';
+      nowPlaying.textContent = showTitle;
+    }
+    if (arWrap) arWrap.classList.add('hidden');
+  } else {
+    overlay.classList.add('hidden');
+    if (arWrap) arWrap.classList.remove('hidden');
+  }
+}
+
 function handleStreamStopped(reason = 'Stream was forced to stop', canRetry = true) {
   stopStream();
+  updateRadioOverlay(null);
+
+  // Reset tracks and hide track selector buttons when stream stops
+  availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
+  renderTrackMenus();
 
   const streamLoader = document.getElementById('stream-loader');
   if (streamLoader) {
@@ -563,10 +786,7 @@ function handleStreamStopped(reason = 'Stream was forced to stop', canRetry = tr
   showStreamAlert(reason);
 
   // Update tuner status badge
-  if (tunerBadge) {
-    tunerBadge.className = 'tuner-badge badge-idle';
-    tunerBadge.textContent = 'Idle (0% CPU)';
-  }
+  updateHeaderTunerBadge();
 }
 
 function showStreamAlert(message) {
@@ -636,6 +856,7 @@ function startStream(channel) {
   stopStream();
   currentStreamingChannelId = channel.id;
   resetStandbyCard();
+  updateRadioOverlay(channel);
 
   standbyOverlay.classList.add('hidden');
   const streamLoader = document.getElementById('stream-loader');
@@ -648,7 +869,7 @@ function startStream(channel) {
     streamLoader.style.opacity = '1';
   }
 
-  const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}`;
+  const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}&audio_track=${currentAudioTrack}&sub_track=${currentSubTrack}`;
 
   if (window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
     player = mpegts.createPlayer({
@@ -679,6 +900,7 @@ function startStream(channel) {
 
     player.on(mpegts.Events.MEDIA_INFO, () => {
       standbyOverlay.classList.add('hidden');
+      updateHeaderTunerBadge();
       video.muted = false;
       video.play().catch(e => console.log('[Player] Autoplay error:', e));
     });
@@ -700,17 +922,32 @@ function zapToChannel(channel) {
   const conflict = getChannelConflict(channel);
   if (conflict) {
     // There are not enough tuners available!
-    // Send tune command over WebSocket to prompt the conflict resolution modal
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         action: 'tune',
         channel_id: channel.id,
       }));
+    } else {
+      showConflictModal({
+        message: conflict.reason,
+        has_active_recording: conflict.hasActiveRecording,
+        active_recordings: conflict.activeRecordings,
+        active_tuners: conflict.busyTuners,
+        target_channel: channel
+      });
     }
     return;
   }
 
+  if (activeChannel && activeChannel.id !== channel.id) {
+    currentAudioTrack = 0;
+    currentSubTrack = -1;
+    availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
+    renderTrackMenus();
+  }
   activeChannel = channel;
+  fetchAndRenderChannelTracks(channel.id);
+  updateInstantRecordButton();
 
   // Unmute and ensure volume is up
   video.muted = false;
@@ -809,9 +1046,11 @@ function updateOSD(channel) {
   document.getElementById('osd-channel-num').textContent = channel.number;
   document.getElementById('osd-channel-name').textContent = channel.name;
 
+  updateRadioOverlay(channel);
+
   const nowShow = channel.now_playing;
   if (nowShow) {
-    document.getElementById('osd-now-title').textContent = getLocalized(nowShow.titles, currentLanguage);
+    document.getElementById('osd-now-title').textContent = getLocalized(nowShow.titles, currentLanguage) || (channel.is_radio ? 'Digital Radio Stream' : 'Live Broadcast');
     const start = new Date(nowShow.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const end = new Date(nowShow.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     document.getElementById('osd-time-start').textContent = start;
@@ -822,10 +1061,56 @@ function updateOSD(channel) {
     const pct = Math.min(100, Math.max(0, (elapsed / total) * 100));
     document.getElementById('osd-progress-fill').style.width = `${pct}%`;
   } else {
-    document.getElementById('osd-now-title').textContent = 'Live Broadcast';
+    document.getElementById('osd-now-title').textContent = channel.is_radio ? 'Digital Radio Stream' : 'Live Broadcast';
     document.getElementById('osd-time-start').textContent = '--:--';
     document.getElementById('osd-time-end').textContent = '--:--';
     document.getElementById('osd-progress-fill').style.width = '0%';
+  }
+}
+
+async function openLiveProgramDetails() {
+  const ch = activeChannel;
+  if (!ch) return;
+
+  let event = ch.now_playing;
+
+  // If no now_playing or missing description, query EPG events around current time
+  if (!event || !event.descriptions || Object.keys(event.descriptions).length === 0) {
+    try {
+      const now = new Date();
+      const from = new Date(now.getTime() - 2 * 3600000).toISOString();
+      const to = new Date(now.getTime() + 2 * 3600000).toISOString();
+      const res = await fetch(`/api/epg?channel_id=${ch.id}&from=${from}&to=${to}`);
+      if (res.ok) {
+        const events = await res.json();
+        if (events && events.length > 0) {
+          const nowMs = now.getTime();
+          const currentEv = events.find(e => {
+            const s = new Date(e.start_time).getTime();
+            const end = new Date(e.end_time).getTime();
+            return nowMs >= s && nowMs < end;
+          });
+          if (currentEv) {
+            event = currentEv;
+            ch.now_playing = currentEv;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Could not fetch EPG details:', e);
+    }
+  }
+
+  if (event) {
+    window.showEPGModal(event, ch.name);
+  } else {
+    window.showEPGModal({
+      titles: { [currentLanguage]: ch.name },
+      descriptions: { [currentLanguage]: 'No detailed EPG synopsis is currently available for this program.' },
+      start_time: new Date().toISOString(),
+      end_time: new Date(Date.now() + 3600000).toISOString(),
+      channel_id: ch.id
+    }, ch.name);
   }
 }
 
@@ -833,21 +1118,52 @@ function updateOSD(channel) {
 function showConflictModal(data) {
   conflictData = data;
   const modal = document.getElementById('conflict-modal');
+  const title = document.getElementById('conflict-title');
+  const msg = document.getElementById('conflict-message');
   const details = document.getElementById('conflict-tuner-details');
+  const btnStopRec = document.getElementById('btn-stop-rec-tune');
+  const btnForceKick = document.getElementById('btn-force-kick');
   details.innerHTML = '';
 
-  data.active_tuners.forEach(t => {
-    const viewersHtml = t.viewers && t.viewers.length > 0 ? t.viewers.map(v => 
-      `<div class="viewer-row">Viewer IP: <span class="viewer-ip">${v.ip}</span> (watching ${v.channel_name})</div>`
-    ).join('') : '<div class="viewer-row">Active multiplex</div>';
+  const hasRec = data.has_active_recording || (data.active_recordings && data.active_recordings.length > 0);
 
-    details.innerHTML += `
-      <div class="tuner-item">
-        <strong>${t.name}</strong> — Channel: ${t.current_channel} (${(t.current_frequency / 1000000).toFixed(1)} MHz)
-        <div class="viewers-box">${viewersHtml}</div>
-      </div>
-    `;
-  });
+  if (hasRec) {
+    if (title) title.textContent = 'Active Recording Conflict';
+    if (msg) msg.textContent = 'All tuners are busy and a broadcast is currently being recorded. Changing channels requires stopping the recording.';
+    if (btnStopRec) {
+      btnStopRec.classList.remove('hidden');
+      const recTitle = data.active_recordings && data.active_recordings[0] ? data.active_recordings[0].title : 'Active Recording';
+      btnStopRec.textContent = `Stop "${recTitle}" & Watch Channel`;
+    }
+    if (btnForceKick) btnForceKick.classList.add('hidden');
+  } else {
+    if (title) title.textContent = 'Tuner Conflict';
+    if (msg) msg.textContent = 'All tuners are currently in use on different frequencies.';
+    if (btnStopRec) btnStopRec.classList.add('hidden');
+    if (btnForceKick) btnForceKick.classList.remove('hidden');
+  }
+
+  if (data.active_tuners) {
+    data.active_tuners.forEach(t => {
+      let extraHtml = '';
+      if (t.active_recording) {
+        extraHtml = `<div class="viewer-row" style="color: #f87171; font-weight: 600;">⏺ Recording: "${t.active_recording.title}" on ${t.active_recording.channel_name}</div>`;
+      } else if (t.viewers && t.viewers.length > 0) {
+        extraHtml = t.viewers.map(v => 
+          `<div class="viewer-row">Viewer IP: <span class="viewer-ip">${v.ip}</span> (watching ${v.channel_name})</div>`
+        ).join('');
+      } else {
+        extraHtml = '<div class="viewer-row">Active multiplex</div>';
+      }
+
+      details.innerHTML += `
+        <div class="tuner-item">
+          <strong>${t.name}</strong> — Channel: ${t.current_channel || 'Multiplex'} (${(t.current_frequency / 1000000).toFixed(1)} MHz)
+          <div class="viewers-box">${extraHtml}</div>
+        </div>
+      `;
+    });
+  }
 
   modal.classList.remove('hidden');
 }
@@ -858,6 +1174,36 @@ function closeConflictModal() {
 }
 
 document.getElementById('btn-cancel-conflict').onclick = closeConflictModal;
+
+const btnStopRecTune = document.getElementById('btn-stop-rec-tune');
+if (btnStopRecTune) {
+  btnStopRecTune.onclick = async () => {
+    if (!conflictData) return;
+    const recs = conflictData.active_recordings || [];
+    const targetChannel = conflictData.target_channel || activeChannel;
+    if (recs.length > 0) {
+      const recId = recs[0].recording_id || recs[0].id;
+      try {
+        await fetch(`/api/recordings/${recId}/stop-and-tune`, { method: 'POST' });
+      } catch (e) {
+        console.warn('Error stopping recording:', e);
+      }
+      if (ws && ws.readyState === WebSocket.OPEN && targetChannel) {
+        ws.send(JSON.stringify({
+          action: 'stop_recording_and_tune',
+          recording_id: recId,
+          channel_id: targetChannel.id
+        }));
+      }
+    }
+    closeConflictModal();
+    if (targetChannel) {
+      setTimeout(() => {
+        zapToChannel(targetChannel);
+      }, 400);
+    }
+  };
+}
 
 document.getElementById('btn-force-kick').onclick = () => {
   if (!conflictData || !conflictData.active_tuners.length) return;
@@ -882,7 +1228,8 @@ let currentAspectRatioIndex = 0;
 
 function setupAspectRatioControl() {
   const btn = document.getElementById('btn-aspect-ratio');
-  if (!btn) return;
+  const menu = document.getElementById('aspect-ratio-menu');
+  if (!btn || !menu) return;
 
   const savedAR = localStorage.getItem('dvb_aspect_ratio');
   if (savedAR) {
@@ -892,15 +1239,43 @@ function setupAspectRatioControl() {
     }
   }
 
-  btn.onclick = () => {
-    currentAspectRatioIndex = (currentAspectRatioIndex + 1) % ASPECT_RATIOS.length;
-    applyAspectRatio(ASPECT_RATIOS[currentAspectRatioIndex]);
-    try {
-      localStorage.setItem('dvb_aspect_ratio', ASPECT_RATIOS[currentAspectRatioIndex].id);
-    } catch (_) {}
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const audioMenu = document.getElementById('audio-tracks-menu');
+    const subMenu = document.getElementById('sub-tracks-menu');
+    if (audioMenu) audioMenu.classList.add('hidden');
+    if (subMenu) subMenu.classList.add('hidden');
+    menu.classList.toggle('hidden');
     showPlayerUI();
   };
+
+  renderAspectRatioMenu();
   applyAspectRatio(ASPECT_RATIOS[currentAspectRatioIndex]);
+}
+
+function renderAspectRatioMenu() {
+  const menu = document.getElementById('aspect-ratio-menu');
+  if (!menu) return;
+  menu.innerHTML = '';
+
+  ASPECT_RATIOS.forEach((ar, idx) => {
+    const item = document.createElement('button');
+    const isActive = idx === currentAspectRatioIndex;
+    item.className = `track-item ${isActive ? 'active' : ''}`;
+    item.innerHTML = `<span>${ar.label}</span><span class="track-item-tag">${ar.desc}</span>`;
+    item.onclick = (e) => {
+      e.stopPropagation();
+      currentAspectRatioIndex = idx;
+      applyAspectRatio(ar);
+      try {
+        localStorage.setItem('dvb_aspect_ratio', ar.id);
+      } catch (_) {}
+      menu.classList.add('hidden');
+      renderAspectRatioMenu();
+      showPlayerUI();
+    };
+    menu.appendChild(item);
+  });
 }
 
 // Dynamic mobile video container height so it expands when video can get bigger (e.g. 4:3, tall screens, landscape)
@@ -951,7 +1326,7 @@ function applyAspectRatio(ar) {
   video.className = ar.className;
   if (btn) {
     btn.textContent = ar.label;
-    btn.title = `Aspect Ratio: ${ar.desc} (Click to cycle)`;
+    btn.title = `Aspect Ratio: ${ar.desc}`;
   }
   updateMobileVideoHeight();
 }
@@ -996,6 +1371,15 @@ function setupPlayerControls() {
   const volSlider = document.getElementById('vol-slider');
   const btnMute = document.getElementById('btn-mute');
 
+  const updateVolUI = () => {
+    const isMuted = video.muted || video.volume === 0;
+    btnMute.textContent = isMuted ? '🔇' : (video.volume < 0.5 ? '🔉' : '🔊');
+    const volGroup = document.querySelector('.vol-group');
+    if (volGroup) {
+      volGroup.classList.toggle('is-muted', isMuted);
+    }
+  };
+
   // Restore volume and mute state from cache
   const savedVol = localStorage.getItem('dvb_player_volume');
   if (savedVol !== null) {
@@ -1008,13 +1392,13 @@ function setupPlayerControls() {
   const savedMuted = localStorage.getItem('dvb_player_muted');
   if (savedMuted !== null) {
     video.muted = (savedMuted === 'true');
-    btnMute.textContent = video.muted ? '🔇' : (video.volume == 0 ? '🔇' : '🔊');
   }
+  updateVolUI();
 
   volSlider.oninput = (e) => {
-    video.volume = e.target.value;
+    video.volume = parseFloat(e.target.value);
     video.muted = false;
-    btnMute.textContent = video.volume == 0 ? '🔇' : '🔊';
+    updateVolUI();
     try {
       localStorage.setItem('dvb_player_volume', video.volume);
       localStorage.setItem('dvb_player_muted', 'false');
@@ -1022,10 +1406,19 @@ function setupPlayerControls() {
   };
 
   btnMute.onclick = () => {
-    video.muted = !video.muted;
-    btnMute.textContent = video.muted ? '🔇' : (video.volume == 0 ? '🔇' : '🔊');
+    if (video.muted) {
+      video.muted = false;
+      if (video.volume === 0) {
+        video.volume = 0.5;
+        volSlider.value = 0.5;
+      }
+    } else {
+      video.muted = true;
+    }
+    updateVolUI();
     try {
       localStorage.setItem('dvb_player_muted', video.muted ? 'true' : 'false');
+      localStorage.setItem('dvb_player_volume', video.volume);
     } catch (_) {}
   };
 
@@ -1056,6 +1449,9 @@ function setupPlayerControls() {
   videoOsd.addEventListener('mouseleave', () => {
     isMouseOverOSD = false;
     schedulePlayerUIHide(3500);
+  });
+  videoOsd.addEventListener('click', () => {
+    openLiveProgramDetails();
   });
 
   const wrapper = document.getElementById('video-wrapper');
@@ -1127,6 +1523,13 @@ function setupKeybindings() {
       zapDelta(1);
     } else if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       document.getElementById('btn-fullscreen').click();
+    } else if ((e.key === 'i' || e.key === 'I') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      const modal = document.getElementById('epg-modal');
+      if (modal && !modal.classList.contains('hidden')) {
+        closeEPGModal();
+      } else {
+        openLiveProgramDetails();
+      }
     } else if (e.key >= '0' && e.key <= '9') {
       digitBuffer += e.key;
       zapIndicator.textContent = digitBuffer;
@@ -1366,10 +1769,11 @@ function renderChannelsColumn() {
 
     const conflictIndicator = conflict ? 
       `<span class="epg-conflict-icon" title="${conflict.reason}">⚠️</span>` : '';
+    const radioTag = c.is_radio ? ' <span title="Radio Station" style="font-size:0.75rem;">📻</span>' : '';
 
     cell.innerHTML = `
       <div class="epg-ch-cell-info">
-        <div class="epg-ch-cell-name" title="${c.number}. ${c.name}"><span class="badge" style="font-size:0.7rem; padding:0.12rem 0.35rem; margin-right:0.35rem;">${c.number}</span>${c.name} ${conflictIndicator}</div>
+        <div class="epg-ch-cell-name" title="${c.number}. ${c.name}"><span class="badge" style="font-size:0.7rem; padding:0.12rem 0.35rem; margin-right:0.35rem;">${c.number}</span>${c.name}${radioTag} ${conflictIndicator}</div>
       </div>
     `;
     col.appendChild(cell);
@@ -1424,7 +1828,27 @@ async function renderProgramRows(startTime, endTime) {
 
         const block = document.createElement('div');
         const isNow = Date.now() >= e._start.getTime() && Date.now() < e._end.getTime();
-        block.className = `epg-event-block ${isNow ? 'active-now' : ''}`;
+
+        // Check if event has a scheduled or active recording
+        const matchedRec = (currentRecordings || []).find(r => 
+          (r.event_id && r.event_id === e.event_id && r.channel_id === c.id) ||
+          (r.channel_id === c.id && new Date(r.start_time).getTime() === e._start.getTime())
+        );
+
+        let recBadge = '';
+        const blockClasses = ['epg-event-block'];
+        if (isNow) blockClasses.push('active-now');
+        if (matchedRec) {
+          if (matchedRec.status === 'recording') {
+            recBadge = '<span class="epg-block-rec-badge">🔴 REC</span>';
+            blockClasses.push('epg-block-recording');
+          } else if (matchedRec.status === 'scheduled') {
+            recBadge = '<span class="epg-block-sched-badge">⏱️</span>';
+            blockClasses.push('epg-block-scheduled');
+          }
+        }
+
+        block.className = blockClasses.join(' ');
         block.style.left = `${leftPx}px`;
         block.style.width = `${widthPx}px`;
 
@@ -1432,10 +1856,10 @@ async function renderProgramRows(startTime, endTime) {
         const startStr = e._start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const endStr = e._end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-        block.title = `${title} (${startStr} - ${endStr})`;
+        block.title = `${title} (${startStr} - ${endStr})${matchedRec ? ' [' + matchedRec.status.toUpperCase() + ']' : ''}`;
 
         block.innerHTML = `
-          <div class="epg-block-title">${title}</div>
+          <div class="epg-block-title">${recBadge}${title}</div>
           <div class="epg-block-time">${startStr} - ${endStr}</div>
         `;
         block.onclick = (ev) => {
@@ -1575,6 +1999,8 @@ async function refreshTunerStatus() {
     if (data.tuners) {
       currentTuners = data.tuners;
       renderChannelList();
+      updateHeaderTunerBadge();
+      updateInstantRecordButton();
     }
 
     document.getElementById('cfg-detected-hw').value = data.hardware ? data.hardware.toUpperCase() : 'CPU';
@@ -1584,14 +2010,46 @@ async function refreshTunerStatus() {
 
     data.tuners.forEach(t => {
       const isChecked = t.enabled ? 'checked' : '';
-      const statusBadge = t.status === 'active' ? 'badge-active' : 'badge-idle';
+      let statusBadge = t.status === 'active' ? 'badge-active' : 'badge-idle';
+      let statusText = t.status.toUpperCase();
 
-      const viewersHtml = t.viewers && t.viewers.length > 0 ? t.viewers.map(v => `
-        <div class="viewer-row">
-          <span>IP: <strong class="viewer-ip">${v.ip}</strong> (watching ${v.channel_name})</span>
-          <button class="btn btn-danger" style="padding:0.15rem 0.4rem; font-size:0.75rem;" onclick="kickTuner(${t.id})">Force Kick</button>
-        </div>
-      `).join('') : '<span style="color:var(--text-muted); font-size:0.85rem;">No active viewers (Tuner sleeping)</span>';
+      if (t.active_recording) {
+        statusBadge = 'badge-recording';
+        statusText = '🔴 RECORDING';
+      }
+
+      let recordingBanner = '';
+      if (t.active_recording) {
+        recordingBanner = `
+          <div class="viewer-row recording-row" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.45); border-radius: 6px; padding: 0.5rem 0.75rem; color: #fca5a5; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem;">
+            <div>
+              <div style="font-weight: 700; color: #f87171; display: flex; align-items: center; gap: 0.4rem;">
+                <span class="live-dot pulse"></span> DVR RECORDER ACTIVE
+              </div>
+              <div style="color: #fff; font-size: 0.85rem; margin-top: 0.2rem;">
+                "${t.active_recording.title}" on <strong>${t.active_recording.channel_name}</strong>
+              </div>
+            </div>
+            <button class="btn btn-danger" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600;" onclick="stopRecordingFromTuner(${t.active_recording.recording_id})">⏹ Stop Recording</button>
+          </div>
+        `;
+      }
+
+      let viewersHtml = '';
+      if (t.viewers && t.viewers.length > 0) {
+        viewersHtml = t.viewers.map(v => `
+          <div class="viewer-row">
+            <span>IP: <strong class="viewer-ip">${v.ip}</strong> (watching ${v.channel_name})</span>
+            <button class="btn btn-danger" style="padding:0.15rem 0.4rem; font-size:0.75rem;" onclick="kickTuner(${t.id})">Force Kick</button>
+          </div>
+        `).join('');
+      } else {
+        if (t.active_recording) {
+          viewersHtml = '<span style="color:var(--text-muted); font-size:0.85rem;">No live streaming viewers (Tuner locked by recorder)</span>';
+        } else {
+          viewersHtml = '<span style="color:var(--text-muted); font-size:0.85rem;">No active viewers (Tuner sleeping)</span>';
+        }
+      }
 
       const signalHtml = t.signal && (t.signal.has_lock || t.signal.signal_quality > 0) ? `
         <div class="tuner-signal-meter">
@@ -1600,24 +2058,27 @@ async function refreshTunerStatus() {
       ` : '';
 
       container.innerHTML += `
-        <div class="tuner-item">
+        <div class="tuner-item ${t.active_recording ? 'tuner-recording-active' : ''}">
           <div class="tuner-item-top">
             <div class="tuner-left-info">
               <div>
                 <span class="tuner-name">${t.name}</span>
-                <div class="tuner-sub">${t.frontend_path || 'Virtual Adapter'}</div>
+                <div class="tuner-sub">${t.frontend_path || 'Virtual Adapter'}${t.current_frequency ? ' • ' + (t.current_frequency / 1e6).toFixed(1) + ' MHz' : ''}${t.active_recording ? ' • ⏺ Recording: ' + t.active_recording.channel_name : ''}</div>
                 ${signalHtml}
               </div>
             </div>
             <div class="tuner-actions">
-              <span class="tuner-badge ${statusBadge}">${t.status.toUpperCase()}</span>
+              <span class="tuner-badge ${statusBadge}">${statusText}</span>
               <label class="switch" title="Enable/Disable Tuner">
                 <input type="checkbox" ${isChecked} onchange="toggleTuner(${t.id}, this.checked)">
                 <span class="slider"></span>
               </label>
             </div>
           </div>
-          <div class="viewers-box">${viewersHtml}</div>
+          <div class="viewers-box">
+            ${recordingBanner}
+            ${viewersHtml}
+          </div>
         </div>
       `;
     });
@@ -1625,6 +2086,46 @@ async function refreshTunerStatus() {
     console.error('Failed to fetch tuner status:', e);
   }
 }
+
+function updateHeaderTunerBadge() {
+  if (!tunerBadge) return;
+  const hasRecording = currentTuners && currentTuners.some(t => t.active_recording);
+  const activeTuner = currentTuners && currentTuners.find(t => t.status === 'active');
+
+  if (player && activeChannel) {
+    if (hasRecording) {
+      tunerBadge.className = 'tuner-badge badge-recording';
+      tunerBadge.textContent = 'Active + ⏺ Recording';
+    } else {
+      tunerBadge.className = 'tuner-badge badge-active';
+      tunerBadge.textContent = `Live: ${activeChannel.name}`;
+    }
+  } else if (hasRecording) {
+    tunerBadge.className = 'tuner-badge badge-recording';
+    tunerBadge.textContent = '⏺ Recording Active';
+  } else if (activeTuner) {
+    tunerBadge.className = 'tuner-badge badge-active';
+    tunerBadge.textContent = `Tuner ${activeTuner.id}: Active`;
+  } else {
+    tunerBadge.className = 'tuner-badge badge-idle';
+    tunerBadge.textContent = 'Idle (0% CPU)';
+  }
+}
+
+window.stopRecordingFromTuner = async function(recId) {
+  const confirmed = await showConfirm('Are you sure you want to stop this recording?', 'Stop Recording', 'Stop Recording', true);
+  if (!confirmed) return;
+  try {
+    await fetch(`/api/recordings/${recId}/stop`, { method: 'POST' });
+    showToast('⏺ Recording stopped', 'success');
+    refreshTunerStatus();
+    loadRecordings();
+    updateInstantRecordButton();
+    updateHeaderTunerBadge();
+  } catch (err) {
+    console.error('Failed to stop recording:', err);
+  }
+};
 
 document.getElementById('btn-refresh-tuners').onclick = refreshTunerStatus;
 
@@ -1641,7 +2142,8 @@ window.toggleTuner = async function(tunerId, enabled) {
 };
 
 window.kickTuner = async function(tunerId) {
-  if (!confirm(`Are you sure you want to force-kick all viewers on Tuner ${tunerId}?`)) return;
+  const confirmed = await showConfirm(`Are you sure you want to force-kick all viewers on Tuner ${tunerId}?`, 'Force Release Tuner', 'Kick Viewers', true);
+  if (!confirmed) return;
   await fetch(`/api/tuners/${tunerId}/force-release`, { method: 'POST' });
   refreshTunerStatus();
 };
@@ -1696,7 +2198,8 @@ document.getElementById('btn-prune-missing').onclick = async () => {
   if (!scanDiff || !scanDiff.missing_channels.length) return;
   const ids = scanDiff.missing_channels.map(c => c.id);
 
-  if (!confirm(`Are you sure you want to delete ${ids.length} missing channels?`)) return;
+  const confirmed = await showConfirm(`Are you sure you want to delete ${ids.length} missing channels?`, 'Delete Missing Channels', 'Delete Channels', true);
+  if (!confirmed) return;
 
   await fetch('/api/scan/prune', {
     method: 'POST',
@@ -1852,8 +2355,9 @@ window.uploadLogo = async function(channelId, input) {
       if (activeChannel && activeChannel.id === channelId) {
         showOSD(activeChannel);
       }
+      showToast('Logo updated successfully!', 'success');
     } else {
-      alert('Failed to upload logo.');
+      showToast('⚠️ Failed to upload logo.', 'error');
     }
   } catch (err) {
     console.error('Logo upload error:', err);
@@ -1861,7 +2365,8 @@ window.uploadLogo = async function(channelId, input) {
 };
 
 window.deleteChannel = async function(channelId) {
-  if (!confirm('Are you sure you want to delete this channel?')) return;
+  const confirmed = await showConfirm('Are you sure you want to delete this channel?', 'Delete Channel', 'Delete', true);
+  if (!confirmed) return;
   await fetch(`/api/channels/${channelId}`, { method: 'DELETE' });
   await loadChannels();
 };
@@ -1917,6 +2422,727 @@ function setupSettingsUI() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
     });
-    alert('Settings updated successfully!');
+    showToast('Settings updated successfully!', 'success');
+  };
+}
+
+// ==========================================================
+// AUDIO & SUBTITLE SELECTION (In-Sync Muxing & Burned-in Subtitles)
+// ==========================================================
+let currentAudioTrack = 0;
+let currentSubTrack = -1; // -1 = off
+let availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
+
+async function fetchAndRenderChannelTracks(channelId) {
+  try {
+    const res = await fetch(`/api/channels/${channelId}/tracks`);
+    if (res.ok) {
+      availableChannelTracks = await res.json();
+      renderTrackMenus();
+    } else {
+      availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
+      renderTrackMenus();
+    }
+  } catch (e) {
+    console.warn('[Tracks] Failed to fetch channel tracks:', e);
+    availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
+    renderTrackMenus();
+  }
+}
+
+function renderTrackMenus() {
+  const audioWrap = document.getElementById('audio-dropdown-wrap');
+  const subWrap = document.getElementById('sub-dropdown-wrap');
+  const audioMenu = document.getElementById('audio-tracks-menu');
+  const subMenu = document.getElementById('sub-tracks-menu');
+  const audioBtn = document.getElementById('btn-audio-select');
+  const subBtn = document.getElementById('btn-sub-select');
+
+  const audioTracks = availableChannelTracks.audio_tracks || [];
+  const subTracks = availableChannelTracks.subtitle_tracks || [];
+
+  // Hide audio dropdown if there is only 1 or 0 audio tracks (no alternate track can be chosen)
+  if (audioWrap) {
+    if (audioTracks.length > 1) {
+      audioWrap.classList.remove('hidden');
+    } else {
+      audioWrap.classList.add('hidden');
+      if (audioMenu) audioMenu.classList.add('hidden');
+    }
+  }
+
+  // Hide subtitle dropdown if there are 0 subtitle tracks available
+  if (subWrap) {
+    if (subTracks.length > 0) {
+      subWrap.classList.remove('hidden');
+    } else {
+      subWrap.classList.add('hidden');
+      if (subMenu) subMenu.classList.add('hidden');
+    }
+  }
+
+  // Render Audio Menu
+  if (audioMenu) {
+    audioMenu.innerHTML = '';
+    if (audioTracks.length === 0) {
+      audioMenu.innerHTML = '<div style="padding: 0.4rem 0.6rem; font-size: 0.78rem; color: var(--text-muted);">Default Audio (Stereo)</div>';
+      if (audioBtn) {
+        audioBtn.textContent = '🎧 Audio';
+        audioBtn.classList.remove('has-active');
+      }
+    } else {
+      audioTracks.forEach(t => {
+        const item = document.createElement('button');
+        item.className = `track-item ${currentAudioTrack === t.index ? 'active' : ''}`;
+        const desc = t.description || (t.language ? t.language.toUpperCase() : `Audio Track ${t.index + 1}`);
+        item.innerHTML = `<span>${desc}</span><span class="track-item-tag">${t.codec ? t.codec.toUpperCase() : ''}</span>`;
+        item.onclick = (e) => {
+          e.stopPropagation();
+          currentAudioTrack = t.index;
+          audioMenu.classList.add('hidden');
+          renderTrackMenus();
+          reloadCurrentStream();
+        };
+        audioMenu.appendChild(item);
+      });
+      if (audioBtn) {
+        const activeTrack = audioTracks.find(t => t.index === currentAudioTrack) || audioTracks[0];
+        const activeDesc = activeTrack ? (activeTrack.language ? activeTrack.language.toUpperCase() : `Audio ${activeTrack.index + 1}`) : 'Audio';
+        audioBtn.textContent = `🎧 ${activeDesc}`;
+        audioBtn.classList.add('has-active');
+      }
+    }
+  }
+
+  // Render Subtitles Menu
+  if (subMenu) {
+    subMenu.innerHTML = '';
+
+    // Always include "Off" option
+    const offItem = document.createElement('button');
+    offItem.className = `track-item ${currentSubTrack === -1 ? 'active' : ''}`;
+    offItem.innerHTML = `<span>Off (No Subtitles)</span>`;
+    offItem.onclick = (e) => {
+      e.stopPropagation();
+      currentSubTrack = -1;
+      subMenu.classList.add('hidden');
+      renderTrackMenus();
+      reloadCurrentStream();
+    };
+    subMenu.appendChild(offItem);
+
+    subTracks.forEach(s => {
+      const item = document.createElement('button');
+      item.className = `track-item ${currentSubTrack === s.index ? 'active' : ''}`;
+      const desc = s.description || (s.language ? s.language.toUpperCase() : `Subtitle ${s.index + 1}`);
+      item.innerHTML = `<span>${desc}</span><span class="track-item-tag">Burned In</span>`;
+      item.onclick = (e) => {
+        e.stopPropagation();
+        currentSubTrack = s.index;
+        subMenu.classList.add('hidden');
+        renderTrackMenus();
+        reloadCurrentStream();
+      };
+      subMenu.appendChild(item);
+    });
+
+    if (subBtn) {
+      if (currentSubTrack >= 0) {
+        const activeSub = subTracks.find(s => s.index === currentSubTrack);
+        const activeDesc = activeSub ? (activeSub.language ? activeSub.language.toUpperCase() : `Sub ${activeSub.index + 1}`) : 'Subs';
+        subBtn.textContent = `💬 ${activeDesc}`;
+        subBtn.classList.add('has-active');
+      } else {
+        subBtn.textContent = '💬 Subs';
+        subBtn.classList.remove('has-active');
+      }
+    }
+  }
+}
+
+function reloadCurrentStream() {
+  if (!activeChannel) return;
+  stopStream();
+  currentStreamingChannelId = null;
+  startStream(activeChannel);
+}
+
+// Track button click handlers
+const btnAudioSelect = document.getElementById('btn-audio-select');
+const btnSubSelect = document.getElementById('btn-sub-select');
+const audioTracksMenu = document.getElementById('audio-tracks-menu');
+const subTracksMenu = document.getElementById('sub-tracks-menu');
+
+if (btnAudioSelect && audioTracksMenu) {
+  btnAudioSelect.onclick = (e) => {
+    e.stopPropagation();
+    const arMenu = document.getElementById('aspect-ratio-menu');
+    if (arMenu) arMenu.classList.add('hidden');
+    if (subTracksMenu) subTracksMenu.classList.add('hidden');
+    audioTracksMenu.classList.toggle('hidden');
+  };
+}
+
+if (btnSubSelect && subTracksMenu) {
+  btnSubSelect.onclick = (e) => {
+    e.stopPropagation();
+    const arMenu = document.getElementById('aspect-ratio-menu');
+    if (arMenu) arMenu.classList.add('hidden');
+    if (audioTracksMenu) audioTracksMenu.classList.add('hidden');
+    subTracksMenu.classList.toggle('hidden');
+  };
+}
+
+document.addEventListener('click', () => {
+  if (audioTracksMenu) audioTracksMenu.classList.add('hidden');
+  if (subTracksMenu) subTracksMenu.classList.add('hidden');
+  const arMenu = document.getElementById('aspect-ratio-menu');
+  if (arMenu) arMenu.classList.add('hidden');
+});
+
+// ==========================================================
+// INSTANT RECORDING
+// ==========================================================
+function updateInstantRecordButton() {
+  const btn = document.getElementById('btn-record-instant');
+  if (!btn || !activeChannel) return;
+
+  const isRecordingThisChannel = currentTuners && currentTuners.some(t => 
+    t.status === 'active' && 
+    t.active_recording && 
+    t.active_recording.channel_id === activeChannel.id
+  );
+
+  const text = btn.querySelector('.rec-text');
+
+  if (isRecordingThisChannel) {
+    btn.classList.add('rec-active');
+    btn.title = `Stop Recording "${activeChannel.name}"`;
+    if (text) text.textContent = 'Recording';
+  } else {
+    btn.classList.remove('rec-active');
+    btn.title = `Instant Record "${activeChannel.name}"`;
+    if (text) text.textContent = 'Record';
+  }
+}
+
+const btnRecordInstant = document.getElementById('btn-record-instant');
+if (btnRecordInstant) {
+  btnRecordInstant.onclick = async () => {
+    if (!activeChannel) return;
+
+    // Check if actively recording this channel
+    const activeTunerWithRec = currentTuners && currentTuners.find(t => 
+      t.status === 'active' && 
+      t.active_recording && 
+      t.active_recording.channel_id === activeChannel.id
+    );
+
+    if (activeTunerWithRec && activeTunerWithRec.active_recording) {
+      const rec = activeTunerWithRec.active_recording;
+      const confirmed = await showConfirm(`A recording of "${rec.title}" is currently active on ${activeChannel.name}. Do you want to stop recording now?`, 'Active Recording', 'Stop Recording', true);
+      if (confirmed) {
+        try {
+          await fetch(`/api/recordings/${rec.recording_id}/stop`, { method: 'POST' });
+          showToast(`⏺ Stopped recording on ${activeChannel.name}`, 'success');
+          loadRecordings();
+          updateInstantRecordButton();
+          updateHeaderTunerBadge();
+          renderChannelList();
+        } catch (e) {
+          console.error('Failed to stop recording:', e);
+        }
+      }
+      return;
+    }
+
+    // Start instant recording
+    try {
+      const res = await fetch('/api/recordings/instant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel_id: activeChannel.id,
+          duration: 3600 // 1 hour default
+        })
+      });
+
+      if (res.status === 409) {
+        const conflict = await res.json();
+        showConflictModal({
+          message: conflict.error || 'All tuners are busy',
+          has_active_recording: conflict.has_active_recording,
+          active_recordings: conflict.active_recordings,
+          active_tuners: conflict.active_tuners,
+          target_channel: activeChannel
+        });
+        return;
+      }
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(`⚠️ Could not start recording: ${err.error || res.statusText}`, 'error');
+        return;
+      }
+
+      const rec = await res.json();
+      showToast(`🔴 Recording started for ${activeChannel.name}: "${rec.title}"`);
+      updateInstantRecordButton();
+      renderChannelList();
+    } catch (e) {
+      console.error('Failed to start instant recording:', e);
+    }
+  };
+}
+
+// ==========================================================
+// DVR RECORDINGS & SCHEDULER
+// ==========================================================
+let currentRecordings = [];
+
+async function loadRecordings() {
+  try {
+    const res = await fetch('/api/recordings');
+    if (!res.ok) return;
+    currentRecordings = await res.json();
+    renderRecordingsList();
+  } catch (e) {
+    console.error('Failed to load recordings:', e);
+  }
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatDuration(sec) {
+  if (!sec || sec <= 0) return '0m';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function renderRecordingsList() {
+  const activeList = document.getElementById('active-recordings-list');
+  const schedList = document.getElementById('scheduled-recordings-list');
+  const compList = document.getElementById('completed-recordings-list');
+  const activeCount = document.getElementById('active-rec-count');
+  const schedCount = document.getElementById('sched-rec-count');
+  const compCount = document.getElementById('completed-rec-count');
+
+  const active = currentRecordings.filter(r => r.status === 'recording');
+  const scheduled = currentRecordings.filter(r => r.status === 'scheduled');
+  const completed = currentRecordings.filter(r => r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled');
+
+  if (activeCount) activeCount.textContent = active.length;
+  if (schedCount) schedCount.textContent = scheduled.length;
+  if (compCount) compCount.textContent = completed.length;
+
+  // 1. Active Recordings
+  if (activeList) {
+    activeList.innerHTML = '';
+    if (active.length === 0) {
+      activeList.className = 'recordings-grid empty-grid';
+      activeList.innerHTML = '<div class="empty-state">No broadcasts are actively being recorded.</div>';
+    } else {
+      activeList.className = 'recordings-grid';
+      active.forEach(r => {
+        const start = new Date(r.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const elapsedSec = Math.max(0, Math.floor((Date.now() - new Date(r.start_time).getTime()) / 1000));
+
+        const card = document.createElement('div');
+        card.className = 'recording-card card-active';
+        card.innerHTML = `
+          <div class="rec-card-header">
+            <div>
+              <div class="rec-card-title">${r.title}</div>
+              <div class="rec-card-channel">📺 ${r.channel_name}</div>
+            </div>
+            <span class="rec-status-tag active">🔴 Recording</span>
+          </div>
+          <div class="rec-card-body">
+            <div class="rec-info-row">⏱️ Started at ${start} (${formatDuration(elapsedSec)} elapsed)</div>
+            <div class="rec-info-row">💾 Captured: ${formatBytes(r.file_size)}</div>
+          </div>
+          <div class="rec-card-actions">
+            <button class="btn-rec-action stop-btn" data-id="${r.id}">⏹ Stop Recording</button>
+          </div>
+        `;
+        card.querySelector('.stop-btn').onclick = async () => {
+          const confirmed = await showConfirm(`Stop recording "${r.title}"?`, 'Stop Recording', 'Stop Recording', true);
+          if (confirmed) {
+            await fetch(`/api/recordings/${r.id}/stop`, { method: 'POST' });
+            showToast('⏺ Recording stopped', 'success');
+            loadRecordings();
+            updateInstantRecordButton();
+            updateHeaderTunerBadge();
+          }
+        };
+        activeList.appendChild(card);
+      });
+    }
+  }
+
+  // 2. Scheduled Recordings
+  if (schedList) {
+    schedList.innerHTML = '';
+    if (scheduled.length === 0) {
+      schedList.className = 'recordings-grid empty-grid';
+      schedList.innerHTML = '<div class="empty-state">No upcoming recordings scheduled. Click "Schedule Recording" or tap any program in the TV Guide.</div>';
+    } else {
+      schedList.className = 'recordings-grid';
+      scheduled.forEach(r => {
+        const startDate = new Date(r.start_time).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+        const startTime = new Date(r.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const endTime = new Date(r.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        const card = document.createElement('div');
+        card.className = 'recording-card';
+        card.innerHTML = `
+          <div class="rec-card-header">
+            <div>
+              <div class="rec-card-title">${r.title}</div>
+              <div class="rec-card-channel">📺 ${r.channel_name}</div>
+            </div>
+            <span class="rec-status-tag scheduled">⏱️ Scheduled</span>
+          </div>
+          <div class="rec-card-body">
+            <div class="rec-info-row">📅 ${startDate} • ${startTime} - ${endTime}</div>
+            <div class="rec-info-row">⏳ Duration: ${formatDuration(r.duration)}</div>
+          </div>
+          <div class="rec-card-actions">
+            <button class="btn-rec-action del-btn" data-id="${r.id}">❌ Cancel Timer</button>
+          </div>
+        `;
+        card.querySelector('.del-btn').onclick = async () => {
+          const confirmed = await showConfirm(`Cancel scheduled recording for "${r.title}"?`, 'Cancel Timer', 'Cancel Timer', true);
+          if (confirmed) {
+            await fetch(`/api/recordings/${r.id}`, { method: 'DELETE' });
+            showToast('⏱️ Scheduled recording cancelled', 'info');
+            loadRecordings();
+          }
+        };
+        schedList.appendChild(card);
+      });
+    }
+  }
+
+  // 3. Completed Recordings
+  if (compList) {
+    compList.innerHTML = '';
+    if (completed.length === 0) {
+      compList.className = 'recordings-grid empty-grid';
+      compList.innerHTML = '<div class="empty-state">No saved recordings found.</div>';
+    } else {
+      compList.className = 'recordings-grid';
+      completed.forEach(r => {
+        const dateStr = new Date(r.start_time).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+        const timeStr = new Date(r.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const isFailed = r.status === 'failed';
+        const tagClass = isFailed ? 'failed' : 'completed';
+        const tagText = isFailed ? 'Failed' : 'Completed';
+
+        const card = document.createElement('div');
+        card.className = 'recording-card';
+        card.innerHTML = `
+          <div class="rec-card-header">
+            <div>
+              <div class="rec-card-title">${r.title}</div>
+              <div class="rec-card-channel">📺 ${r.channel_name}</div>
+            </div>
+            <span class="rec-status-tag ${tagClass}">${tagText}</span>
+          </div>
+          <div class="rec-card-body">
+            <div class="rec-info-row">📅 Recorded: ${dateStr} at ${timeStr}</div>
+            <div class="rec-info-row">⏳ Duration: ${formatDuration(r.duration)} • 💾 Size: ${formatBytes(r.file_size)}</div>
+            ${r.error_message ? `<div class="rec-info-row" style="color: var(--danger);">⚠️ ${r.error_message}</div>` : ''}
+          </div>
+          <div class="rec-card-actions">
+            ${!isFailed ? `<button class="btn-rec-action play-btn" data-id="${r.id}">▶ Play</button>` : ''}
+            ${!isFailed ? `<a href="/api/recordings/${r.id}/download" download class="btn-rec-action">⬇ Download</a>` : ''}
+            <button class="btn-rec-action del-btn" data-id="${r.id}">🗑 Delete</button>
+          </div>
+        `;
+        const playBtn = card.querySelector('.play-btn');
+        if (playBtn) {
+          playBtn.onclick = () => openRecordingPlayer(r);
+        }
+        card.querySelector('.del-btn').onclick = async () => {
+          const confirmed = await showConfirm(`Delete recording "${r.title}"? This will delete the file from disk.`, 'Delete Recording', 'Delete Permanently', true);
+          if (confirmed) {
+            await fetch(`/api/recordings/${r.id}`, { method: 'DELETE' });
+            showToast('🗑 Recording deleted', 'info');
+            loadRecordings();
+          }
+        };
+        compList.appendChild(card);
+      });
+    }
+  }
+}
+
+// Completed Recording Player Modal
+let recMpegtsPlayer = null;
+
+function openRecordingPlayer(rec) {
+  const modal = document.getElementById('recording-player-modal');
+  const title = document.getElementById('rec-player-title');
+  const videoEl = document.getElementById('rec-video-player');
+  if (!modal || !videoEl) return;
+
+  if (title) title.textContent = `${rec.title} (${rec.channel_name})`;
+
+  closeRecordingPlayer();
+  modal.classList.remove('hidden');
+
+  const streamUrl = `/api/recordings/${rec.id}/stream`;
+
+  videoEl.onerror = () => {
+    console.warn('[RecPlayer] Native HTML5 play failed, falling back to mpegts.js');
+    if (window.mpegts && mpegts.getFeatureList().msePlayback) {
+      recMpegtsPlayer = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: false,
+        url: window.location.origin + streamUrl,
+      }, {
+        enableWorker: false,
+        lazyLoad: false,
+      });
+      recMpegtsPlayer.attachMediaElement(videoEl);
+      recMpegtsPlayer.load();
+      recMpegtsPlayer.play().catch(e => console.warn('[RecPlayer] mpegts play error:', e));
+    }
+  };
+
+  videoEl.src = streamUrl;
+  videoEl.load();
+  videoEl.play().catch(e => console.log('[RecPlayer] Play notice:', e));
+}
+
+function closeRecordingPlayer() {
+  const modal = document.getElementById('recording-player-modal');
+  const videoEl = document.getElementById('rec-video-player');
+
+  if (recMpegtsPlayer) {
+    try {
+      recMpegtsPlayer.pause();
+      recMpegtsPlayer.unload();
+      recMpegtsPlayer.detachMediaElement();
+      recMpegtsPlayer.destroy();
+    } catch (e) {
+      console.warn('[RecPlayer] Destroy error:', e);
+    }
+    recMpegtsPlayer = null;
+  }
+
+  if (videoEl) {
+    videoEl.pause();
+    videoEl.onerror = null;
+    videoEl.removeAttribute('src');
+    videoEl.load();
+  }
+  if (modal) modal.classList.add('hidden');
+}
+
+const btnCloseRecPlayer = document.getElementById('btn-close-rec-player');
+if (btnCloseRecPlayer) btnCloseRecPlayer.onclick = closeRecordingPlayer;
+const recPlayerModal = document.getElementById('recording-player-modal');
+if (recPlayerModal) {
+  recPlayerModal.onclick = (e) => {
+    if (e.target.id === 'recording-player-modal') closeRecordingPlayer();
+  };
+}
+
+// Manual Schedule Modal
+const btnOpenSchedModal = document.getElementById('btn-open-schedule-modal');
+const manualSchedModal = document.getElementById('manual-schedule-modal');
+const btnCloseSchedModal = document.getElementById('btn-close-schedule-modal');
+const btnCancelManualSched = document.getElementById('btn-cancel-manual-sched');
+const scheduleForm = document.getElementById('schedule-recording-form');
+
+if (btnOpenSchedModal) {
+  btnOpenSchedModal.onclick = () => {
+    const select = document.getElementById('sched-channel-select');
+    if (select) {
+      select.innerHTML = '';
+      channels.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = `${c.number}. ${c.name}`;
+        select.appendChild(opt);
+      });
+      if (activeChannel) select.value = activeChannel.id;
+    }
+
+    const startInput = document.getElementById('sched-start-input');
+    if (startInput) {
+      // Default to 5 minutes from now in local ISO format (YYYY-MM-DDTHH:MM)
+      const now = new Date(Date.now() + 5 * 60 * 1000);
+      const localIso = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      startInput.value = localIso;
+    }
+
+    if (manualSchedModal) manualSchedModal.classList.remove('hidden');
+  };
+}
+
+function closeManualScheduleModal() {
+  if (manualSchedModal) manualSchedModal.classList.add('hidden');
+}
+
+if (btnCloseSchedModal) btnCloseSchedModal.onclick = closeManualScheduleModal;
+if (btnCancelManualSched) btnCancelManualSched.onclick = closeManualScheduleModal;
+if (manualSchedModal) {
+  manualSchedModal.onclick = (e) => {
+    if (e.target.id === 'manual-schedule-modal') closeManualScheduleModal();
+  };
+}
+
+if (scheduleForm) {
+  scheduleForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const chId = parseInt(document.getElementById('sched-channel-select').value, 10);
+    const title = document.getElementById('sched-title-input').value.trim();
+    const startVal = document.getElementById('sched-start-input').value;
+    const durMin = parseInt(document.getElementById('sched-duration-input').value, 10);
+
+    const startTime = new Date(startVal);
+    const endTime = new Date(startTime.getTime() + durMin * 60 * 1000);
+
+    try {
+      const res = await fetch('/api/recordings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel_id: chId,
+          title: title,
+          start_time: startTime.toISOString(),
+          end_time: endTime.toISOString(),
+          duration: durMin * 60
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(`⚠️ Failed to schedule recording: ${err.error || res.statusText}`, 'error');
+        return;
+      }
+
+      closeManualScheduleModal();
+      showToast(`⏱️ Scheduled recording "${title}"`);
+      loadRecordings();
+    } catch (err) {
+      console.error('Error saving scheduled recording:', err);
+    }
+  };
+}
+
+// EPG Modal Schedule Recording
+let currentEPGModalEvent = null;
+const origShowEPGModal = window.showEPGModal;
+window.showEPGModal = function(event, channelName) {
+  currentEPGModalEvent = { event, channelName };
+  origShowEPGModal(event, channelName);
+
+  const btnEPGRecord = document.getElementById('btn-epg-record');
+  if (btnEPGRecord && event) {
+    const isRecording = currentTuners && currentTuners.some(t => 
+      t.status === 'active' && 
+      t.active_recording && 
+      t.active_recording.channel_id === event.channel_id
+    );
+
+    const now = Date.now();
+    const start = new Date(event.start_time).getTime();
+    const end = new Date(event.end_time).getTime();
+    const isLive = now >= start && now < end;
+
+    if (isRecording) {
+      btnEPGRecord.textContent = '⏹ Stop Active Recording';
+      btnEPGRecord.className = 'btn btn-danger';
+    } else if (isLive) {
+      btnEPGRecord.textContent = '⏺ Record Live Program';
+      btnEPGRecord.className = 'btn btn-primary';
+    } else {
+      btnEPGRecord.textContent = '⏱️ Schedule Recording';
+      btnEPGRecord.className = 'btn btn-primary';
+    }
+  }
+};
+
+const btnEPGRecord = document.getElementById('btn-epg-record');
+if (btnEPGRecord) {
+  btnEPGRecord.onclick = async () => {
+    if (!currentEPGModalEvent || !currentEPGModalEvent.event) return;
+    const ev = currentEPGModalEvent.event;
+
+    // Check if actively recording this channel
+    const activeRecTuner = currentTuners && currentTuners.find(t => 
+      t.status === 'active' && 
+      t.active_recording && 
+      t.active_recording.channel_id === ev.channel_id
+    );
+    if (activeRecTuner && activeRecTuner.active_recording) {
+      const rec = activeRecTuner.active_recording;
+      const confirmed = await showConfirm(`Stop recording "${rec.title}" on ${currentEPGModalEvent.channelName}?`, 'Stop Recording', 'Stop Recording', true);
+      if (confirmed) {
+        await fetch(`/api/recordings/${rec.recording_id}/stop`, { method: 'POST' });
+        showToast(`⏺ Stopped recording "${rec.title}"`, 'success');
+        closeEPGModal();
+        loadRecordings();
+        updateInstantRecordButton();
+        renderChannelList();
+      }
+      return;
+    }
+
+    const title = getLocalized(ev.titles, currentLanguage) || 'Program';
+    const desc = getLocalized(ev.descriptions, currentLanguage) || '';
+    const start = new Date(ev.start_time);
+    const end = new Date(ev.end_time);
+    const durSec = Math.max(60, Math.floor((end - start) / 1000));
+
+    try {
+      const res = await fetch('/api/recordings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel_id: ev.channel_id,
+          title: title,
+          description: desc,
+          start_time: start.toISOString(),
+          end_time: end.toISOString(),
+          duration: durSec,
+          event_id: ev.event_id
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(`⚠️ Failed to schedule recording: ${err.error || res.statusText}`, 'error');
+        return;
+      }
+
+      closeEPGModal();
+      const now = Date.now();
+      const isLive = now >= start.getTime() && now < end.getTime();
+      if (isLive) {
+        showToast(`🔴 Recording started for ${currentEPGModalEvent.channelName}: "${title}"`);
+      } else {
+        showToast(`⏱️ Scheduled recording "${title}" on ${currentEPGModalEvent.channelName}`);
+      }
+      loadRecordings();
+      updateInstantRecordButton();
+      renderChannelList();
+    } catch (e) {
+      console.error('Error scheduling EPG recording:', e);
+    }
   };
 }

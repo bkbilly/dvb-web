@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 
 	"dvb-web/internal/db"
 	"dvb-web/internal/epg"
+	"dvb-web/internal/recorder"
 	"dvb-web/internal/transcoder"
 	"dvb-web/internal/tuner"
 	webRTCManager "dvb-web/internal/webrtc"
@@ -38,6 +40,7 @@ type Server struct {
 	transcoder *transcoder.Detector
 	webrtcMgr  *webRTCManager.Manager
 	epgParser  *epg.Parser
+	recorder   *recorder.Recorder
 	wsClients  map[*wsClient]bool
 	wsMu       sync.RWMutex
 }
@@ -61,13 +64,14 @@ func (c *wsClient) writeMessage(messageType int, data []byte) error {
 	return c.conn.WriteMessage(messageType, data)
 }
 
-func NewServer(database *db.Database, pool *tuner.Pool, detector *transcoder.Detector, rtcMgr *webRTCManager.Manager, epgP *epg.Parser) *Server {
+func NewServer(database *db.Database, pool *tuner.Pool, detector *transcoder.Detector, rtcMgr *webRTCManager.Manager, epgP *epg.Parser, rec *recorder.Recorder) *Server {
 	s := &Server{
 		db:         database,
 		tunerPool:  pool,
 		transcoder: detector,
 		webrtcMgr:  rtcMgr,
 		epgParser:  epgP,
+		recorder:   rec,
 		wsClients:  make(map[*wsClient]bool),
 	}
 	s.startSignalMonitor()
@@ -90,6 +94,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
 	mux.HandleFunc("/api/logos/", s.handleLogoStatic)
 	mux.HandleFunc("/api/stream", s.handleStream)
+	mux.HandleFunc("/api/recordings", s.handleRecordings)
+	mux.HandleFunc("/api/recordings/instant", s.handleRecordingInstant)
+	mux.HandleFunc("/api/recordings/", s.handleRecordingDetail)
 
 	// HDHomeRun Emulation (Native Plex & Jellyfin Tuner Support)
 	mux.HandleFunc("/discover.json", s.handleHDHRDiscover)
@@ -200,6 +207,12 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
 	// Handle Logo Upload: POST /api/channels/{id}/logo
 	if len(parts) > 1 && parts[1] == "logo" && r.Method == http.MethodPost {
 		s.handleLogoUpload(w, r, id)
+		return
+	}
+
+	// Handle Channel Tracks: GET /api/channels/{id}/tracks
+	if len(parts) > 1 && parts[1] == "tracks" && r.Method == http.MethodGet {
+		s.handleChannelTracks(w, r, id)
 		return
 	}
 
@@ -513,9 +526,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var cmd struct {
-			Action    string `json:"action"`
-			ChannelID int64  `json:"channel_id"`
-			TunerID   int    `json:"tuner_id"`
+			Action      string `json:"action"`
+			ChannelID   int64  `json:"channel_id"`
+			TunerID     int    `json:"tuner_id"`
+			RecordingID int64  `json:"recording_id"`
 		}
 		if err := json.Unmarshal(message, &cmd); err != nil {
 			continue
@@ -527,10 +541,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case "force_release":
 			_ = s.tunerPool.ForceReleaseTuner(cmd.TunerID, client.ip)
 			_ = client.writeJSON(map[string]interface{}{
-				"event":   "tuner_released",
+				"event":    "tuner_released",
 				"tuner_id": cmd.TunerID,
 			})
 			s.BroadcastTuners(s.tunerPool.GetStatus())
+		case "stop_recording_and_tune":
+			_ = s.recorder.StopRecording(cmd.RecordingID)
+			s.BroadcastTuners(s.tunerPool.GetStatus())
+			s.handleWSTune(client, cmd.ChannelID)
 		}
 	}
 }
@@ -572,10 +590,12 @@ func (s *Server) handleWSTune(client *wsClient, channelID int64) {
 		log.Printf("[Server] AllocateChannel error: %v", err)
 		if conflict, ok := err.(*tuner.TunerConflictError); ok {
 			_ = client.writeJSON(map[string]interface{}{
-				"event":          "conflict",
-				"message":        "All tuners are busy",
-				"active_tuners":  conflict.ActiveTuners,
-				"target_channel": channel,
+				"event":                "conflict",
+				"message":              "All tuners are busy",
+				"active_tuners":        conflict.ActiveTuners,
+				"has_active_recording": conflict.HasActiveRecording,
+				"active_recordings":    conflict.ActiveRecordings,
+				"target_channel":       channel,
 			})
 			return
 		}
@@ -641,15 +661,39 @@ func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *
 		ConnectedAt: time.Now(),
 	}
 
-	t, err := s.tunerPool.AllocateChannel(channel, viewerSession)
+	audioTrack := 0
+	if at := r.URL.Query().Get("audio_track"); at != "" {
+		if v, err := strconv.Atoi(at); err == nil {
+			audioTrack = v
+		}
+	}
+	subTrack := -1
+	if st := r.URL.Query().Get("sub_track"); st != "" {
+		if v, err := strconv.Atoi(st); err == nil {
+			subTrack = v
+		}
+	}
+
+	t, err := s.tunerPool.AllocateChannelTrack(channel, audioTrack, subTrack, viewerSession)
 	if err != nil {
 		log.Printf("[Server] streamChannel allocate error: %v", err)
+		if conflict, ok := err.(*tuner.TunerConflictError); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":                "all tuners busy",
+				"has_active_recording": conflict.HasActiveRecording,
+				"active_recordings":    conflict.ActiveRecordings,
+				"active_tuners":        conflict.ActiveTuners,
+			})
+			return
+		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	s.BroadcastTuners(s.tunerPool.GetStatus())
 
-	ch := t.Subscribe(channel.ID, sessionID)
+	ch := t.SubscribeTrack(channel.ID, audioTrack, subTrack, sessionID)
 	if ch == nil {
 		http.Error(w, "stream unavailable", http.StatusInternalServerError)
 		return
@@ -1221,4 +1265,297 @@ func jsonResponse(w http.ResponseWriter, code int, data interface{}) {
 
 func jsonError(w http.ResponseWriter, message string, code int) {
 	jsonResponse(w, code, map[string]string{"error": message})
+}
+
+func (s *Server) handleChannelTracks(w http.ResponseWriter, r *http.Request, channelID int64) {
+	c, err := s.db.GetChannel(channelID)
+	if err != nil {
+		jsonError(w, "channel not found", http.StatusNotFound)
+		return
+	}
+	tracks := s.tunerPool.GetChannelTracks(c)
+	jsonResponse(w, http.StatusOK, tracks)
+}
+
+func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		recs, err := s.db.ListRecordings()
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Merge live file size & status from active jobs
+		activeJobs := s.recorder.GetActiveJobs()
+		activeMap := make(map[int64]*db.Recording)
+		for _, job := range activeJobs {
+			activeMap[job.ID] = job
+		}
+		for i := range recs {
+			if active, ok := activeMap[recs[i].ID]; ok {
+				recs[i] = *active
+			}
+		}
+		jsonResponse(w, http.StatusOK, recs)
+
+	case http.MethodPost:
+		var req struct {
+			ChannelID   int64     `json:"channel_id"`
+			Title       string    `json:"title"`
+			Description string    `json:"description"`
+			StartTime   time.Time `json:"start_time"`
+			EndTime     time.Time `json:"end_time"`
+			Duration    int       `json:"duration"`
+			EventID     int       `json:"event_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		channel, err := s.db.GetChannel(req.ChannelID)
+		if err != nil {
+			jsonError(w, "channel not found", http.StatusBadRequest)
+			return
+		}
+		if req.Duration <= 0 && !req.EndTime.IsZero() && !req.StartTime.IsZero() {
+			req.Duration = int(req.EndTime.Sub(req.StartTime).Seconds())
+		}
+		if req.Duration <= 0 {
+			req.Duration = 3600
+		}
+		if req.StartTime.IsZero() {
+			req.StartTime = time.Now()
+		}
+		if req.EndTime.IsZero() {
+			req.EndTime = req.StartTime.Add(time.Duration(req.Duration) * time.Second)
+		}
+		if req.Title == "" {
+			req.Title = fmt.Sprintf("%s Recording", channel.Name)
+		}
+
+		// If scheduled start time is immediately (within 10s), start instant recording
+		if req.StartTime.Before(time.Now().Add(10 * time.Second)) {
+			activeRec, err := s.recorder.StartInstantRecording(channel.ID, req.Title, req.Duration)
+			if err != nil {
+				if conflict, ok := err.(*tuner.TunerConflictError); ok {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":                err.Error(),
+						"has_active_recording": conflict.HasActiveRecording,
+						"active_recordings":    conflict.ActiveRecordings,
+						"active_tuners":        conflict.ActiveTuners,
+					})
+					return
+				}
+				jsonError(w, err.Error(), http.StatusConflict)
+				return
+			}
+			s.BroadcastTuners(s.tunerPool.GetStatus())
+			jsonResponse(w, http.StatusCreated, activeRec)
+			return
+		}
+
+		rec := &db.Recording{
+			ChannelID:   channel.ID,
+			ChannelName: channel.Name,
+			Title:       req.Title,
+			Description: req.Description,
+			StartTime:   req.StartTime,
+			EndTime:     req.EndTime,
+			Duration:    req.Duration,
+			EventID:     req.EventID,
+			Status:      "scheduled",
+			CreatedAt:   time.Now(),
+		}
+
+		if err := s.db.CreateRecording(rec); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusCreated, rec)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleRecordingInstant(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ChannelID int64  `json:"channel_id"`
+		Title     string `json:"title"`
+		Duration  int    `json:"duration"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	rec, err := s.recorder.StartInstantRecording(req.ChannelID, req.Title, req.Duration)
+	if err != nil {
+		if conflict, ok := err.(*tuner.TunerConflictError); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":                err.Error(),
+				"has_active_recording": conflict.HasActiveRecording,
+				"active_recordings":    conflict.ActiveRecordings,
+				"active_tuners":        conflict.ActiveTuners,
+			})
+			return
+		}
+		jsonError(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.BroadcastTuners(s.tunerPool.GetStatus())
+	jsonResponse(w, http.StatusCreated, rec)
+}
+
+func (s *Server) handleRecordingDetail(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/recordings/")
+	parts := strings.Split(path, "/")
+
+	// Instant Recording: POST /api/recordings/instant
+	if len(parts) > 0 && parts[0] == "instant" && r.Method == http.MethodPost {
+		var req struct {
+			ChannelID int64  `json:"channel_id"`
+			Title     string `json:"title"`
+			Duration  int    `json:"duration"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		rec, err := s.recorder.StartInstantRecording(req.ChannelID, req.Title, req.Duration)
+		if err != nil {
+			if conflict, ok := err.(*tuner.TunerConflictError); ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":                err.Error(),
+					"has_active_recording": conflict.HasActiveRecording,
+					"active_recordings":    conflict.ActiveRecordings,
+					"active_tuners":        conflict.ActiveTuners,
+				})
+				return
+			}
+			jsonError(w, err.Error(), http.StatusConflict)
+			return
+		}
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+		jsonResponse(w, http.StatusCreated, rec)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		jsonError(w, "invalid recording id", http.StatusBadRequest)
+		return
+	}
+
+	// Action: POST /api/recordings/{id}/stop
+	if len(parts) > 1 && parts[1] == "stop" && r.Method == http.MethodPost {
+		if err := s.recorder.StopRecording(id); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "stopped"})
+		return
+	}
+
+	// Action: POST /api/recordings/{id}/stop-and-tune
+	if len(parts) > 1 && parts[1] == "stop-and-tune" && r.Method == http.MethodPost {
+		if err := s.recorder.StopRecording(id); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "stopped", "id": id})
+		return
+	}
+
+	// Action: GET/HEAD /api/recordings/{id}/stream
+	if len(parts) > 1 && parts[1] == "stream" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		rec, err := s.db.GetRecording(id)
+		if err != nil {
+			jsonError(w, "recording not found", http.StatusNotFound)
+			return
+		}
+		if _, err := os.Stat(rec.FilePath); os.IsNotExist(err) {
+			jsonError(w, "recording file not found on disk", http.StatusNotFound)
+			return
+		}
+
+		servePath := rec.FilePath
+		contentType := "video/mp2t"
+
+		// Prefer faststart .mp4 for browser HTML5 playback if available or generate on-demand
+		mp4Path := strings.TrimSuffix(rec.FilePath, ".ts") + ".mp4"
+		if _, err := os.Stat(mp4Path); err == nil {
+			servePath = mp4Path
+			contentType = "video/mp4"
+		} else if strings.HasSuffix(rec.FilePath, ".ts") {
+			cmd := exec.Command("ffmpeg", "-i", rec.FilePath, "-c", "copy", "-movflags", "+faststart", mp4Path, "-y")
+			if err := cmd.Run(); err == nil {
+				servePath = mp4Path
+				contentType = "video/mp4"
+			}
+		}
+
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		http.ServeFile(w, r, servePath)
+		return
+	}
+
+	// Action: GET/HEAD /api/recordings/{id}/download
+	if len(parts) > 1 && parts[1] == "download" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		rec, err := s.db.GetRecording(id)
+		if err != nil {
+			jsonError(w, "recording not found", http.StatusNotFound)
+			return
+		}
+		if _, err := os.Stat(rec.FilePath); os.IsNotExist(err) {
+			jsonError(w, "recording file not found on disk", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(rec.FilePath)))
+		http.ServeFile(w, r, rec.FilePath)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		rec, err := s.db.GetRecording(id)
+		if err != nil {
+			jsonError(w, "recording not found", http.StatusNotFound)
+			return
+		}
+		jsonResponse(w, http.StatusOK, rec)
+
+	case http.MethodDelete:
+		rec, err := s.db.GetRecording(id)
+		if err == nil {
+			_ = s.recorder.StopRecording(id)
+			if rec.FilePath != "" {
+				_ = os.Remove(rec.FilePath)
+				_ = os.Remove(strings.TrimSuffix(rec.FilePath, ".ts") + ".mp4")
+			}
+		}
+		if err := s.db.DeleteRecording(id); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "deleted"})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }

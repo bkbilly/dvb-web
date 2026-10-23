@@ -109,9 +109,12 @@ type PipelineConfig struct {
 	InputPath      string       // e.g. "/dev/dvb/adapter0/dvr0" or pipe
 	InputPipe      io.Reader    // Piped TS reader (preferred for safe multi-consumer fanning)
 	IsMock         bool         // If mock, generates test pattern
+	IsRadio        bool         // True for audio-only radio channels (no video stream in DVB)
 	ServiceID      int          // DVB Program / Service ID
 	VideoUDPPort   int          // Local UDP port to stream RTP H.264
 	AudioUDPPort   int          // Local UDP port to stream RTP Opus
+	AudioTrackIdx  int          // Selected audio stream index (0, 1, 2...)
+	SubtitleTrack  int          // Selected subtitle stream index (-1 = off, 0, 1...)
 	HWType         HardwareType // Selected HW type (or auto)
 	VideoBitrate   string       // e.g. "2500k"
 	AVSyncOffsetMs int          // Calibrated audio delay to align with video pipeline
@@ -169,10 +172,17 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 
 	// Input source
 	if cfg.IsMock {
-		args = append(args,
-			"-f", "lavfi", "-re", "-i", "testsrc=size=1280x720:rate=25",
-			"-f", "lavfi", "-re", "-i", "sine=frequency=1000:sample_rate=48000",
-		)
+		if cfg.IsRadio {
+			args = append(args,
+				"-f", "lavfi", "-re", "-i", "color=c=0x0f172a:s=1280x720:r=10",
+				"-f", "lavfi", "-re", "-i", "sine=frequency=440:sample_rate=48000",
+			)
+		} else {
+			args = append(args,
+				"-f", "lavfi", "-re", "-i", "testsrc=size=1280x720:rate=25",
+				"-f", "lavfi", "-re", "-i", "sine=frequency=1000:sample_rate=48000",
+			)
+		}
 	} else if cfg.InputPipe != nil {
 		args = append(args, "-i", "pipe:0")
 	} else {
@@ -180,64 +190,134 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	}
 
 	// Stream mapping: multiplex Video and Audio together into one single stream
+	audioIdx := cfg.AudioTrackIdx
+	if audioIdx < 0 {
+		audioIdx = 0
+	}
+	subIdx := cfg.SubtitleTrack
+
 	if cfg.IsMock {
-		args = append(args, "-map", "0:v:0", "-map", "1:a:0")
+		if cfg.IsRadio {
+			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
+		} else if subIdx >= 0 {
+			args = append(args,
+				"-filter_complex", "[0:v]drawtext=text='[DVB Live Subtitles - CC]':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=6:x=(w-text_w)/2:y=h-80[v]",
+				"-map", "[v]",
+				"-map", "1:a:0",
+			)
+		} else {
+			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
+		}
+	} else if cfg.IsRadio {
+		// Radio station (audio-only): synthesize a lightweight static video background
+		// so browser <video> engines maintain flawless timing and synchronized playback
+		audioMap := fmt.Sprintf("0:a:%d?", audioIdx)
+		if cfg.ServiceID > 0 {
+			audioMap = fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
+		}
+		args = append(args,
+			"-filter_complex", "color=c=0x0f172a:s=1280x720:r=10[v]",
+			"-map", "[v]",
+			"-map", audioMap,
+		)
 	} else if cfg.ServiceID > 0 {
-		args = append(args,
-			"-map", fmt.Sprintf("0:p:%d:v:0", cfg.ServiceID),
-			"-map", fmt.Sprintf("0:p:%d:a:0?", cfg.ServiceID),
-		)
+		audioMap := fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
+		if subIdx >= 0 {
+			// Subtitle overlay burns DVB subtitles directly into video frames with 100% A/V/Sub synchronization
+			filter := fmt.Sprintf("[0:p:%d:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];[main][0:p:%d:s:%d]overlay=ts_sync_mode=default:eof_action=pass[outv]", cfg.ServiceID, cfg.ServiceID, subIdx)
+			args = append(args,
+				"-filter_complex", filter,
+				"-map", "[outv]",
+				"-map", audioMap,
+			)
+		} else {
+			if hw != HW_VAAPI {
+				args = append(args, "-vf", "yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1")
+			}
+			args = append(args,
+				"-map", fmt.Sprintf("0:p:%d:v:0", cfg.ServiceID),
+				"-map", audioMap,
+			)
+		}
 	} else {
-		args = append(args, "-map", "0:v:0", "-map", "0:a:0?")
+		if subIdx >= 0 {
+			filter := fmt.Sprintf("[0:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];[main][0:s:%d]overlay=ts_sync_mode=default:eof_action=pass[outv]", subIdx)
+			args = append(args,
+				"-filter_complex", filter,
+				"-map", "[outv]",
+				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
+			)
+		} else {
+			if hw != HW_VAAPI {
+				args = append(args, "-vf", "yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1")
+			}
+			args = append(args,
+				"-map", "0:v:0",
+				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
+			)
+		}
 	}
 
-	// Video filter chain: aspect ratio correction + de-interlace
-	if !cfg.IsMock && hw != HW_VAAPI {
-		args = append(args, "-vf", "yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1")
-	}
-
-	switch hw {
-	case HW_NVENC:
-		args = append(args,
-			"-c:v", "h264_nvenc",
-			"-preset", "p1",
-			"-tune", "ull",
-			"-zerolatency", "1",
-			"-b:v", bitrate,
-			"-g", "25",
-			"-bf", "0",
-			"-pix_fmt", "yuv420p",
-		)
-	case HW_VAAPI:
-		args = append(args,
-			"-c:v", "h264_vaapi",
-			"-b:v", bitrate,
-			"-g", "25",
-			"-bf", "0",
-		)
-	case HW_V4L2M2M:
-		args = append(args,
-			"-c:v", "h264_v4l2m2m",
-			"-b:v", bitrate,
-			"-g", "25",
-		)
-	default:
-		// Universal CPU fallback
+	if cfg.IsRadio {
+		// Radio uses minimal CPU static frame encoding (10 fps, ~15 kbps)
 		args = append(args,
 			"-c:v", "libx264",
 			"-preset", "ultrafast",
-			"-tune", "zerolatency",
-			"-b:v", bitrate,
+			"-tune", "stillimage",
+			"-b:v", "64k",
 			"-g", "25",
 			"-bf", "0",
 			"-pix_fmt", "yuv420p",
 		)
+	} else {
+		switch hw {
+		case HW_NVENC:
+			args = append(args,
+				"-c:v", "h264_nvenc",
+				"-preset", "p1",
+				"-tune", "ull",
+				"-zerolatency", "1",
+				"-b:v", bitrate,
+				"-g", "25",
+				"-bf", "0",
+				"-pix_fmt", "yuv420p",
+			)
+		case HW_VAAPI:
+			args = append(args,
+				"-c:v", "h264_vaapi",
+				"-b:v", bitrate,
+				"-g", "25",
+				"-bf", "0",
+			)
+		case HW_V4L2M2M:
+			args = append(args,
+				"-c:v", "h264_v4l2m2m",
+				"-b:v", bitrate,
+				"-g", "25",
+			)
+		default:
+			// Universal CPU fallback
+			args = append(args,
+				"-c:v", "libx264",
+				"-preset", "ultrafast",
+				"-tune", "zerolatency",
+				"-b:v", bitrate,
+				"-g", "25",
+				"-bf", "0",
+				"-pix_fmt", "yuv420p",
+			)
+		}
+	}
+
+	audioBitrate := "128k"
+	if cfg.IsRadio {
+		audioBitrate = "192k" // Higher fidelity for radio music
 	}
 
 	// Unified MPEG-TS output with AAC stereo audio (natural PTS preserved for perfect A/V sync)
 	args = append(args,
 		"-c:a", "aac",
-		"-b:a", "128k",
+		"-b:a", audioBitrate,
 		"-ar", "48000",
 		"-ac", "2",
 		"-f", "mpegts",
