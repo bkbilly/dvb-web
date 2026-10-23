@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DVB-Web — Live TV & EPG</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220%22 fill=%22%233b82f6%22><text y=%2226%22 font-size=%2228%22>📺</text></svg>">
+</head>
+<body>
+  <!-- Header Bar -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">📺</span>
+        <span class="logo-text">DVB<span class="highlight">Web</span></span>
+      </div>
+      <div id="tuner-badge" class="tuner-badge badge-idle">Idle (0% CPU)</div>
+    </div>
+
+    <!-- Persistent URL Navigation Tabs -->
+    <nav class="header-nav">
+      <a href="#/tv" class="nav-btn" data-tab="tv">Live TV</a>
+      <a href="#/epg" class="nav-btn" data-tab="epg">TV Guide</a>
+      <a href="#/settings" class="nav-btn" data-tab="settings">Settings</a>
+    </nav>
+
+    <!-- Global Language Picker -->
+    <div class="header-right">
+      <label for="global-lang-select" class="lang-label">EPG Language:</label>
+      <select id="global-lang-select" class="lang-select">
+        <option value="" disabled selected>Loading...</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="app-content">
+    
+    <!-- TAB 1: LIVE TV -->
+    <section id="tab-tv" class="tab-pane">
+      <div class="tv-layout">
+        
+        <!-- Video Player Stage -->
+        <div class="video-container" id="video-wrapper">
+          <video id="tv-video" autoplay playsinline></video>
+          
+          <!-- Idle / Standby Overlay -->
+          <div id="standby-overlay" class="standby-overlay">
+            <div class="standby-card">
+              <span id="standby-icon" class="standby-icon">💤</span>
+              <h3 id="standby-title">Tuner is in Standby (0% CPU)</h3>
+              <p id="standby-desc">Select any channel below to wake the tuner and start instant streaming.</p>
+              <button id="btn-standby-action" class="btn btn-primary hidden" style="margin-top:1rem;">Reconnect Stream</button>
+            </div>
+          </div>
+
+          <!-- Stream Tuning / Buffering Loader -->
+          <div id="stream-loader" class="stream-loader hidden">
+            <div class="loader-card">
+              <div class="spinner"></div>
+              <div class="loader-info">
+                <h4 id="loader-channel-name">Tuning Channel...</h4>
+                <p id="loader-channel-desc">Locking DVB frequency & buffering stream</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Floating Stream Alert Banner -->
+          <div id="stream-alert" class="stream-alert hidden">
+            <span class="stream-alert-icon">⚠️</span>
+            <span id="stream-alert-msg" class="stream-alert-msg">Stream was forced to stop.</span>
+            <button id="btn-close-stream-alert" class="btn-close-alert" title="Dismiss">✕</button>
+          </div>
+
+          <!-- Video OSD (On Screen Display) -->
+          <div id="video-osd" class="video-osd hidden">
+            <div class="osd-channel">
+              <div class="osd-info">
+                <div class="osd-number-name">
+                  <span id="osd-channel-num" class="badge">1</span>
+                  <span id="osd-channel-name">Channel Name</span>
+                  <span id="osd-signal-badge" class="osd-signal-badge hidden">📶 <span id="osd-signal-val">--%</span></span>
+                </div>
+                <div id="osd-now-title" class="osd-show-title">Program Title</div>
+                <div class="osd-time-bar-wrapper">
+                  <span id="osd-time-start">12:00</span>
+                  <div class="osd-progress-bg">
+                    <div id="osd-progress-fill" class="osd-progress-fill"></div>
+                  </div>
+                  <span id="osd-time-end">13:00</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Zap Indicator -->
+          <div id="zap-indicator" class="zap-indicator hidden">
+            <span id="zap-number">1</span>
+          </div>
+
+          <!-- Player Controls Bar -->
+          <div class="player-controls">
+            <button id="btn-prev-ch" class="ctrl-btn" title="Previous Channel">⏮</button>
+            <button id="btn-next-ch" class="ctrl-btn" title="Next Channel">⏭</button>
+            <div class="vol-group">
+              <button id="btn-mute" class="ctrl-btn" title="Mute/Unmute">🔊</button>
+              <input type="range" id="vol-slider" min="0" max="1" step="0.05" value="1" class="vol-slider">
+            </div>
+            <div class="player-spacer"></div>
+            <button id="btn-aspect-ratio" class="ctrl-btn aspect-btn" title="Cycle Aspect Ratio (Auto 16:9 / 4:3 / Fill / Zoom)">16:9</button>
+            <span id="latency-tag" class="latency-tag">⚡ Live TV (Synced Stream)</span>
+            <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
+          </div>
+        </div>
+
+        <!-- Channel Sidebar -->
+        <aside class="channel-sidebar">
+          <div class="sidebar-header">
+            <h3>Channels</h3>
+            <input type="text" id="channel-search" placeholder="Filter channels..." class="channel-search-input">
+          </div>
+          <div id="channel-list" class="channel-list">
+            <!-- Dynamic channel cards populated by JS -->
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- TAB 2: TV GUIDE (MODERN TIMELINE EPG) -->
+    <section id="tab-epg" class="tab-pane">
+      <div class="epg-screen">
+        <div class="epg-toolbar">
+          <div class="toolbar-left">
+            <div class="epg-title-group">
+              <h2 class="epg-title">Live TV Guide</h2>
+              <span id="epg-live-clock" class="epg-live-clock">--:--:--</span>
+            </div>
+          </div>
+          <div class="epg-day-selector" id="epg-day-selector">
+            <!-- Dynamically populated day tabs: Today, Tomorrow, +2d... -->
+          </div>
+          <div class="toolbar-right">
+            <button id="btn-epg-prev" class="btn btn-secondary epg-nav-btn" title="Scroll 2 hours back">◀ -2h</button>
+            <button id="btn-epg-now" class="btn btn-primary epg-nav-btn" title="Jump to Current Time">
+              <span class="btn-now-dot">🔴</span>
+              <span class="btn-now-text-full">Jump to Current Time</span>
+              <span class="btn-now-text-short">Now</span>
+            </button>
+            <button id="btn-epg-next" class="btn btn-secondary epg-nav-btn" title="Scroll 2 hours forward">+2h ▶</button>
+          </div>
+        </div>
+
+        <!-- TV Guide Timeline Grid -->
+        <div class="epg-timeline-wrapper" id="epg-timeline-wrapper">
+          <!-- Timeline Time Header -->
+          <div class="epg-timeline-header">
+            <div class="epg-header-corner">Channel</div>
+            <div class="epg-time-ruler-scroll" id="epg-ruler-scroll">
+              <div id="epg-time-ruler" class="epg-time-ruler">
+                <!-- Populated by JS -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Grid Body (Channels + Programs Track) -->
+          <div class="epg-grid-scroll" id="epg-grid-scroll">
+            <div id="epg-channels-column" class="epg-channels-column">
+              <!-- Channel items on the left -->
+            </div>
+            <div id="epg-events-canvas" class="epg-events-canvas">
+              <!-- Live Red NOW Line Indicator -->
+              <div id="epg-now-marker" class="epg-now-marker">
+                <span class="now-marker-badge">NOW</span>
+              </div>
+              <div id="epg-rows-container" class="epg-rows-container">
+                <!-- Channel program tracks populated by JS -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: SETTINGS & TUNER ADMIN -->
+    <section id="tab-settings" class="tab-pane">
+      <div class="settings-container">
+        
+        <!-- Available Tuners Card -->
+        <div class="settings-card">
+          <div class="card-header">
+            <h3>📡 Available Tuners</h3>
+            <button id="btn-refresh-tuners" class="btn btn-secondary">Refresh</button>
+          </div>
+          <p class="card-desc">Select which physical or virtual tuners are active and available for streaming.</p>
+          <div id="tuner-list-container" class="tuner-list">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Channel Scanner Card -->
+        <div class="settings-card">
+          <div class="card-header">
+            <h3>🔍 Channel Scanner</h3>
+          </div>
+          <p class="card-desc">Sweep broadcast frequencies with your active tuner to discover new channels.</p>
+          <div class="scanner-controls">
+            <button id="btn-start-scan" class="btn btn-primary">Start Channel Scan</button>
+            <span id="scan-status" class="scan-status"></span>
+          </div>
+
+          <!-- Scan Results Diff Modal / Panel -->
+          <div id="scan-results-box" class="scan-results-box hidden">
+            <h4>Scan Results</h4>
+            <div class="scan-stats">
+              <span id="stat-discovered" class="stat-pill stat-new">0 Discovered</span>
+              <span id="stat-missing" class="stat-pill stat-missing">0 Missing</span>
+            </div>
+            
+            <div id="missing-channels-section" class="missing-section hidden">
+              <h5>The following channels were not found during the scan:</h5>
+              <div id="missing-channels-list" class="tag-list"></div>
+              <button id="btn-prune-missing" class="btn btn-danger">Delete Missing Channels</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Channel Manager & Order Card -->
+        <div class="settings-card">
+          <div class="card-header">
+            <h3>📋 Channel Manager & Order</h3>
+          </div>
+          <p class="card-desc">Drag and drop channels (☰) to change their order. The new order immediately reflects across Live TV and the TV Guide without interrupting the stream.</p>
+          <div id="channel-admin-table" class="channel-admin-table">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- External Players & Media Servers Card (Jellyfin, Plex, Kodi, VLC) -->
+        <div class="settings-card">
+          <div class="card-header">
+            <h3>🍿 External Players & Media Servers (Jellyfin, Plex, Kodi, VLC)</h3>
+          </div>
+          <p class="card-desc">Watch live TV directly on Jellyfin, Plex, Kodi, or VLC with built-in HDHomeRun emulation, standard M3U playlists, and XMLTV electronic program guide.</p>
+          
+          <div class="integration-grid">
+            <div class="integration-item">
+              <div class="integration-title">
+                <strong>📡 HDHomeRun Tuner (Plex & Jellyfin)</strong>
+                <span class="badge">Recommended</span>
+              </div>
+              <p class="integration-desc">In <strong>Plex</strong> (Live TV & DVR) or <strong>Jellyfin</strong> (Live TV &gt; Tuner Devices), add an HDHomeRun tuner using this server address:</p>
+              <div class="copy-input-group">
+                <input type="text" id="int-hdhr-url" readonly class="form-input readonly code-font">
+                <button type="button" class="btn btn-outline btn-copy" data-target="int-hdhr-url">📋 Copy</button>
+              </div>
+            </div>
+
+            <div class="integration-item">
+              <div class="integration-title">
+                <strong>📋 M3U Channel Playlist (Jellyfin, VLC, Kodi)</strong>
+              </div>
+              <p class="integration-desc">Import into <strong>Jellyfin</strong> as an M3U Tuner, or open directly in <strong>VLC</strong> (Media &gt; Open Network Stream) or <strong>Kodi</strong>:</p>
+              <div class="copy-input-group">
+                <input type="text" id="int-m3u-url" readonly class="form-input readonly code-font">
+                <button type="button" class="btn btn-outline btn-copy" data-target="int-m3u-url">📋 Copy</button>
+                <a id="int-m3u-download" href="/playlist.m3u" download class="btn btn-outline">⬇️ Download M3U</a>
+              </div>
+            </div>
+
+            <div class="integration-item">
+              <div class="integration-title">
+                <strong>📅 XMLTV Electronic Program Guide (EPG)</strong>
+              </div>
+              <p class="integration-desc">In <strong>Jellyfin</strong> (Live TV &gt; TV Guide Data Providers) or <strong>Plex</strong>, add this URL as an XMLTV guide source:</p>
+              <div class="copy-input-group">
+                <input type="text" id="int-epg-url" readonly class="form-input readonly code-font">
+                <button type="button" class="btn btn-outline btn-copy" data-target="int-epg-url">📋 Copy</button>
+                <a id="int-epg-download" href="/epg.xml" download class="btn btn-outline">⬇️ Download XML</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Global Settings Card -->
+        <div class="settings-card">
+          <div class="card-header">
+            <h3>⚙️ Video & Hardware Preferences</h3>
+          </div>
+          <form id="global-settings-form" class="settings-form">
+            <div class="form-row">
+              <label>Detected Hardware Acceleration:</label>
+              <input type="text" id="cfg-detected-hw" readonly class="form-input readonly">
+            </div>
+            <div class="form-row">
+              <label>Transcoder Mode:</label>
+              <select id="cfg-transcoder-mode" class="form-select">
+                <option value="auto">Auto-detect (Recommended)</option>
+                <option value="vaapi">Force Intel/AMD VA-API</option>
+                <option value="nvenc">Force NVIDIA NVENC</option>
+                <option value="v4l2m2m">Force Raspberry Pi V4L2 M2M</option>
+                <option value="cpu">Force CPU (libx264 ultrafast)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>Video Stream Bitrate:</label>
+              <select id="cfg-video-bitrate" class="form-select">
+                <option value="1500k">1500 kbps (Low Bandwidth)</option>
+                <option value="2500k">2500 kbps (Standard 720p/1080p)</option>
+                <option value="4500k">4500 kbps (High Quality HD)</option>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+          </form>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Conflict Modal (When all tuners are busy) -->
+  <div id="conflict-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="modal-icon">⚠️</span>
+        <h3>Tuner Conflict</h3>
+      </div>
+      <p id="conflict-message">All tuners are currently in use on different frequencies.</p>
+      <div id="conflict-tuner-details" class="conflict-details"></div>
+      <div class="modal-actions">
+        <button id="btn-cancel-conflict" class="btn btn-secondary">Cancel</button>
+        <button id="btn-force-kick" class="btn btn-danger">Force Kick & Take Over Tuner</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- EPG Event Details Modal -->
+  <div id="epg-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-event-title">Program Title</h3>
+        <button id="btn-close-epg-modal" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-meta">
+          <span id="modal-event-channel" class="badge">BBC One</span>
+          <span id="modal-event-time" class="time-range">20:00 - 21:00</span>
+        </div>
+        <p id="modal-event-desc" class="modal-desc">Description</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="mpegts.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,1224 @@
+package api
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"encoding/xml"
+	"fmt"
+	"hash/crc32"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
+
+	"dvb-web/internal/db"
+	"dvb-web/internal/epg"
+	"dvb-web/internal/transcoder"
+	"dvb-web/internal/tuner"
+	webRTCManager "dvb-web/internal/webrtc"
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type Server struct {
+	db         *db.Database
+	tunerPool  *tuner.Pool
+	transcoder *transcoder.Detector
+	webrtcMgr  *webRTCManager.Manager
+	epgParser  *epg.Parser
+	wsClients  map[*wsClient]bool
+	wsMu       sync.RWMutex
+}
+
+type wsClient struct {
+	conn      *websocket.Conn
+	sessionID string
+	ip        string
+	writeMu   sync.Mutex
+}
+
+func (c *wsClient) writeJSON(v interface{}) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.WriteJSON(v)
+}
+
+func (c *wsClient) writeMessage(messageType int, data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.WriteMessage(messageType, data)
+}
+
+func NewServer(database *db.Database, pool *tuner.Pool, detector *transcoder.Detector, rtcMgr *webRTCManager.Manager, epgP *epg.Parser) *Server {
+	s := &Server{
+		db:         database,
+		tunerPool:  pool,
+		transcoder: detector,
+		webrtcMgr:  rtcMgr,
+		epgParser:  epgP,
+		wsClients:  make(map[*wsClient]bool),
+	}
+	s.startSignalMonitor()
+	s.startHDHRDiscovery()
+	return s
+}
+
+func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
+	// API routes
+	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/channels", s.handleChannels)
+	mux.HandleFunc("/api/channels/reorder", s.handleReorderChannels)
+	mux.HandleFunc("/api/channels/", s.handleChannelDetail)
+	mux.HandleFunc("/api/scan", s.handleScan)
+	mux.HandleFunc("/api/scan/prune", s.handleScanPrune)
+	mux.HandleFunc("/api/epg", s.handleEPG)
+	mux.HandleFunc("/api/epg/languages", s.handleEPGLanguages)
+	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/tuners/", s.handleTunerAction)
+	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
+	mux.HandleFunc("/api/logos/", s.handleLogoStatic)
+	mux.HandleFunc("/api/stream", s.handleStream)
+
+	// HDHomeRun Emulation (Native Plex & Jellyfin Tuner Support)
+	mux.HandleFunc("/discover.json", s.handleHDHRDiscover)
+	mux.HandleFunc("/lineup_status.json", s.handleHDHRLineupStatus)
+	mux.HandleFunc("/lineup.json", s.handleHDHRLineup)
+	mux.HandleFunc("/lineup.post", s.handleHDHRLineupPost)
+	mux.HandleFunc("/auto/", s.handleAutoStream)
+	mux.HandleFunc("/stream/", s.handleDirectStream)
+
+	// External Player Integration (Jellyfin M3U, Kodi, VLC, XMLTV)
+	mux.HandleFunc("/playlist.m3u", s.handleM3UPlaylist)
+	mux.HandleFunc("/api/playlist.m3u", s.handleM3UPlaylist)
+	mux.HandleFunc("/epg.xml", s.handleXMLTV)
+	mux.HandleFunc("/api/epg.xml", s.handleXMLTV)
+
+	// WebSocket
+	mux.HandleFunc("/ws", s.handleWS)
+
+	// Static Web UI
+	fileServer := http.FileServer(http.Dir(webDir))
+	mux.Handle("/", fileServer)
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	epgLangs, _ := s.db.GetEPGLanguages()
+	if epgLangs == nil {
+		epgLangs = []string{}
+	}
+	status := map[string]interface{}{
+		"tuners":        s.tunerPool.GetStatus(),
+		"hardware":      s.transcoder.GetActiveHardware(),
+		"server_time":   time.Now().UTC(),
+		"default_lang":  s.db.GetSetting("preferred_language", "eng"),
+		"epg_languages": epgLangs,
+	}
+	jsonResponse(w, http.StatusOK, status)
+}
+
+func (s *Server) handleEPGLanguages(w http.ResponseWriter, r *http.Request) {
+	langs, err := s.db.GetEPGLanguages()
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if langs == nil {
+		langs = []string{}
+	}
+	jsonResponse(w, http.StatusOK, langs)
+}
+
+func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		channels, err := s.db.ListChannels()
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, channels)
+
+	case http.MethodPost:
+		var c db.Channel
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := s.db.SaveChannel(&c); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, c)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleReorderChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var order []int64
+	if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.ReorderChannels(order); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/channels/")
+	parts := strings.Split(path, "/")
+	if len(parts) > 0 && parts[0] == "reorder" {
+		s.handleReorderChannels(w, r)
+		return
+	}
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		jsonError(w, "invalid channel id", http.StatusBadRequest)
+		return
+	}
+
+	// Handle Logo Upload: POST /api/channels/{id}/logo
+	if len(parts) > 1 && parts[1] == "logo" && r.Method == http.MethodPost {
+		s.handleLogoUpload(w, r, id)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		c, err := s.db.GetChannel(id)
+		if err != nil {
+			jsonError(w, "channel not found", http.StatusNotFound)
+			return
+		}
+		jsonResponse(w, http.StatusOK, c)
+
+	case http.MethodDelete:
+		if err := s.db.DeleteChannel(id); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "deleted"})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleLogoUpload(w http.ResponseWriter, r *http.Request, channelID int64) {
+	err := r.ParseMultipartForm(10 << 20) // 10 MB max
+	if err != nil {
+		jsonError(w, "file too large or invalid multipart", http.StatusBadRequest)
+		return
+	}
+
+	file, handler, err := r.FormFile("logo")
+	if err != nil {
+		jsonError(w, "logo field is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(handler.Filename))
+	if ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".svg" && ext != ".webp" {
+		jsonError(w, "only png, jpg, svg, and webp images are supported", http.StatusBadRequest)
+		return
+	}
+
+	filename := fmt.Sprintf("ch_%d_%d%s", channelID, time.Now().Unix(), ext)
+	dstPath := filepath.Join(s.db.DataDir(), "logos", filename)
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		jsonError(w, "failed to save logo", http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		jsonError(w, "failed to write logo", http.StatusInternalServerError)
+		return
+	}
+
+	logoURL := "/api/logos/" + filename
+	if err := s.db.UpdateChannelLogo(channelID, logoURL); err != nil {
+		jsonError(w, "failed to update channel logo url", http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{"logo_url": logoURL})
+}
+
+func (s *Server) handleLogoStatic(w http.ResponseWriter, r *http.Request) {
+	filename := strings.TrimPrefix(r.URL.Path, "/api/logos/")
+	filePath := filepath.Join(s.db.DataDir(), "logos", filepath.Clean(filename))
+	http.ServeFile(w, r, filePath)
+}
+
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		AdapterID int `json:"adapter_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	discovered, err := s.tunerPool.ScanFrequencies(req.AdapterID, func(freq int64, progressPct int, foundCount int) {
+		s.BroadcastScanProgress(freq, progressPct, foundCount)
+	})
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	diff, err := s.db.ProcessScanResults(discovered)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, diff)
+}
+
+func (s *Server) handleScanPrune(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ChannelIDs []int64 `json:"channel_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	pruned, err := s.db.PruneChannels(req.ChannelIDs)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"pruned_count": pruned,
+	})
+}
+
+func (s *Server) handleEPG(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	channelID, _ := strconv.ParseInt(q.Get("channel_id"), 10, 64)
+
+	from := time.Now().Add(-2 * time.Hour)
+	to := time.Now().Add(7 * 24 * time.Hour)
+
+	if f := q.Get("from"); f != "" {
+		if t, err := time.Parse(time.RFC3339, f); err == nil {
+			from = t
+		}
+	}
+	if t := q.Get("to"); t != "" {
+		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
+			to = parsed
+		}
+	}
+
+	events, err := s.db.GetEPG(channelID, from, to)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, events)
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.db.GetAllSettings()
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, settings)
+
+	case http.MethodPost:
+		var updates map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			jsonError(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		for k, v := range updates {
+			_ = s.db.SetSetting(k, v)
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "updated"})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleTunerAction(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/tuners/")
+	parts := strings.Split(path, "/")
+	tunerID, err := strconv.Atoi(parts[0])
+	if err != nil {
+		jsonError(w, "invalid tuner id", http.StatusBadRequest)
+		return
+	}
+
+	// Action: POST /api/tuners/{id}/force-release
+	if len(parts) > 1 && parts[1] == "force-release" && r.Method == http.MethodPost {
+		clientIP := extractIP(r)
+		if err := s.tunerPool.ForceReleaseTuner(tunerID, clientIP); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "released"})
+		return
+	}
+
+	// Action: POST /api/tuners/{id}/toggle
+	if len(parts) > 1 && parts[1] == "toggle" && r.Method == http.MethodPost {
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := s.tunerPool.SetTunerEnabled(tunerID, req.Enabled); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "updated", "enabled": req.Enabled})
+		return
+	}
+
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		SessionID string                    `json:"session_id"`
+		Offer     webrtc.SessionDescription `json:"offer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	session, err := s.webrtcMgr.CreateSession(req.SessionID)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := session.PC.SetRemoteDescription(req.Offer); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	answer, err := session.PC.CreateAnswer(nil)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	gatherComplete := webrtc.GatheringCompletePromise(session.PC)
+	if err := session.PC.SetLocalDescription(answer); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	<-gatherComplete
+
+	// Check if this viewer already has an active tuner streaming
+	if activeTuner := s.tunerPool.GetTunerForSession(req.SessionID); activeTuner != nil {
+		vPort, aPort := activeTuner.Ports()
+		session.StartRTPForwarding(vPort, aPort)
+	}
+
+	jsonResponse(w, http.StatusOK, session.PC.LocalDescription())
+}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
+
+	clientIP := extractIP(r)
+	client := &wsClient{
+		conn:      conn,
+		sessionID: sessionID,
+		ip:        clientIP,
+	}
+
+	s.wsMu.Lock()
+	s.wsClients[client] = true
+	s.wsMu.Unlock()
+
+	// Send initial tuner status to newly connected client
+	_ = client.writeJSON(map[string]interface{}{
+		"event":  "tuners_update",
+		"tuners": s.tunerPool.GetStatus(),
+	})
+
+	defer func() {
+		s.wsMu.Lock()
+		delete(s.wsClients, client)
+		s.wsMu.Unlock()
+		s.tunerPool.ReleaseSession(sessionID)
+		s.webrtcMgr.RemoveSession(sessionID)
+		conn.Close()
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+	}()
+
+	// Read pump
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+
+		var cmd struct {
+			Action    string `json:"action"`
+			ChannelID int64  `json:"channel_id"`
+			TunerID   int    `json:"tuner_id"`
+		}
+		if err := json.Unmarshal(message, &cmd); err != nil {
+			continue
+		}
+
+		switch cmd.Action {
+		case "tune":
+			s.handleWSTune(client, cmd.ChannelID)
+		case "force_release":
+			_ = s.tunerPool.ForceReleaseTuner(cmd.TunerID, client.ip)
+			_ = client.writeJSON(map[string]interface{}{
+				"event":   "tuner_released",
+				"tuner_id": cmd.TunerID,
+			})
+			s.BroadcastTuners(s.tunerPool.GetStatus())
+		}
+	}
+}
+
+func (s *Server) handleWSTune(client *wsClient, channelID int64) {
+	channel, err := s.db.GetChannel(channelID)
+	if err != nil {
+		log.Printf("[Server] Tune error: channel ID %d not found in DB", channelID)
+		_ = client.writeJSON(map[string]string{"error": "Channel not found"})
+		return
+	}
+
+	log.Printf("[Server] Tune requested by Session %s (IP: %s) for Channel: %s (Freq: %d Hz, SID: %d)",
+		client.sessionID, client.ip, channel.Name, channel.Frequency, channel.ServiceID)
+
+	kickChan := make(chan string, 1)
+	viewerSession := &tuner.ViewerSession{
+		ID:          client.sessionID,
+		IP:          client.ip,
+		UserAgent:   "DVB-Web Client",
+		ChannelID:   channel.ID,
+		ChannelName: channel.Name,
+		ConnectedAt: time.Now(),
+		KickChan:    kickChan,
+	}
+
+	// Listen for kick events
+	go func() {
+		for reason := range kickChan {
+			_ = client.writeJSON(map[string]interface{}{
+				"event":  "kicked",
+				"reason": reason,
+			})
+		}
+	}()
+
+	t, err := s.tunerPool.AllocateChannel(channel, viewerSession)
+	if err != nil {
+		log.Printf("[Server] AllocateChannel error: %v", err)
+		if conflict, ok := err.(*tuner.TunerConflictError); ok {
+			_ = client.writeJSON(map[string]interface{}{
+				"event":          "conflict",
+				"message":        "All tuners are busy",
+				"active_tuners":  conflict.ActiveTuners,
+				"target_channel": channel,
+			})
+			return
+		}
+		_ = client.writeJSON(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Start RTP Forwarding into this client's WebRTC session
+	videoPort, audioPort := t.Ports()
+	rtcSession := s.webrtcMgr.GetSession(client.sessionID)
+	if rtcSession != nil {
+		rtcSession.StartRTPForwarding(videoPort, audioPort)
+	}
+
+	sig := t.GetSignal()
+	_ = client.writeJSON(map[string]interface{}{
+		"event":        "tuned",
+		"channel":      channel,
+		"tuner_id":     t.ID,
+		"signal":       sig,
+		"now_playing":  channel.NowPlaying,
+		"next_playing": channel.NextPlaying,
+	})
+	s.BroadcastTuners(s.tunerPool.GetStatus())
+}
+
+func getBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = "127.0.0.1:8080"
+	}
+	return fmt.Sprintf("%s://%s", scheme, host)
+}
+
+func getOutboundIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || localAddr == nil {
+		return "127.0.0.1"
+	}
+	return localAddr.IP.String()
+}
+
+func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *db.Channel, sessionID string) {
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
+
+	viewerSession := &tuner.ViewerSession{
+		ID:          sessionID,
+		IP:          extractIP(r),
+		UserAgent:   r.UserAgent(),
+		ChannelID:   channel.ID,
+		ChannelName: channel.Name,
+		ConnectedAt: time.Now(),
+	}
+
+	t, err := s.tunerPool.AllocateChannel(channel, viewerSession)
+	if err != nil {
+		log.Printf("[Server] streamChannel allocate error: %v", err)
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.BroadcastTuners(s.tunerPool.GetStatus())
+
+	ch := t.Subscribe(channel.ID, sessionID)
+	if ch == nil {
+		http.Error(w, "stream unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		s.tunerPool.ReleaseStreamViewer(t.ID, channel.ID, sessionID)
+		s.BroadcastTuners(s.tunerPool.GetStatus())
+	}()
+
+	w.Header().Set("Content-Type", "video/mp2t")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case chunk, ok := <-ch:
+			if !ok {
+				return
+			}
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	channelIDStr := r.URL.Query().Get("channel_id")
+	sessionID := r.URL.Query().Get("session_id")
+
+	channelID, err := strconv.ParseInt(channelIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid channel_id", http.StatusBadRequest)
+		return
+	}
+
+	channel, err := s.db.GetChannel(channelID)
+	if err != nil {
+		http.Error(w, "channel not found", http.StatusNotFound)
+		return
+	}
+
+	s.streamChannel(w, r, channel, sessionID)
+}
+
+func (s *Server) handleAutoStream(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/auto/")
+	path = strings.TrimPrefix(path, "v")
+	path = strings.TrimSuffix(path, ".ts")
+
+	channels, err := s.db.ListChannels()
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	var target *db.Channel
+	if num, err := strconv.Atoi(path); err == nil {
+		for i := range channels {
+			if channels[i].Number == num {
+				target = &channels[i]
+				break
+			}
+		}
+	}
+	if target == nil {
+		if id, err := strconv.ParseInt(path, 10, 64); err == nil {
+			for i := range channels {
+				if channels[i].ID == id {
+					target = &channels[i]
+					break
+				}
+			}
+		}
+	}
+	if target == nil {
+		http.Error(w, "channel not found", http.StatusNotFound)
+		return
+	}
+
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		sessionID = "auto-" + uuid.New().String()
+	}
+	s.streamChannel(w, r, target, sessionID)
+}
+
+func (s *Server) handleDirectStream(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/stream/")
+	path = strings.TrimSuffix(path, ".ts")
+	path = strings.TrimPrefix(path, "v")
+
+	channels, err := s.db.ListChannels()
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	var target *db.Channel
+	if id, err := strconv.ParseInt(path, 10, 64); err == nil {
+		for i := range channels {
+			if channels[i].ID == id {
+				target = &channels[i]
+				break
+			}
+		}
+	}
+	if target == nil {
+		if num, err := strconv.Atoi(path); err == nil {
+			for i := range channels {
+				if channels[i].Number == num {
+					target = &channels[i]
+					break
+				}
+			}
+		}
+	}
+	if target == nil {
+		http.Error(w, "channel not found", http.StatusNotFound)
+		return
+	}
+
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		sessionID = "stream-" + uuid.New().String()
+	}
+	s.streamChannel(w, r, target, sessionID)
+}
+
+func (s *Server) handleHDHRDiscover(w http.ResponseWriter, r *http.Request) {
+	baseURL := getBaseURL(r)
+	tuners := s.tunerPool.GetStatus()
+	tunerCount := len(tuners)
+	if tunerCount == 0 {
+		tunerCount = 1
+	}
+
+	resp := map[string]interface{}{
+		"FriendlyName":    "dvb-web",
+		"ModelNumber":     "HDTC-2US",
+		"FirmwareName":    "hdhomeruntc_atsc",
+		"FirmwareVersion": "20230505",
+		"DeviceID":        "10405060",
+		"DeviceAuth":      "dvbweb12345",
+		"TunerCount":      tunerCount,
+		"BaseURL":         baseURL,
+		"LineupURL":       baseURL + "/lineup.json",
+	}
+	jsonResponse(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleHDHRLineupStatus(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]interface{}{
+		"ScanInProgress": 0,
+		"ScanPossible":   1,
+		"Source":         "Antenna",
+		"SourceList":     []string{"Antenna"},
+	}
+	jsonResponse(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleHDHRLineup(w http.ResponseWriter, r *http.Request) {
+	channels, err := s.db.ListChannels()
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	baseURL := getBaseURL(r)
+	type LineupItem struct {
+		GuideNumber string `json:"GuideNumber"`
+		GuideName   string `json:"GuideName"`
+		URL         string `json:"URL"`
+	}
+
+	var lineup []LineupItem
+	for _, ch := range channels {
+		if !ch.Enabled {
+			continue
+		}
+		guideNum := strconv.Itoa(ch.Number)
+		if ch.Number <= 0 {
+			guideNum = strconv.FormatInt(ch.ID, 10)
+		}
+		lineup = append(lineup, LineupItem{
+			GuideNumber: guideNum,
+			GuideName:   ch.Name,
+			URL:         fmt.Sprintf("%s/auto/v%s", baseURL, guideNum),
+		})
+	}
+	jsonResponse(w, http.StatusOK, lineup)
+}
+
+func (s *Server) handleHDHRLineupPost(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleM3UPlaylist(w http.ResponseWriter, r *http.Request) {
+	channels, err := s.db.ListChannels()
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	baseURL := getBaseURL(r)
+	var sb strings.Builder
+	sb.WriteString("#EXTM3U\n")
+
+	for _, ch := range channels {
+		if !ch.Enabled {
+			continue
+		}
+		logoAttr := ""
+		if ch.LogoURL != "" {
+			if strings.HasPrefix(ch.LogoURL, "http") {
+				logoAttr = fmt.Sprintf(" tvg-logo=\"%s\"", ch.LogoURL)
+			} else {
+				logoAttr = fmt.Sprintf(" tvg-logo=\"%s%s\"", baseURL, ch.LogoURL)
+			}
+		}
+		guideNum := ch.Number
+		if guideNum <= 0 {
+			guideNum = int(ch.ID)
+		}
+
+		sb.WriteString(fmt.Sprintf(
+			"#EXTINF:-1 tvg-id=\"%d\" tvg-name=\"%s\" tvg-chno=\"%d\"%s group-title=\"DVB\",%s\n",
+			ch.ID, ch.Name, guideNum, logoAttr, ch.Name,
+		))
+		sb.WriteString(fmt.Sprintf("%s/stream/%d\n", baseURL, ch.ID))
+	}
+
+	w.Header().Set("Content-Type", "application/x-mpegurl; charset=utf-8")
+	w.Header().Set("Content-Disposition", "inline; filename=\"dvb-web.m3u\"")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Write([]byte(sb.String()))
+}
+
+func (s *Server) handleXMLTV(w http.ResponseWriter, r *http.Request) {
+	channels, err := s.db.ListChannels()
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	from := time.Now().Add(-6 * time.Hour)
+	to := time.Now().Add(7 * 24 * time.Hour)
+	events, err := s.db.GetAllEPG(from, to)
+	if err != nil {
+		http.Error(w, "epg database error", http.StatusInternalServerError)
+		return
+	}
+
+	baseURL := getBaseURL(r)
+	preferredLang := s.db.GetSetting("preferred_language", "eng")
+
+	type XMLTVIcon struct {
+		Src string `xml:"src,attr"`
+	}
+	type XMLTVDisplayName struct {
+		Value string `xml:",chardata"`
+	}
+	type XMLTVChannel struct {
+		ID           string             `xml:"id,attr"`
+		DisplayNames []XMLTVDisplayName `xml:"display-name"`
+		Icon         *XMLTVIcon         `xml:"icon,omitempty"`
+	}
+	type XMLTVText struct {
+		Lang  string `xml:"lang,attr,omitempty"`
+		Value string `xml:",chardata"`
+	}
+	type XMLTVProgramme struct {
+		Start      string      `xml:"start,attr"`
+		Stop       string      `xml:"stop,attr"`
+		Channel    string      `xml:"channel,attr"`
+		Titles     []XMLTVText `xml:"title"`
+		Descs      []XMLTVText `xml:"desc,omitempty"`
+		Categories []XMLTVText `xml:"category,omitempty"`
+	}
+	type XMLTVRoot struct {
+		XMLName       xml.Name         `xml:"tv"`
+		GeneratorName string           `xml:"generator-info-name,attr"`
+		Channels      []XMLTVChannel   `xml:"channel"`
+		Programmes    []XMLTVProgramme `xml:"programme"`
+	}
+
+	root := XMLTVRoot{
+		GeneratorName: "dvb-web",
+	}
+
+	for _, ch := range channels {
+		if !ch.Enabled {
+			continue
+		}
+		chIDStr := strconv.FormatInt(ch.ID, 10)
+		xc := XMLTVChannel{
+			ID: chIDStr,
+			DisplayNames: []XMLTVDisplayName{
+				{Value: ch.Name},
+			},
+		}
+		if ch.Number > 0 {
+			xc.DisplayNames = append(xc.DisplayNames, XMLTVDisplayName{
+				Value: fmt.Sprintf("%d %s", ch.Number, ch.Name),
+			})
+			xc.DisplayNames = append(xc.DisplayNames, XMLTVDisplayName{
+				Value: strconv.Itoa(ch.Number),
+			})
+		}
+		if ch.LogoURL != "" {
+			logoSrc := ch.LogoURL
+			if !strings.HasPrefix(logoSrc, "http") {
+				logoSrc = baseURL + logoSrc
+			}
+			xc.Icon = &XMLTVIcon{Src: logoSrc}
+		}
+		root.Channels = append(root.Channels, xc)
+	}
+
+	seenSlot := make(map[string]bool)
+	for _, e := range events {
+		slotKey := fmt.Sprintf("%d_%d", e.ChannelID, e.StartTime.Unix())
+		if seenSlot[slotKey] {
+			continue
+		}
+		seenSlot[slotKey] = true
+
+		chIDStr := strconv.FormatInt(e.ChannelID, 10)
+		startStr := e.StartTime.UTC().Format("20060102150405 +0000")
+		stopStr := e.EndTime.UTC().Format("20060102150405 +0000")
+
+		prog := XMLTVProgramme{
+			Start:   startStr,
+			Stop:    stopStr,
+			Channel: chIDStr,
+		}
+
+		for lang, title := range e.Titles {
+			if title != "" {
+				prog.Titles = append(prog.Titles, XMLTVText{Lang: lang, Value: title})
+			}
+		}
+		if len(prog.Titles) == 0 {
+			prog.Titles = append(prog.Titles, XMLTVText{Lang: preferredLang, Value: "Live Broadcast"})
+		}
+
+		for lang, desc := range e.Descriptions {
+			if desc != "" {
+				prog.Descs = append(prog.Descs, XMLTVText{Lang: lang, Value: desc})
+			}
+		}
+
+		for _, cat := range e.Genres {
+			if cat != "" {
+				prog.Categories = append(prog.Categories, XMLTVText{Lang: "en", Value: cat})
+			}
+		}
+
+		root.Programmes = append(root.Programmes, prog)
+	}
+
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(root)
+}
+
+func (s *Server) startHDHRDiscovery() {
+	addr, err := net.ResolveUDPAddr("udp4", ":65001")
+	if err != nil {
+		return
+	}
+	conn, err := net.ListenUDP("udp4", addr)
+	if err != nil {
+		log.Printf("[HDHR] UDP 65001 listen notice (manual IP entry still works): %v", err)
+		return
+	}
+	log.Printf("[HDHR] Listening for Plex/Jellyfin HDHomeRun discovery on UDP :65001")
+
+	go func() {
+		defer conn.Close()
+		buf := make([]byte, 1500)
+		for {
+			n, src, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if n < 4 {
+				continue
+			}
+			// HDHOMERUN_TYPE_DISCOVER_REQ is 0x0002
+			if buf[0] == 0x00 && buf[1] == 0x02 {
+				resp := s.buildHDHRDiscoverResponse()
+				_, _ = conn.WriteToUDP(resp, src)
+			}
+		}
+	}()
+}
+
+func (s *Server) buildHDHRDiscoverResponse() []byte {
+	localIP := getOutboundIP()
+	baseURL := fmt.Sprintf("http://%s:8080", localIP)
+	lineupURL := fmt.Sprintf("http://%s:8080/lineup.json", localIP)
+
+	tuners := s.tunerPool.GetStatus()
+	tunerCount := len(tuners)
+	if tunerCount == 0 {
+		tunerCount = 1
+	}
+
+	var payload []byte
+	payload = append(payload, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01)
+	payload = append(payload, 0x02, 0x04, 0x10, 0x40, 0x50, 0x60)
+	payload = append(payload, 0x2B, 0x01, byte(tunerCount))
+	payload = appendTLV(payload, 0x10, []byte(baseURL))
+	payload = appendTLV(payload, 0x29, []byte(lineupURL))
+
+	frame := make([]byte, 4+len(payload)+4)
+	binary.BigEndian.PutUint16(frame[0:2], 0x0003) // Discovery Reply
+	binary.BigEndian.PutUint16(frame[2:4], uint16(len(payload)))
+	copy(frame[4:], payload)
+
+	crc := crc32.ChecksumIEEE(frame[:4+len(payload)])
+	binary.LittleEndian.PutUint32(frame[4+len(payload):], crc)
+
+	return frame
+}
+
+func appendTLV(buf []byte, tag byte, val []byte) []byte {
+	buf = append(buf, tag)
+	l := len(val)
+	if l < 128 {
+		buf = append(buf, byte(l))
+	} else {
+		buf = append(buf, byte(0x80|(l&0x7F)), byte(l>>7))
+	}
+	return append(buf, val...)
+}
+
+func (s *Server) startSignalMonitor() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.wsMu.RLock()
+			clientCount := len(s.wsClients)
+			s.wsMu.RUnlock()
+			if clientCount == 0 {
+				continue
+			}
+
+			statuses := s.tunerPool.GetStatus()
+			for _, st := range statuses {
+				if st.Status == "active" && st.Signal != nil && len(st.Viewers) > 0 {
+					s.BroadcastSignal(st.ID, *st.Signal)
+				}
+			}
+		}
+	}()
+}
+
+// BroadcastTuners sends tuner statuses to all connected browser clients
+func (s *Server) BroadcastTuners(statuses []tuner.TunerStatus) {
+	msg, err := json.Marshal(map[string]interface{}{
+		"event":  "tuners_update",
+		"tuners": statuses,
+	})
+	if err != nil {
+		return
+	}
+
+	s.wsMu.RLock()
+	defer s.wsMu.RUnlock()
+	for client := range s.wsClients {
+		_ = client.writeMessage(websocket.TextMessage, msg)
+	}
+}
+
+// BroadcastSignal sends live signal quality updates to connected browser clients
+func (s *Server) BroadcastSignal(tunerID int, sig tuner.SignalInfo) {
+	msg, err := json.Marshal(map[string]interface{}{
+		"event":    "signal",
+		"tuner_id": tunerID,
+		"signal":   sig,
+	})
+	if err != nil {
+		return
+	}
+
+	s.wsMu.RLock()
+	defer s.wsMu.RUnlock()
+	for client := range s.wsClients {
+		_ = client.writeMessage(websocket.TextMessage, msg)
+	}
+}
+
+// BroadcastEPGUpdate sends new EPG show updates to all connected browser clients
+func (s *Server) BroadcastEPGUpdate(events []db.EPGEvent) {
+	msg, err := json.Marshal(map[string]interface{}{
+		"event":  "epg_update",
+		"events": events,
+	})
+	if err != nil {
+		return
+	}
+
+	s.wsMu.RLock()
+	defer s.wsMu.RUnlock()
+	for client := range s.wsClients {
+		_ = client.writeMessage(websocket.TextMessage, msg)
+	}
+}
+
+// BroadcastScanProgress notifies web clients of frequency scan progress
+func (s *Server) BroadcastScanProgress(freq int64, progressPct int, foundCount int) {
+	msg, err := json.Marshal(map[string]interface{}{
+		"event":       "scan_progress",
+		"frequency":   freq,
+		"progress":    progressPct,
+		"found_count": foundCount,
+	})
+	if err != nil {
+		return
+	}
+
+	s.wsMu.RLock()
+	defer s.wsMu.RUnlock()
+	for client := range s.wsClients {
+		_ = client.writeMessage(websocket.TextMessage, msg)
+	}
+}
+
+func extractIP(r *http.Request) string {
+	if f := r.Header.Get("X-Forwarded-For"); f != "" {
+		parts := strings.Split(f, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if r := r.Header.Get("X-Real-IP"); r != "" {
+		return r
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func jsonResponse(w http.ResponseWriter, code int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("[Server] jsonResponse encode error: %v", err)
+	}
+}
+
+func jsonError(w http.ResponseWriter, message string, code int) {
+	jsonResponse(w, code, map[string]string{"error": message})
+}

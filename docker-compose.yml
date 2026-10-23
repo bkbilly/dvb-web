@@ -1,0 +1,16 @@
+services:
+  dvb-web:
+    image: bkbillybk/dvb-web:latest
+    build: .
+    container_name: dvb-web
+    restart: unless-stopped
+    network_mode: host # Recommended for WebRTC, UDP streaming & HDHomeRun discovery
+    devices:
+      # Pass through all DVB TV tuners
+      - /dev/dvb:/dev/dvb
+      # Pass through GPU for VA-API hardware acceleration (Intel/AMD)
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=UTC

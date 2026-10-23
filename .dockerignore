@@ -1,0 +1,7 @@
+data/
+/dvb-web
+/server
+.git/
+.gitignore
+.github/
+*.log
