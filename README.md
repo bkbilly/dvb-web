@@ -3,7 +3,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![OS - Linux](https://img.shields.io/badge/OS-Linux-blue?logo=linux&logoColor=white)]()
 [![Go](https://img.shields.io/badge/Go-1.24+-blue?logo=go&logoColor=white)]()
-[![Docker](https://img.shields.io/docker/v/bkbillybk/dvb-web?logo=docker&logoColor=white&label=Docker&color=blue)](https://hub.docker.com/r/bkbillybk/dvb-web)
+[![GHCR](https://img.shields.io/badge/GHCR-dvb--web-blue?logo=github&logoColor=white)](https://github.com/bkbilly/dvb-web/pkgs/container/dvb-web)
 
 A fast, lightweight web TV streaming server and DVR for digital broadcast television (DVB-T/T2, DVB-C, DVB-S/S2). Built in pure Go with WebRTC for instant channel zapping, multi-tuner multiplex sharing, and native integration for **Jellyfin**, **Plex**, **Kodi**, and **VLC**.
 
@@ -29,7 +29,7 @@ A fast, lightweight web TV streaming server and DVR for digital broadcast televi
 ```yaml
 services:
   dvb-web:
-    image: bkbillybk/dvb-web:latest
+    image: ghcr.io/bkbilly/dvb-web:latest
     container_name: dvb-web
     restart: unless-stopped
     network_mode: host # Recommended for WebRTC, UDP streaming & HDHomeRun discovery
@@ -59,7 +59,7 @@ docker run -d \
   --device /dev/dvb:/dev/dvb \
   --device /dev/dri:/dev/dri \
   -v $(pwd)/data:/app/data \
-  bkbillybk/dvb-web:latest
+  ghcr.io/bkbilly/dvb-web:latest
 ```
 
 ---

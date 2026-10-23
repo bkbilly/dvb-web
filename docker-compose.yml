@@ -1,6 +1,6 @@
 services:
   dvb-web:
-    image: bkbillybk/dvb-web:latest
+    image: ghcr.io/bkbilly/dvb-web:latest
     build: .
     container_name: dvb-web
     restart: unless-stopped
