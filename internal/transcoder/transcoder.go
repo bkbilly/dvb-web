@@ -165,8 +165,8 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	// Live MPEG-TS input options to ensure PAT/PMT program maps are properly discovered
 	if !cfg.IsMock {
 		args = append(args,
-			"-analyzeduration", "1500000",
-			"-probesize", "2000000",
+			"-analyzeduration", "6000000",
+			"-probesize", "12000000",
 			"-err_detect", "ignore_err",
 			"-fflags", "+genpts+nobuffer",
 			"-flags", "low_delay",
@@ -247,7 +247,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				args = append(args, "-vf", "yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1")
 			}
 			args = append(args,
-				"-map", fmt.Sprintf("0:p:%d:v:0", cfg.ServiceID),
+				"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
 				"-map", audioMap,
 			)
 		}
@@ -274,7 +274,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				args = append(args, "-vf", "yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1")
 			}
 			args = append(args,
-				"-map", "0:v:0",
+				"-map", "0:v:0?",
 				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
 			)
 		}

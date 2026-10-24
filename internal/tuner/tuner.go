@@ -620,11 +620,13 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 		}
 	}()
 
-	// Hardware DVR reader goroutine
+	// Hardware DVR reader goroutine with 188-byte TS packet synchronization
 	go func() {
 		defer close(tsQueue)
 		defer close(parseQueue)
-		buf := make([]byte, 188*128) // 24KB chunk
+		readBuf := make([]byte, 188*128) // 24KB chunk
+		var leftover []byte
+		synced := false
 
 		for {
 			select {
@@ -633,7 +635,7 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 			default:
 			}
 
-			n, err := syscall.Read(dvrFD, buf)
+			n, err := syscall.Read(dvrFD, readBuf)
 			if err != nil {
 				if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
 					time.Sleep(10 * time.Millisecond)
@@ -641,19 +643,73 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 				}
 				return
 			}
-			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
+			if n <= 0 {
+				continue
+			}
 
-				select {
-				case tsQueue <- chunk:
-				default:
-				}
+			data := readBuf[:n]
+			if len(leftover) > 0 {
+				data = append(leftover, data...)
+				leftover = nil
+			}
 
-				select {
-				case parseQueue <- chunk:
-				default:
+			// Synchronize to 188-byte MPEG-TS packet boundary starting with 0x47
+			if !synced {
+				syncIdx := -1
+				for i := 0; i+188 < len(data); i++ {
+					if data[i] == 0x47 && data[i+188] == 0x47 {
+						if i+188*2 < len(data) && data[i+188*2] != 0x47 {
+							continue
+						}
+						syncIdx = i
+						break
+					}
 				}
+				if syncIdx < 0 {
+					if len(data) > 188 {
+						leftover = append(leftover, data[len(data)-188:]...)
+					} else {
+						leftover = append(leftover, data...)
+					}
+					continue
+				}
+				data = data[syncIdx:]
+				synced = true
+			}
+
+			// If sync is lost (data doesn't begin with 0x47), mark un-synced to re-align
+			if len(data) > 0 && data[0] != 0x47 {
+				synced = false
+				leftover = append(leftover, data...)
+				if len(leftover) > 64*1024 {
+					leftover = leftover[len(leftover)-188:]
+				}
+				continue
+			}
+
+			// Preserve trailing incomplete TS packet for the next read
+			rem := len(data) % 188
+			if rem > 0 {
+				leftover = make([]byte, rem)
+				copy(leftover, data[len(data)-rem:])
+				data = data[:len(data)-rem]
+			}
+
+			if len(data) == 0 {
+				continue
+			}
+
+			chunk := make([]byte, len(data))
+			copy(chunk, data)
+
+			select {
+			case tsQueue <- chunk:
+			default:
+			}
+
+			select {
+			case parseQueue <- chunk:
+			default:
 			}
 		}
 	}()
