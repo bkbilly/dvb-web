@@ -35,6 +35,10 @@ type Recorder struct {
 	onTunerChange func()
 }
 
+func (r *Recorder) GetDataDir() string {
+	return r.dataDir
+}
+
 func (r *Recorder) SetOnTunerChange(cb func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

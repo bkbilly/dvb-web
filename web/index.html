@@ -44,49 +44,6 @@
         
         <!-- Video Player Stage -->
         <div class="video-container" id="video-wrapper">
-          <video id="tv-video" autoplay playsinline></video>
-          
-          <!-- Idle / Standby Overlay -->
-          <div id="standby-overlay" class="standby-overlay">
-            <div class="standby-card">
-              <span id="standby-icon" class="standby-icon">💤</span>
-              <h3 id="standby-title">Tuner is in Standby (0% CPU)</h3>
-              <p id="standby-desc">Select any channel below to wake the tuner and start instant streaming.</p>
-              <button id="btn-standby-action" class="btn btn-primary hidden" style="margin-top:1rem;">Reconnect Stream</button>
-            </div>
-          </div>
-
-          <!-- Radio Broadcast Overlay Card -->
-          <div id="radio-overlay" class="radio-overlay hidden">
-            <div class="radio-card">
-              <div class="radio-icon-pulse">📻</div>
-              <h2 id="radio-station-name" class="radio-title">Radio Station</h2>
-              <div class="radio-badge-tag">Digital Audio Broadcast</div>
-              <div id="radio-now-playing" class="radio-now-show">Live Audio Stream</div>
-              <div class="radio-equalizer">
-                <span class="eq-bar bar-1"></span>
-                <span class="eq-bar bar-2"></span>
-                <span class="eq-bar bar-3"></span>
-                <span class="eq-bar bar-4"></span>
-                <span class="eq-bar bar-5"></span>
-                <span class="eq-bar bar-6"></span>
-                <span class="eq-bar bar-7"></span>
-                <span class="eq-bar bar-8"></span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Stream Tuning / Buffering Loader -->
-          <div id="stream-loader" class="stream-loader hidden">
-            <div class="loader-card">
-              <div class="spinner"></div>
-              <div class="loader-info">
-                <h4 id="loader-channel-name">Tuning Channel...</h4>
-                <p id="loader-channel-desc">Locking DVB frequency & buffering stream</p>
-              </div>
-            </div>
-          </div>
-
           <!-- Floating Stream Alert Banner -->
           <div id="stream-alert" class="stream-alert hidden">
             <span class="stream-alert-icon">⚠️</span>
@@ -102,8 +59,6 @@
                   <span id="osd-channel-num" class="badge">1</span>
                   <span id="osd-channel-name">Channel Name</span>
                   <span id="osd-signal-badge" class="osd-signal-badge hidden">📶 <span id="osd-signal-val">--%</span></span>
-                  <span id="osd-hbbtv-badge" class="osd-interactive-badge hidden clickable" onclick="toggleHbbTV()" title="Press H to open HbbTV interactive portal">🔴 HbbTV (H)</span>
-                  <span id="osd-teletext-badge" class="osd-interactive-badge hidden clickable" onclick="toggleTeletext()" title="Press T to open Teletext">TXT (T)</span>
                 </div>
                 <div id="osd-now-title" class="osd-show-title clickable" title="Click to view full program description">Program Title</div>
                 <div class="osd-time-bar-wrapper">
@@ -117,89 +72,135 @@
             </div>
           </div>
 
-          <!-- Real-Time RF Signal Analyzer HUD Overlay (Toggle with 'S') -->
-          <div id="rf-analyzer-overlay" class="rf-analyzer-overlay hidden">
-            <div class="rf-analyzer-header">
-              <div class="rf-analyzer-title">
-                <span class="rf-icon">📡</span>
-                <strong>RF Signal Analyzer</strong>
-                <span id="rf-tuner-id" class="rf-chip">Tuner 0</span>
-              </div>
-              <button class="rf-close-btn" onclick="toggleRFAnalyzer(false)" title="Close (S or Esc)">✕</button>
-            </div>
-            <div class="rf-analyzer-grid">
-              <div class="rf-metric-card">
-                <div class="rf-metric-label">Signal Strength</div>
-                <div class="rf-bar-bg"><div id="rf-bar-strength" class="rf-bar-fill" style="width: 0%"></div></div>
-                <div class="rf-metric-val"><span id="rf-val-strength">0%</span></div>
-              </div>
-              <div class="rf-metric-card">
-                <div class="rf-metric-label">Signal Quality / SNR</div>
-                <div class="rf-bar-bg"><div id="rf-bar-quality" class="rf-bar-fill" style="width: 0%"></div></div>
-                <div class="rf-metric-val"><span id="rf-val-quality">0%</span> <span id="rf-val-snr" class="rf-subval">(-- dB)</span></div>
-              </div>
-              <div class="rf-metric-card">
-                <div class="rf-metric-label">Bit Error Rate (BER)</div>
-                <div class="rf-metric-val" id="rf-val-ber">0</div>
-              </div>
-              <div class="rf-metric-card">
-                <div class="rf-metric-label">Uncorrected Blocks</div>
-                <div class="rf-metric-val" id="rf-val-unc">0</div>
+          <!-- Video Screen Stage (Houses the actual video surface and in-video HUD overlays) -->
+          <div class="video-screen" id="video-screen">
+            <video id="tv-video" autoplay playsinline></video>
+            
+            <!-- Idle / Standby Overlay -->
+            <div id="standby-overlay" class="standby-overlay">
+              <div class="standby-card">
+                <span id="standby-icon" class="standby-icon">💤</span>
+                <h3 id="standby-title">Tuner is in Standby (0% CPU)</h3>
+                <p id="standby-desc">Select any channel below to wake the tuner and start instant streaming.</p>
+                <button id="btn-standby-action" class="btn btn-primary hidden" style="margin-top:1rem;">Reconnect Stream</button>
               </div>
             </div>
-            <div class="rf-lock-flags">
-              <span id="rf-flag-sig" class="rf-flag">SIGNAL</span>
-              <span id="rf-flag-carrier" class="rf-flag">CARRIER</span>
-              <span id="rf-flag-viterbi" class="rf-flag">VITERBI</span>
-              <span id="rf-flag-sync" class="rf-flag">SYNC</span>
-              <span id="rf-flag-lock" class="rf-flag">LOCK</span>
-            </div>
-            <div class="rf-multiplex-info">
-              <span id="rf-mux-freq">-- MHz</span> •
-              <span id="rf-mux-deliv">DVB</span> •
-              <span id="rf-mux-bw">8 MHz</span> •
-              <span id="rf-active-channel">No Channel</span>
-            </div>
-          </div>
 
-          <!-- Retro Teletext Viewer Overlay (Toggle with 'T') -->
-          <div id="teletext-overlay" class="teletext-overlay hidden">
-            <div class="teletext-window">
-              <div class="teletext-header">
-                <span class="teletext-page-indicator">P<span id="txt-page-num">100</span></span>
-                <span class="teletext-title" id="txt-channel-name">DVB-TELETEXT</span>
-                <span id="txt-live-time">--:--:--</span>
-                <button class="teletext-close-btn" onclick="toggleTeletext(false)" title="Close Teletext (T or Esc)">✕</button>
-              </div>
-              <div class="teletext-screen" id="teletext-screen">
-                <!-- Dynamically populated page -->
-              </div>
-              <div class="teletext-controls">
-                <div class="teletext-nav-row">
-                  <button class="txt-btn-color txt-red" onclick="navTeletextPage(100)">Index 100</button>
-                  <button class="txt-btn-color txt-green" onclick="navTeletextPage(200)">Guide 200</button>
-                  <button class="txt-btn-color txt-yellow" onclick="navTeletextPage(300)">News 300</button>
-                  <button class="txt-btn-color txt-blue" onclick="navTeletextPage(888)">Subtitles 888</button>
-                </div>
-                <div class="teletext-input-row">
-                  <span>Page:</span>
-                  <input type="number" id="teletext-page-input" min="100" max="899" value="100" class="teletext-page-input">
-                  <button class="btn btn-secondary btn-sm" onclick="navTeletextInput()">Go</button>
+            <!-- Radio Broadcast Overlay Card -->
+            <div id="radio-overlay" class="radio-overlay hidden">
+              <div class="radio-card">
+                <div class="radio-icon-pulse">📻</div>
+                <h2 id="radio-station-name" class="radio-title">Radio Station</h2>
+                <div class="radio-badge-tag">Digital Audio Broadcast</div>
+                <div id="radio-now-playing" class="radio-now-show">Live Audio Stream</div>
+                <div class="radio-equalizer">
+                  <span class="eq-bar bar-1"></span>
+                  <span class="eq-bar bar-2"></span>
+                  <span class="eq-bar bar-3"></span>
+                  <span class="eq-bar bar-4"></span>
+                  <span class="eq-bar bar-5"></span>
+                  <span class="eq-bar bar-6"></span>
+                  <span class="eq-bar bar-7"></span>
+                  <span class="eq-bar bar-8"></span>
                 </div>
               </div>
             </div>
-          </div>
 
-          <!-- Quick Zap Indicator -->
-          <div id="zap-indicator" class="zap-indicator hidden">
-            <span id="zap-number">1</span>
+            <!-- Stream Tuning / Buffering Loader -->
+            <div id="stream-loader" class="stream-loader hidden">
+              <div class="loader-card">
+                <div class="spinner"></div>
+                <div class="loader-info">
+                  <h4 id="loader-channel-name">Tuning Channel...</h4>
+                  <p id="loader-channel-desc">Locking DVB frequency & buffering stream</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Real-Time RF Signal Analyzer HUD Overlay (Toggle with 'S') -->
+            <div id="rf-analyzer-overlay" class="rf-analyzer-overlay hidden">
+              <div class="rf-analyzer-header">
+                <div class="rf-analyzer-title">
+                  <span class="rf-icon">📡</span>
+                  <strong>RF Signal Analyzer</strong>
+                  <span id="rf-tuner-id" class="rf-chip">Tuner 0</span>
+                </div>
+                <button class="rf-close-btn" onclick="toggleRFAnalyzer(false)" title="Close (S or Esc)">✕</button>
+              </div>
+              <div class="rf-analyzer-grid">
+                <div class="rf-metric-card">
+                  <div class="rf-metric-label">Signal Strength</div>
+                  <div class="rf-bar-bg"><div id="rf-bar-strength" class="rf-bar-fill" style="width: 0%"></div></div>
+                  <div class="rf-metric-val"><span id="rf-val-strength">0%</span></div>
+                </div>
+                <div class="rf-metric-card">
+                  <div class="rf-metric-label">Signal Quality / SNR</div>
+                  <div class="rf-bar-bg"><div id="rf-bar-quality" class="rf-bar-fill" style="width: 0%"></div></div>
+                  <div class="rf-metric-val"><span id="rf-val-quality">0%</span> <span id="rf-val-snr" class="rf-subval">(-- dB)</span></div>
+                </div>
+                <div class="rf-metric-card">
+                  <div class="rf-metric-label">Bit Error Rate (BER)</div>
+                  <div class="rf-metric-val" id="rf-val-ber">0</div>
+                </div>
+                <div class="rf-metric-card">
+                  <div class="rf-metric-label">Uncorrected Blocks</div>
+                  <div class="rf-metric-val" id="rf-val-unc">0</div>
+                </div>
+              </div>
+              <div class="rf-lock-flags">
+                <span id="rf-flag-sig" class="rf-flag">SIGNAL</span>
+                <span id="rf-flag-carrier" class="rf-flag">CARRIER</span>
+                <span id="rf-flag-viterbi" class="rf-flag">VITERBI</span>
+                <span id="rf-flag-sync" class="rf-flag">SYNC</span>
+                <span id="rf-flag-lock" class="rf-flag">LOCK</span>
+              </div>
+              <div class="rf-multiplex-info">
+                <span id="rf-mux-freq">-- MHz</span> •
+                <span id="rf-mux-deliv">DVB</span> •
+                <span id="rf-mux-bw">8 MHz</span> •
+                <span id="rf-active-channel">No Channel</span>
+              </div>
+            </div>
+
+            <!-- Retro Teletext Viewer Overlay (Toggle with 'T') -->
+            <div id="teletext-overlay" class="teletext-overlay hidden">
+              <div class="teletext-window">
+                <div class="teletext-header">
+                  <span class="teletext-page-indicator">P<span id="txt-page-num">100</span></span>
+                  <span class="teletext-title" id="txt-channel-name">DVB-TELETEXT</span>
+                  <span id="txt-live-time">--:--:--</span>
+                  <button class="teletext-close-btn" onclick="toggleTeletext(false)" title="Close Teletext (T or Esc)">✕</button>
+                </div>
+                <div class="teletext-screen" id="teletext-screen">
+                  <!-- Dynamically populated page -->
+                </div>
+                <div class="teletext-controls">
+                  <div class="teletext-nav-row">
+                    <button class="txt-btn-color txt-red" onclick="navTeletextPage(100)">Index 100</button>
+                    <button class="txt-btn-color txt-green" onclick="navTeletextPage(200)">Guide 200</button>
+                    <button class="txt-btn-color txt-yellow" onclick="navTeletextPage(300)">News 300</button>
+                    <button class="txt-btn-color txt-blue" onclick="navTeletextPage(888)">Subtitles 888</button>
+                  </div>
+                  <div class="teletext-input-row">
+                    <span>Page:</span>
+                    <input type="number" id="teletext-page-input" min="100" max="899" value="100" class="teletext-page-input">
+                    <button class="btn btn-secondary btn-sm" onclick="navTeletextInput()">Go</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Quick Zap Indicator -->
+            <div id="zap-indicator" class="zap-indicator hidden">
+              <span id="zap-number">1</span>
+            </div>
           </div>
 
           <!-- Timeshift Scrubber & Live Controls -->
           <div id="timeshift-bar" class="timeshift-bar">
             <button id="btn-timeshift-playpause" class="timeshift-btn" title="Pause / Resume Live TV (Space)">⏸</button>
-            <button id="btn-timeshift-rewind" class="timeshift-btn" title="Rewind 10 seconds (←)">⏪ 10s</button>
-            <button id="btn-timeshift-forward" class="timeshift-btn" title="Forward 10 seconds (→)">10s ⏩</button>
+            <button id="btn-timeshift-rewind" class="timeshift-btn" title="Rewind 10 seconds (←)">⏪ <span class="ts-btn-label">10s</span></button>
+            <button id="btn-timeshift-forward" class="timeshift-btn" title="Forward 10 seconds (→)"><span class="ts-btn-label">10s</span> ⏩</button>
             <div class="timeshift-track-wrap">
               <input type="range" id="timeshift-slider" min="0" max="100" value="100" class="timeshift-slider" title="Seek in live broadcast buffer">
               <div class="timeshift-time-labels">
@@ -239,11 +240,18 @@
               <div id="sub-tracks-menu" class="track-menu hidden"></div>
             </div>
 
+            <!-- Teletext Button (Shown when available) -->
+            <button id="btn-teletext-ctrl" class="ctrl-btn teletext-ctrl-btn hidden" title="Teletext Viewer (T)">📟 TXT</button>
+
+            <!-- HbbTV Button (Shown when available) -->
+            <button id="btn-hbbtv-ctrl" class="ctrl-btn hbbtv-ctrl-btn hidden" title="HbbTV Interactive Portal (H)"><span class="red-dot"></span> HbbTV</button>
+
             <!-- Aspect Ratio Dropdown -->
             <div class="track-dropdown-wrap" id="aspect-dropdown-wrap">
               <button id="btn-aspect-ratio" class="ctrl-btn aspect-btn" title="Select Aspect Ratio">16:9</button>
               <div id="aspect-ratio-menu" class="track-menu hidden"></div>
             </div>
+
             <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
           </div>
         </div>
@@ -493,40 +501,102 @@
             <h2>Digital Video Recordings (DVR)</h2>
             <span class="recordings-subtitle">Manage scheduled broadcasts and view completed recordings</span>
           </div>
-          <button id="btn-open-schedule-modal" class="btn btn-primary">➕ Schedule Recording</button>
-        </div>
-
-        <!-- Active Recordings Section -->
-        <div class="recordings-section">
-          <div class="section-badge-header">
-            <span class="live-dot pulse"></span>
-            <h3>Active Recordings</h3>
-            <span id="active-rec-count" class="badge">0</span>
-          </div>
-          <div id="active-recordings-list" class="recordings-grid empty-grid">
-            <div class="empty-state">No broadcasts are actively being recorded.</div>
+          <div class="recordings-toolbar-actions">
+            <button id="btn-clear-failed" class="btn btn-secondary btn-sm hidden" title="Clear all failed recordings">🗑️ Clear Failed</button>
+            <button id="btn-open-schedule-modal" class="btn btn-primary">➕ Schedule Recording</button>
           </div>
         </div>
 
-        <!-- Scheduled Recordings Section -->
-        <div class="recordings-section">
-          <div class="section-badge-header">
-            <span class="sched-icon">⏱️</span>
-            <h3>Upcoming Timers & Schedule</h3>
-            <span id="sched-rec-count" class="badge">0</span>
+        <!-- DVR Storage & Overview Stats Bar -->
+        <div class="dvr-stats-bar">
+          <div class="dvr-stat-card">
+            <div class="dvr-stat-icon">📼</div>
+            <div class="dvr-stat-info">
+              <span class="dvr-stat-label">Total Recordings</span>
+              <span id="stat-total-count" class="dvr-stat-value">0</span>
+            </div>
           </div>
-          <div id="scheduled-recordings-list" class="recordings-grid empty-grid">
-            <div class="empty-state">No upcoming recordings scheduled. Click "Schedule Recording" or tap any program in the TV Guide.</div>
+          <div class="dvr-stat-card">
+            <div class="dvr-stat-icon">💾</div>
+            <div class="dvr-stat-info">
+              <span class="dvr-stat-label">Storage Used</span>
+              <span id="stat-total-size" class="dvr-stat-value">0 B</span>
+            </div>
+          </div>
+          <div class="dvr-stat-card">
+            <div class="dvr-stat-icon">⏳</div>
+            <div class="dvr-stat-info">
+              <span class="dvr-stat-label">Recorded Time</span>
+              <span id="stat-total-time" class="dvr-stat-value">0m</span>
+            </div>
+          </div>
+          <div class="dvr-stat-card">
+            <div class="dvr-stat-icon">💿</div>
+            <div class="dvr-stat-info">
+              <span class="dvr-stat-label">Free Storage</span>
+              <span id="stat-disk-free" class="dvr-stat-value">Checking...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Top Split Grid on Bigger Screens: Active & Scheduled -->
+        <div class="recordings-top-split">
+          <!-- Active Recordings Section -->
+          <div class="recordings-section">
+            <div class="section-badge-header">
+              <span class="live-dot pulse"></span>
+              <h3>Active Recordings</h3>
+              <span id="active-rec-count" class="badge">0</span>
+            </div>
+            <div id="active-recordings-list" class="recordings-grid empty-grid">
+              <div class="empty-state">No broadcasts are actively being recorded.</div>
+            </div>
+          </div>
+
+          <!-- Scheduled Recordings Section -->
+          <div class="recordings-section">
+            <div class="section-badge-header">
+              <span class="sched-icon">⏱️</span>
+              <h3>Upcoming Timers & Schedule</h3>
+              <span id="sched-rec-count" class="badge">0</span>
+            </div>
+            <div id="scheduled-recordings-list" class="recordings-grid empty-grid">
+              <div class="empty-state">No upcoming recordings scheduled. Click "Schedule Recording" or tap any program in the TV Guide.</div>
+            </div>
           </div>
         </div>
 
         <!-- Completed Recordings Section -->
         <div class="recordings-section">
-          <div class="section-badge-header">
-            <span class="dvr-icon">📼</span>
-            <h3>Completed Recordings</h3>
-            <span id="completed-rec-count" class="badge">0</span>
+          <div class="section-header-row">
+            <div class="section-badge-header">
+              <span class="dvr-icon">📼</span>
+              <h3>Completed Recordings</h3>
+              <span id="completed-rec-count" class="badge">0</span>
+            </div>
+            <span id="rec-filter-count" class="rec-filter-count"></span>
           </div>
+
+          <!-- Search & Filter Controls Bar -->
+          <div class="recordings-filter-bar">
+            <div class="rec-search-box">
+              <input type="text" id="rec-search-input" placeholder="🔍 Search recordings by title or description..." class="rec-search-input">
+              <button id="btn-clear-rec-search" class="btn-clear-search hidden" title="Clear search">✕</button>
+            </div>
+            <div class="rec-filter-controls">
+              <select id="rec-channel-filter" class="rec-filter-select" title="Filter by Channel">
+                <option value="all">All Channels</option>
+              </select>
+              <select id="rec-sort-select" class="rec-filter-select" title="Sort Recordings">
+                <option value="newest">📅 Newest First</option>
+                <option value="oldest">📅 Oldest First</option>
+                <option value="title">🔤 Title (A - Z)</option>
+                <option value="duration">⏳ Longest Duration</option>
+                <option value="size">💾 Largest Size</option>
+              </select>
+            </div>
+          </div>
+
           <div id="completed-recordings-list" class="recordings-grid empty-grid">
             <div class="empty-state">No saved recordings found.</div>
           </div>
@@ -655,6 +725,7 @@
           <h4>🔍 Tools, Diagnostics & Features</h4>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>S</kbd></span><span class="shortcut-desc">Real-Time RF Signal Analyzer HUD</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>T</kbd></span><span class="shortcut-desc">Teletext Screen Viewer & Subtitles</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>[</kbd> / <kbd>]</kbd></span><span class="shortcut-desc">Adjust Subtitle Sync (-0.5s / +0.5s)</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>H</kbd></span><span class="shortcut-desc">HbbTV Interactive Broadcast Portal</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>I</kbd></span><span class="shortcut-desc">Live Program Synopsis & Details</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>?</kbd></span><span class="shortcut-desc">Show / Hide Keyboard Shortcuts Cheat-Sheet</span></div>
@@ -669,8 +740,13 @@
     <div class="modal-card hbbtv-modal-card">
       <div class="modal-header">
         <h3 id="hbbtv-modal-title">🔴 HbbTV Interactive Application</h3>
+        <div class="hbbtv-remote-bar">
+          <button type="button" class="btn-color-pill btn-red" onclick="sendHbbtvKeyToIframe(403)" title="Red Button (Key R or 1)">● Red</button>
+          <button type="button" class="btn-color-pill btn-green" onclick="sendHbbtvKeyToIframe(404)" title="Green Button (Key G or 2)">● Green</button>
+          <button type="button" class="btn-color-pill btn-yellow" onclick="sendHbbtvKeyToIframe(405)" title="Yellow Button (Key Y or 3)">● Yellow</button>
+          <button type="button" class="btn-color-pill btn-blue" onclick="sendHbbtvKeyToIframe(406)" title="Blue Button (Key B or 4)">● Blue</button>
+        </div>
         <div class="hbbtv-header-actions">
-          <a id="btn-hbbtv-external" href="#" target="_blank" class="btn btn-secondary btn-sm" title="Open in new window">↗ Open New Tab</a>
           <button id="btn-close-hbbtv" class="modal-close-btn">&times;</button>
         </div>
       </div>

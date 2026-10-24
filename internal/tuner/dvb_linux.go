@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -21,9 +22,10 @@ const (
 	ioctlFEReadSNR            = 0x80026f48
 	ioctlFESetProperty        = 0x40106f52
 
-	ioctlDMXStart        = 0x00006f29
-	ioctlDMXStop         = 0x00006f2a
-	ioctlDMXSetPesFilter = 0x40146f2c
+	ioctlDMXStart         = 0x00006f29
+	ioctlDMXStop          = 0x00006f2a
+	ioctlDMXSetPesFilter  = 0x40146f2c
+	ioctlDMXSetBufferSize = 0x00006f2d
 )
 
 // DTV command codes
@@ -103,6 +105,9 @@ func StartDemuxWildcard(demuxPath string) (int, error) {
 		syscall.Close(fd)
 		return -1, fmt.Errorf("DMX_SET_PES_FILTER failed: %v", errno)
 	}
+
+	// Expand kernel demux ring buffer to 4MB to prevent packet drops under load
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlDMXSetBufferSize, uintptr(4*1024*1024))
 
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlDMXStart, 0)
 	if errno != 0 {
@@ -359,7 +364,35 @@ func tryTune(feFD int, freq uint32, bw uint32, sys uint32) bool {
 	return false
 }
 
-// readChannelsFromTS reads MPEG-TS from dvr0 to extract SDT (Service Names) & PAT (Service IDs)
+// getSectionPayload checks for PUSI and extracts the payload offset for PSI/SI sections
+func getSectionPayload(pkt []byte) (int, bool) {
+	if len(pkt) < 188 || pkt[0] != 0x47 {
+		return 0, false
+	}
+	pusi := (pkt[1] & 0x40) != 0
+	if !pusi {
+		return 0, false
+	}
+	offset := 4
+	adapt := (pkt[3] >> 4) & 0x03
+	if adapt == 2 {
+		return 0, false
+	}
+	if adapt == 3 {
+		offset += 1 + int(pkt[4])
+	}
+	if offset >= 188 {
+		return 0, false
+	}
+	ptr := int(pkt[offset])
+	secOffset := offset + 1 + ptr
+	if secOffset >= 188 {
+		return 0, false
+	}
+	return secOffset, true
+}
+
+// readChannelsFromTS reads MPEG-TS from dvr0 to extract SDT (Names), PAT/PMT (PIDs) & AIT (HbbTV URLs)
 func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum *int) []db.Channel {
 	fd, err := syscall.Open(dvrPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -370,6 +403,10 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 	serviceNames := make(map[int]string)
 	serviceTypes := make(map[int]int)
 	servicePIDs := make(map[int]struct{ vPID, aPID int })
+	serviceHbbTV := make(map[int]string)
+	serviceTeletext := make(map[int]bool)
+	pmtPIDs := make(map[int]int) // pmtPID -> serviceID
+	aitPIDs := make(map[int]int) // aitPID -> serviceID
 
 	buf := make([]byte, 188*50)
 	deadline := time.Now().Add(2500 * time.Millisecond)
@@ -390,31 +427,85 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 
 		for i := 0; i+188 <= n; i += 188 {
 			pkt := buf[i : i+188]
-			if pkt[0] != 0x47 {
+			pid := (int(pkt[1]&0x1F) << 8) | int(pkt[2])
+
+			secOffset, ok := getSectionPayload(pkt)
+			if !ok {
 				continue
 			}
 
-			pid := (int(pkt[1]&0x1F) << 8) | int(pkt[2])
-			pusi := (pkt[1] & 0x40) != 0
-
 			// SDT (Service Description Table) has PID 0x0011 (17)
-			if pid == 0x0011 && pusi {
-				offset := 4
-				adapt := (pkt[3] >> 4) & 0x03
-				if adapt == 2 {
-					continue // adaptation field only
-				}
-				if adapt == 3 {
-					offset += 1 + int(pkt[4])
-				}
-				if offset >= 188 {
-					continue
-				}
+			if pid == 0x0011 {
+				parseSDT(pkt[secOffset:], serviceNames, serviceTypes)
+			}
 
-				ptr := int(pkt[offset])
-				secOffset := offset + 1 + ptr
-				if secOffset < 188 {
-					parseSDT(pkt[secOffset:], serviceNames, serviceTypes)
+			// PAT (Program Association Table): PID 0x0000, table_id 0x00
+			if pid == 0x0000 && pkt[secOffset] == 0x00 {
+				secLen := (int(pkt[secOffset+1]&0x0F) << 8) | int(pkt[secOffset+2])
+				end := secOffset + 3 + secLen - 4
+				if end > 188 {
+					end = 188
+				}
+				for p := secOffset + 8; p+4 <= end; p += 4 {
+					sid := (int(pkt[p]) << 8) | int(pkt[p+1])
+					pmtPID := (int(pkt[p+2]&0x1F) << 8) | int(pkt[p+3])
+					if sid != 0 {
+						pmtPIDs[pmtPID] = sid
+					}
+				}
+			}
+
+			// PMT (Program Map Table): PID in pmtPIDs, table_id 0x02
+			if sid, isPMT := pmtPIDs[pid]; isPMT && pkt[secOffset] == 0x02 {
+				progInfoLen := (int(pkt[secOffset+8]&0x0F) << 8) | int(pkt[secOffset+9])
+				esOffset := secOffset + 12 + progInfoLen
+				secLen := (int(pkt[secOffset+1]&0x0F) << 8) | int(pkt[secOffset+2])
+				end := secOffset + 3 + secLen - 4
+				if end > 188 {
+					end = 188
+				}
+				for p := esOffset; p+5 <= end; {
+					stype := pkt[p]
+					elemPID := (int(pkt[p+1]&0x1F) << 8) | int(pkt[p+2])
+					esInfoLen := (int(pkt[p+3]&0x0F) << 8) | int(pkt[p+4])
+					if stype == 0x05 || stype == 0x0B {
+						aitPIDs[elemPID] = sid
+					}
+					descEnd := p + 5 + esInfoLen
+					if descEnd > end {
+						descEnd = end
+					}
+					for d := p + 5; d+2 <= descEnd; {
+						dtag := pkt[d]
+						dlen := int(pkt[d+1])
+						if dtag == 0x6F { // application_signalling_descriptor
+							aitPIDs[elemPID] = sid
+						}
+						if dtag == 0x56 { // teletext_descriptor
+							serviceTeletext[sid] = true
+						}
+						d += 2 + dlen
+					}
+					p = descEnd
+				}
+			}
+
+			// AIT (Application Information Table): table_id 0x74
+			if pkt[secOffset] == 0x74 {
+				url := ParseAITSection(pkt[secOffset:])
+				if url != "" {
+					sid := aitPIDs[pid]
+					if sid != 0 {
+						serviceHbbTV[sid] = url
+					} else {
+						// Fallback: match by service name in section bytes
+						for s, name := range serviceNames {
+							if serviceHbbTV[s] == "" && strings.Contains(strings.ToUpper(string(pkt[secOffset:])), strings.ToUpper(name)) {
+								serviceHbbTV[s] = url
+								break
+							}
+						}
+					}
 				}
 			}
 		}
@@ -441,6 +532,8 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 			AudioPID:       pids.aPID,
 			Enabled:        true,
 			IsRadio:        isRadio,
+			HasTeletext:    serviceTeletext[sid],
+			HbbtvURL:       serviceHbbTV[sid],
 		})
 		*nextNum++
 	}

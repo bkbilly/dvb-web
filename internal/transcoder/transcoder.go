@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 type HardwareType string
@@ -115,6 +117,7 @@ type PipelineConfig struct {
 	AudioUDPPort   int          // Local UDP port to stream RTP Opus
 	AudioTrackIdx  int          // Selected audio stream index (0, 1, 2...)
 	SubtitleTrack  int          // Selected subtitle stream index (-1 = off, 0, 1...)
+	SubtitleOffsetMs int        // Subtitle timestamp offset in milliseconds (negative advances subtitles)
 	HWType         HardwareType // Selected HW type (or auto)
 	VideoBitrate   string       // e.g. "2500k"
 	AVSyncOffsetMs int          // Calibrated audio delay to align with video pipeline
@@ -162,10 +165,10 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	// Live MPEG-TS input options to ensure PAT/PMT program maps are properly discovered
 	if !cfg.IsMock {
 		args = append(args,
-			"-analyzeduration", "800000",
-			"-probesize", "1500000",
+			"-analyzeduration", "1500000",
+			"-probesize", "2000000",
 			"-err_detect", "ignore_err",
-			"-fflags", "+genpts+discardcorrupt+nobuffer",
+			"-fflags", "+genpts+nobuffer",
 			"-flags", "low_delay",
 		)
 	}
@@ -223,8 +226,17 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	} else if cfg.ServiceID > 0 {
 		audioMap := fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
 		if subIdx >= 0 {
-			// Subtitle overlay burns DVB subtitles directly into video frames with 100% A/V/Sub synchronization
-			filter := fmt.Sprintf("[0:p:%d:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];[main][0:p:%d:s:%d]overlay=ts_sync_mode=default:eof_action=pass[outv]", cfg.ServiceID, cfg.ServiceID, subIdx)
+			subOffsetSec := float64(cfg.SubtitleOffsetMs) / 1000.0
+			subPtsChain := ""
+			if subOffsetSec != 0 {
+				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
+			}
+			filter := fmt.Sprintf(
+				"[0:p:%d:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];"+
+					"[0:p:%d:s:%d]%sformat=yuva420p[sub];"+
+					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
+				cfg.ServiceID, cfg.ServiceID, subIdx, subPtsChain,
+			)
 			args = append(args,
 				"-filter_complex", filter,
 				"-map", "[outv]",
@@ -241,7 +253,17 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		}
 	} else {
 		if subIdx >= 0 {
-			filter := fmt.Sprintf("[0:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];[main][0:s:%d]overlay=ts_sync_mode=default:eof_action=pass[outv]", subIdx)
+			subOffsetSec := float64(cfg.SubtitleOffsetMs) / 1000.0
+			subPtsChain := ""
+			if subOffsetSec != 0 {
+				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
+			}
+			filter := fmt.Sprintf(
+				"[0:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];"+
+					"[0:s:%d]%sformat=yuva420p[sub];"+
+					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
+				subIdx, subPtsChain,
+			)
 			args = append(args,
 				"-filter_complex", filter,
 				"-map", "[outv]",
@@ -339,6 +361,22 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
+	}
+
+	// For subtitle pipelines, quickly ensure filtergraph didn't exit immediately on missing/unsupported stream
+	if !cfg.IsMock && cfg.SubtitleTrack >= 0 {
+		time.Sleep(300 * time.Millisecond)
+		if cmd.Process != nil {
+			var ws syscall.WaitStatus
+			pid, err := syscall.Wait4(cmd.Process.Pid, &ws, syscall.WNOHANG, nil)
+			if err == nil && pid == cmd.Process.Pid {
+				// FFmpeg exited with error (e.g. subtitle stream missing/invalid)
+				log.Printf("[Transcoder] FFmpeg exited with subtitles enabled (status: %v). Retrying without subtitles...", ws)
+				cancel()
+				cfg.SubtitleTrack = -1
+				return d.StartPipeline(cfg)
+			}
+		}
 	}
 
 	log.Printf("[Transcoder] Started unified A/V MPEG-TS pipeline (HW: %s, ServiceID: %d)", hw, cfg.ServiceID)

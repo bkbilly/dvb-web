@@ -191,6 +191,19 @@ body {
   container-type: size;
 }
 
+.video-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background-color: #000;
+  flex: 1;
+  container-type: size;
+}
+
 .video-container.cursor-hidden,
 .video-container.cursor-hidden * {
   cursor: none !important;
@@ -623,12 +636,14 @@ body {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 50px;
+  height: auto;
+  min-height: 50px;
   background: linear-gradient(to top, rgba(0,0,0,0.85), transparent);
   display: flex;
   align-items: center;
-  padding: 0 1rem;
-  gap: 0.8rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 1rem;
+  gap: clamp(0.35rem, 1vw, 0.8rem);
   z-index: 10;
   transition: opacity 0.35s ease, visibility 0.35s ease;
 }
@@ -1945,9 +1960,20 @@ input:checked + .slider:before {
     flex: none;
     width: 100%;
     height: var(--mobile-video-height, min(56.25vw, 68vh));
-    min-height: 200px;
+    min-height: 180px;
     max-height: 82vh;
     transition: height 0.25s ease;
+    position: relative;
+  }
+
+  .video-screen {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
   }
 
   .video-container:has(#tv-video.ar-4-3) {
@@ -1959,6 +1985,56 @@ input:checked + .slider:before {
     width: 100vw !important;
     height: 100vh !important;
     max-height: none !important;
+    position: fixed !important;
+    inset: 0 !important;
+    display: block !important;
+  }
+
+  .video-container:fullscreen .video-screen,
+  #video-wrapper:fullscreen .video-screen {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    max-height: none !important;
+  }
+
+  .video-container:fullscreen .stream-alert,
+  #video-wrapper:fullscreen .stream-alert {
+    position: absolute !important;
+    top: 1rem !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    max-width: 90% !important;
+    border-radius: var(--radius) !important;
+  }
+
+  .video-container:fullscreen .video-osd,
+  #video-wrapper:fullscreen .video-osd {
+    position: absolute !important;
+    top: clamp(0.5rem, 2vmin, 1.5rem) !important;
+    left: clamp(0.5rem, 2vmin, 1.5rem) !important;
+    width: clamp(230px, 32vmin + 80px, 600px) !important;
+    max-width: calc(100% - clamp(1rem, 4vmin, 3rem)) !important;
+    border-radius: clamp(6px, 1vmin, 12px) !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  }
+
+  .video-container:fullscreen .timeshift-bar,
+  #video-wrapper:fullscreen .timeshift-bar {
+    position: absolute !important;
+    bottom: 50px !important;
+    left: 0 !important;
+    right: 0 !important;
+  }
+
+  .video-container:fullscreen .player-controls,
+  #video-wrapper:fullscreen .player-controls {
+    position: absolute !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
   }
 
   .video-osd {
@@ -1990,11 +2066,13 @@ input:checked + .slider:before {
     overflow-y: visible;
   }
 
-  /* Compact controls on mobile */
+  /* Compact & wrapping controls on mobile */
   .player-controls {
-    height: 44px;
-    padding: 0 0.5rem;
-    gap: 0.4rem;
+    height: auto;
+    min-height: 44px;
+    padding: 0.35rem 0.6rem;
+    gap: 0.35rem 0.5rem;
+    flex-wrap: wrap;
   }
 
   .ctrl-btn {
@@ -2135,6 +2213,222 @@ input:checked + .slider:before {
 }
 
 /* ==========================================================================
+   Mobile Stacked Layout (Sufficient Height Available)
+   Moves OSD & Alerts ABOVE the video, and Timeshift & Controls BELOW the video,
+   leaving the broadcast video 100% clean and unobstructed.
+   ========================================================================== */
+@media (max-width: 860px) and (min-height: 520px) {
+  .video-container:not(:fullscreen) {
+    flex: none;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-dark, #0b0f19);
+    container-type: normal;
+  }
+
+  /* Above the video: Stream Alert Banner */
+  .video-container:not(:fullscreen) .stream-alert {
+    position: relative;
+    top: auto;
+    left: auto;
+    transform: none;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    box-sizing: border-box;
+    margin: 0;
+    order: 1;
+  }
+
+  /* Above the video: Video OSD (Channel & Program Header) */
+  .video-container:not(:fullscreen) .video-osd {
+    position: relative;
+    top: auto;
+    left: auto;
+    transform: none;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 0;
+    box-shadow: none;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(15, 23, 42, 0.95);
+    padding: 0.5rem 0.8rem;
+    box-sizing: border-box;
+    order: 2;
+    z-index: 5;
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+
+  .video-container:not(:fullscreen) .video-osd.controls-autohidden {
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+    pointer-events: auto !important;
+  }
+
+  /* Video Screen Surface: perfectly clean & unobstructed */
+  .video-container:not(:fullscreen) .video-screen {
+    position: relative;
+    width: 100%;
+    height: var(--mobile-video-height, min(56.25vw, 48vh));
+    min-height: 180px;
+    max-height: 52vh;
+    background: #000;
+    flex: none;
+    order: 3;
+  }
+
+  .video-container:not(:fullscreen):has(#tv-video.ar-4-3) .video-screen {
+    height: var(--mobile-video-height, min(75vw, 55vh));
+  }
+
+  /* Below the video: Timeshift Scrubber Bar */
+  .video-container:not(:fullscreen) .timeshift-bar {
+    position: relative;
+    bottom: auto;
+    left: auto;
+    right: auto;
+    width: 100%;
+    background: rgba(15, 23, 42, 0.92);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    box-sizing: border-box;
+    order: 4;
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+
+  .video-container:not(:fullscreen) .timeshift-bar.controls-autohidden {
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+
+  /* Below the video: Player Controls Bar */
+  .video-container:not(:fullscreen) .player-controls {
+    position: relative;
+    bottom: auto;
+    left: auto;
+    right: auto;
+    width: 100%;
+    height: auto;
+    min-height: 44px;
+    background: rgba(15, 23, 42, 0.96);
+    border-bottom: 1px solid var(--border);
+    box-sizing: border-box;
+    padding: 0.4rem 0.6rem;
+    order: 5;
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+
+  .video-container:not(:fullscreen) .player-controls.controls-autohidden {
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+
+  .channel-sidebar {
+    border-top: none;
+  }
+}
+
+/* Responsive Controls Width Adaptability */
+@media (max-width: 680px) {
+  .player-controls {
+    padding: 0.35rem 0.5rem;
+    gap: 0.35rem 0.45rem;
+  }
+
+  .vol-slider {
+    width: 55px;
+  }
+
+  .rec-btn {
+    padding: 0.25rem 0.45rem;
+  }
+
+  .rec-btn .rec-text {
+    display: none;
+  }
+
+  .ctrl-btn {
+    padding: 0.25rem 0.35rem;
+    font-size: 1rem;
+  }
+
+  .track-select-btn {
+    padding: 0.25rem 0.45rem;
+    font-size: 0.8rem;
+  }
+
+  .aspect-btn,
+  .teletext-ctrl-btn,
+  .hbbtv-ctrl-btn {
+    padding: 0.25rem 0.45rem;
+    font-size: 0.8rem;
+  }
+
+  .timeshift-bar {
+    padding: 0 0.5rem;
+    gap: 0.35rem;
+  }
+
+  .timeshift-btn {
+    padding: 0.2rem 0.35rem;
+    font-size: 0.75rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .player-spacer {
+    display: none;
+  }
+
+  .vol-slider {
+    width: 42px;
+  }
+
+  .player-controls {
+    padding: 0.3rem 0.4rem;
+    gap: 0.25rem 0.35rem;
+  }
+
+  .ctrl-btn {
+    font-size: 0.92rem;
+    padding: 0.2rem 0.28rem;
+  }
+
+  .ts-btn-label {
+    display: none;
+  }
+
+  .timeshift-live-pill {
+    padding: 0.15rem 0.35rem;
+    font-size: 0.7rem;
+  }
+
+  .track-menu {
+    max-width: 90vw;
+  }
+}
+
+/* ==========================================================================
    Player Track Selectors & Instant Recording
    ========================================================================== */
 .track-dropdown-wrap {
@@ -2166,11 +2460,26 @@ input:checked + .slider:before {
   background: rgba(59, 130, 246, 0.2);
 }
 
+.track-select-btn.track-switching {
+  opacity: 0.85;
+  pointer-events: none;
+  border-color: var(--accent);
+  animation: trackBtnPulse 0.7s infinite alternate ease-in-out;
+}
+
+@keyframes trackBtnPulse {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(0.96); opacity: 1; filter: brightness(1.2); }
+}
+
 .track-menu {
   position: absolute;
   bottom: calc(100% + 8px);
   right: 0;
   min-width: 170px;
+  max-width: min(320px, 92vw);
+  max-height: 60vh;
+  overflow-y: auto;
   background: rgba(15, 23, 42, 0.95);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -2209,6 +2518,17 @@ input:checked + .slider:before {
   background-color: var(--accent);
   color: #fff;
   font-weight: 600;
+}
+
+.track-item.disabled {
+  cursor: default;
+  opacity: 0.55;
+  background: transparent;
+  pointer-events: none;
+}
+
+.track-item.disabled:hover {
+  background: transparent;
 }
 
 .track-item-tag {
@@ -2304,10 +2624,115 @@ input:checked + .slider:before {
   color: var(--text-muted);
 }
 
+.recordings-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* DVR Overview & Storage Statistics Bar */
+.dvr-stats-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+}
+
+@media (max-width: 900px) {
+  .dvr-stats-bar {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .dvr-stats-bar {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dvr-stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1.1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.dvr-stat-card:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.dvr-stat-icon {
+  font-size: 1.6rem;
+  flex-shrink: 0;
+}
+
+.dvr-stat-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.dvr-stat-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.dvr-stat-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Sections & Two-Column Split Layout */
 .recordings-section {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+.recordings-top-split {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+@media (min-width: 900px) {
+  .recordings-top-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+    align-items: start;
+  }
+
+  .recordings-top-split .recordings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.section-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.rec-filter-count {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
 .section-badge-header {
@@ -2348,10 +2773,80 @@ input:checked + .slider:before {
   100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
 
+/* Filter and Search Bar */
+.recordings-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.85rem;
+}
+
+.rec-search-box {
+  flex: 1;
+  min-width: 220px;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.rec-search-input {
+  width: 100%;
+  padding: 0.45rem 2rem 0.45rem 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.rec-search-input:focus {
+  border-color: var(--accent);
+}
+
+.btn-clear-search {
+  position: absolute;
+  right: 0.5rem;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.2rem;
+  font-size: 0.8rem;
+}
+
+.rec-filter-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.rec-filter-select {
+  padding: 0.45rem 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 0.82rem;
+  outline: none;
+  cursor: pointer;
+}
+
+.rec-filter-select:focus {
+  border-color: var(--accent);
+}
+
+/* Recordings Grid: Strictly Two Columns on Bigger Screens */
 .recordings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1.25rem;
 }
 
 .empty-grid {
@@ -2359,7 +2854,7 @@ input:checked + .slider:before {
 }
 
 .empty-state {
-  padding: 1.25rem 1.5rem;
+  padding: 1.5rem 1.75rem;
   background: rgba(255, 255, 255, 0.02);
   border: 1px dashed var(--border);
   border-radius: var(--radius);
@@ -2368,20 +2863,23 @@ input:checked + .slider:before {
   text-align: center;
 }
 
+/* Rich Recording Cards */
 .recording-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 1rem 1.2rem;
+  padding: 1.1rem 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
 }
 
 .recording-card:hover {
   border-color: rgba(255, 255, 255, 0.25);
   transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 
 .recording-card.card-active {
@@ -2393,20 +2891,34 @@ input:checked + .slider:before {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 0.5rem;
+  gap: 0.75rem;
+}
+
+.rec-card-title-wrap {
+  flex: 1;
+  min-width: 0;
 }
 
 .rec-card-title {
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 700;
-  margin: 0 0 0.25rem 0;
-  line-height: 1.3;
+  margin: 0 0 0.35rem 0;
+  line-height: 1.35;
+  color: var(--text-main);
+  word-break: break-word;
 }
 
-.rec-card-channel {
-  font-size: 0.8rem;
-  color: var(--accent);
+.rec-card-channel-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
   font-weight: 600;
+  color: var(--accent);
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
 }
 
 .rec-status-tag {
@@ -2438,9 +2950,20 @@ input:checked + .slider:before {
 }
 
 .rec-status-tag.failed {
-  background: rgba(148, 163, 184, 0.15);
-  color: #cbd5e1;
-  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.rec-card-desc {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .rec-card-body {
@@ -2448,28 +2971,59 @@ input:checked + .slider:before {
   color: var(--text-muted);
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.4rem;
 }
 
-.rec-info-row {
+.rec-meta-grid {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem 0.85rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.rec-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Active Recording Progress Bar */
+.rec-progress-wrap {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+  overflow: hidden;
+  margin-top: 0.25rem;
+}
+
+.rec-progress-bar {
+  height: 100%;
+  background: linear-gradient(to right, #ef4444, #f87171);
+  border-radius: 9999px;
+  transition: width 1s linear;
 }
 
 .rec-card-actions {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.25rem;
+  gap: 0.6rem;
+  margin-top: auto;
   padding-top: 0.75rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+  flex-wrap: wrap;
 }
 
 .btn-rec-action {
   font-size: 0.78rem;
   font-weight: 600;
-  padding: 0.35rem 0.7rem;
+  padding: 0.35rem 0.75rem;
   border-radius: 4px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.05);
@@ -2477,7 +3031,7 @@ input:checked + .slider:before {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.35rem;
   transition: all 0.15s ease;
   text-decoration: none;
 }
@@ -2907,28 +3461,6 @@ input:checked + .slider:before {
   text-align: center;
 }
 
-/* OSD Interactive Badges (HbbTV, Teletext) */
-.osd-interactive-badge {
-  background: rgba(239, 68, 68, 0.25);
-  color: #fca5a5;
-  border: 1px solid rgba(239, 68, 68, 0.5);
-  font-size: 0.7rem;
-  font-weight: 700;
-  padding: 0.12rem 0.4rem;
-  border-radius: 4px;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.osd-interactive-badge:hover {
-  background: rgba(239, 68, 68, 0.4);
-  color: #fff;
-  transform: scale(1.05);
-}
-
 /* Shortcuts Modal */
 .shortcuts-modal-card {
   max-width: 620px;
@@ -2982,9 +3514,9 @@ input:checked + .slider:before {
 
 /* HbbTV Modal */
 .hbbtv-modal-card {
-  max-width: 960px;
-  width: 95%;
-  height: 80vh;
+  width: min(96vw, 1320px);
+  height: min(92vh, calc(96vw * 9 / 16 + 56px));
+  max-height: 840px;
   display: flex;
   flex-direction: column;
 }
@@ -2992,14 +3524,69 @@ input:checked + .slider:before {
 .hbbtv-modal-body {
   flex: 1;
   padding: 0;
+  position: relative;
   overflow: hidden;
   background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .hbbtv-iframe {
   width: 100%;
   height: 100%;
   border: none;
+  display: block;
+}
+
+.hbbtv-remote-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  margin-right: 12px;
+}
+
+.btn-color-pill {
+  border: none;
+  border-radius: 9999px;
+  padding: 4px 12px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.15s ease, filter 0.15s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  user-select: none;
+}
+
+.btn-color-pill:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.15);
+}
+
+.btn-color-pill:active {
+  transform: translateY(1px);
+  filter: brightness(0.9);
+}
+
+.btn-red {
+  background: #e50914;
+  color: #fff;
+}
+
+.btn-green {
+  background: #22c55e;
+  color: #052e16;
+}
+
+.btn-yellow {
+  background: #eab308;
+  color: #422006;
+}
+
+.btn-blue {
+  background: #3b82f6;
+  color: #fff;
 }
 
 .hbbtv-header-actions {
@@ -3018,4 +3605,127 @@ input:checked + .slider:before {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+}
+
+/* Control Bar Buttons for Teletext, HbbTV, and Shortcuts Help */
+.teletext-ctrl-btn,
+.hbbtv-ctrl-btn {
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 0.28rem 0.6rem;
+  border-radius: var(--radius);
+  letter-spacing: 0.03em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.teletext-ctrl-btn {
+  background: rgba(59, 130, 246, 0.22);
+  border: 1px solid rgba(59, 130, 246, 0.55);
+  color: #93c5fd;
+}
+
+.teletext-ctrl-btn:hover {
+  background: rgba(59, 130, 246, 0.4);
+  border-color: #60a5fa;
+  color: #fff;
+}
+
+.hbbtv-ctrl-btn {
+  background: rgba(239, 68, 68, 0.22);
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  color: #fca5a5;
+}
+
+.hbbtv-ctrl-btn:hover {
+  background: rgba(239, 68, 68, 0.4);
+  border-color: #f87171;
+  color: #fff;
+}
+
+.hbbtv-ctrl-btn .red-dot {
+  width: 7px;
+  height: 7px;
+  background: #ef4444;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: 0 0 6px #ef4444;
+}
+
+/* Fullscreen compatibility for Modals & Toasts mounted inside video container */
+.video-container .modal {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+}
+
+.video-container #app-toast {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99999;
+}
+
+/* Subtitle Sync Controls */
+.track-menu-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 6px 0;
+}
+
+.track-menu-section-title {
+  padding: 4px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted, #94a3b8);
+  letter-spacing: 0.05em;
+}
+
+.sub-sync-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  margin: 2px 4px 6px 4px;
+}
+
+.btn-sync-adj {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 3px 7px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-sync-adj:hover {
+  background: #3b82f6;
+  color: #fff;
+  border-color: #60a5fa;
+}
+
+.btn-sync-adj:active {
+  transform: scale(0.96);
+}
+
+.sub-sync-label {
+  font-family: monospace;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #38bdf8;
+  min-width: 44px;
+  text-align: center;
 }

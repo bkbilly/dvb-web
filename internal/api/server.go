@@ -10,12 +10,15 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -93,6 +96,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/tuners/", s.handleTunerAction)
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
 	mux.HandleFunc("/api/logos/", s.handleLogoStatic)
+	mux.HandleFunc("/api/hbbtv/proxy", s.handleHbbtvProxy)
 	mux.HandleFunc("/api/stream", s.handleStream)
 	mux.HandleFunc("/api/recordings", s.handleRecordings)
 	mux.HandleFunc("/api/recordings/instant", s.handleRecordingInstant)
@@ -673,8 +677,14 @@ func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *
 			subTrack = v
 		}
 	}
+	subOffset := -1000 // default -1000ms (-1.0s) offset to eliminate live broadcast delay
+	if so := r.URL.Query().Get("sub_offset"); so != "" {
+		if v, err := strconv.Atoi(so); err == nil {
+			subOffset = v
+		}
+	}
 
-	t, err := s.tunerPool.AllocateChannelTrack(channel, audioTrack, subTrack, viewerSession)
+	t, actualSubTrack, err := s.tunerPool.AllocateChannelTrack(channel, audioTrack, subTrack, subOffset, viewerSession)
 	if err != nil {
 		log.Printf("[Server] streamChannel allocate error: %v", err)
 		if conflict, ok := err.(*tuner.TunerConflictError); ok {
@@ -693,13 +703,14 @@ func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *
 	}
 	s.BroadcastTuners(s.tunerPool.GetStatus())
 
-	ch := t.SubscribeTrack(channel.ID, audioTrack, subTrack, sessionID)
+	ch := t.SubscribeTrack(channel.ID, audioTrack, actualSubTrack, subOffset, sessionID)
 	if ch == nil {
 		http.Error(w, "stream unavailable", http.StatusInternalServerError)
 		return
 	}
+	streamKey := tuner.GetStreamKey(channel.ID, audioTrack, actualSubTrack, subOffset)
 	defer func() {
-		s.tunerPool.ReleaseStreamViewer(t.ID, channel.ID, sessionID)
+		s.tunerPool.ReleaseStreamViewerTrack(t.ID, channel.ID, streamKey, sessionID)
 		s.BroadcastTuners(s.tunerPool.GetStatus())
 	}()
 
@@ -707,6 +718,7 @@ func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("X-Sub-Track", strconv.Itoa(actualSubTrack))
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1439,6 +1451,47 @@ func (s *Server) handleRecordingDetail(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/recordings/")
 	parts := strings.Split(path, "/")
 
+	// Storage Overview Stats: GET /api/recordings/storage
+	if len(parts) > 0 && parts[0] == "storage" && r.Method == http.MethodGet {
+		recs, _ := s.db.ListRecordings()
+		var totalBytes int64
+		var totalDuration int
+		for _, rec := range recs {
+			totalBytes += rec.FileSize
+			totalDuration += rec.Duration
+		}
+
+		var freeBytes, totalDiskBytes uint64
+		var stat syscall.Statfs_t
+		dataDir := s.recorder.GetDataDir()
+		if err := syscall.Statfs(dataDir, &stat); err == nil {
+			freeBytes = stat.Bavail * uint64(stat.Bsize)
+			totalDiskBytes = stat.Blocks * uint64(stat.Bsize)
+		}
+
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"total_recordings": len(recs),
+			"total_bytes":      totalBytes,
+			"total_duration":   totalDuration,
+			"free_bytes":       freeBytes,
+			"total_disk_bytes": totalDiskBytes,
+		})
+		return
+	}
+
+	// Clear Failed Recordings: POST /api/recordings/clear-failed
+	if len(parts) > 0 && parts[0] == "clear-failed" && r.Method == http.MethodPost {
+		count, err := s.db.ClearFailedRecordings()
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"cleared": count,
+		})
+		return
+	}
+
 	// Instant Recording: POST /api/recordings/instant
 	if len(parts) > 0 && parts[0] == "instant" && r.Method == http.MethodPost {
 		var req struct {
@@ -1579,4 +1632,317 @@ func (s *Server) handleRecordingDetail(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" {
+		http.Error(w, "missing url parameter", http.StatusBadRequest)
+		return
+	}
+
+	// In DVB broadcast, AIT Autostart URLs often specify /home/index.php (an invisible 1x1 background notifier)
+	// whereas the interactive HbbTV portal app is located at /index.php. Target the interactive portal directly.
+	if strings.Contains(rawURL, "/home/index.php") {
+		rawURL = strings.Replace(rawURL, "/home/index.php", "/index.php", 1)
+	} else if strings.HasSuffix(rawURL, "/home/") {
+		rawURL = strings.TrimSuffix(rawURL, "home/")
+	}
+
+	targetURL, err := url.Parse(rawURL)
+	if err != nil || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
+		http.Error(w, "invalid url", http.StatusBadRequest)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), "GET", rawURL, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (SmartTV; HbbTV/1.4.1 (+PVR; DVB-T/T2;)) AppleWebkit/537.36")
+	req.Header.Set("Accept", "application/vnd.hbbtv.xhtml+xml, application/xhtml+xml, text/html, application/xml;q=0.9, */*;q=0.8")
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to fetch HbbTV page: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	ct := resp.Header.Get("Content-Type")
+	isHbbtv := strings.Contains(strings.ToLower(ct), "hbbtv") || strings.Contains(strings.ToLower(ct), "xhtml+xml")
+	if isHbbtv || strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "xml") {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		bodyStr := string(bodyBytes)
+
+		// 1. Replace plugin-triggering <object> and <embed> tags with <div> to prevent desktop browsers
+		// from displaying "This plugin is not supported" banners
+		bodyStr = regexp.MustCompile(`(?i)<object\b`).ReplaceAllString(bodyStr, "<div")
+		bodyStr = regexp.MustCompile(`(?i)</object>`).ReplaceAllString(bodyStr, "</div>")
+		bodyStr = regexp.MustCompile(`(?i)<embed\b`).ReplaceAllString(bodyStr, "<div")
+		bodyStr = regexp.MustCompile(`(?i)</embed>`).ReplaceAllString(bodyStr, "</div>")
+
+		baseURL := targetURL.Scheme + "://" + targetURL.Host + "/"
+		if idx := strings.LastIndex(targetURL.Path, "/"); idx != -1 {
+			baseURL = targetURL.Scheme + "://" + targetURL.Host + targetURL.Path[:idx+1]
+		}
+
+		// Rewrite relative location navigations
+		proxyBase := "/api/hbbtv/proxy?url=" + url.QueryEscape(targetURL.Scheme+"://"+targetURL.Host+"/")
+		bodyStr = regexp.MustCompile(`(?i)location\.(href|assign|replace)\s*=\s*(['"])/`).ReplaceAllString(bodyStr, "location.$1 = $2"+proxyBase)
+
+		baseTag := fmt.Sprintf(`<base href="%s" />`, baseURL)
+		polyfill := fmt.Sprintf(`
+<style>
+html {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100%% !important;
+  height: 100%% !important;
+  overflow: hidden !important;
+  background-color: transparent !important;
+}
+body {
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  background-color: transparent !important;
+}
+div#tvbild, div[data-type="video/broadcast"], div[type="video/broadcast"] {
+  background: transparent !important;
+}
+</style>
+<script>
+window.VK_RED = 403;
+window.VK_GREEN = 404;
+window.VK_YELLOW = 405;
+window.VK_BLUE = 406;
+window.VK_ENTER = 13;
+window.VK_BACK = 461;
+window.VK_LEFT = 37;
+window.VK_UP = 38;
+window.VK_RIGHT = 39;
+window.VK_DOWN = 40;
+if (!window.KeyEvent) {
+  window.KeyEvent = {
+    VK_RED: 403, VK_GREEN: 404, VK_YELLOW: 405, VK_BLUE: 406,
+    VK_ENTER: 13, VK_BACK: 461, VK_LEFT: 37, VK_UP: 38, VK_RIGHT: 39, VK_DOWN: 40,
+    VK_0: 48, VK_1: 49, VK_2: 50, VK_3: 51, VK_4: 52,
+    VK_5: 53, VK_6: 54, VK_7: 55, VK_8: 56, VK_9: 57
+  };
+}
+
+// Intercept XMLHttpRequest and fetch to resolve relative URLs against baseURL and bypass CORS
+var __hbbtvBase = %q;
+(function() {
+  var origOpen = window.XMLHttpRequest.prototype.open;
+  window.XMLHttpRequest.prototype.open = function(method, u, async, user, password) {
+    if (u && typeof u === 'string') {
+      if (!u.match(/^https?:\/\//i)) {
+        try {
+          var resolved = new URL(u, __hbbtvBase).href;
+          u = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+        } catch(e) {}
+      } else if (!u.startsWith(window.location.origin)) {
+        u = '/api/hbbtv/proxy?url=' + encodeURIComponent(u);
+      }
+    }
+    return origOpen.call(this, method, u, async !== false, user, password);
+  };
+
+  if (window.fetch) {
+    var origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      if (typeof input === 'string') {
+        if (!input.match(/^https?:\/\//i)) {
+          try {
+            var resolved = new URL(input, __hbbtvBase).href;
+            input = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+          } catch(e) {}
+        } else if (!input.startsWith(window.location.origin)) {
+          input = '/api/hbbtv/proxy?url=' + encodeURIComponent(input);
+        }
+      }
+      return origFetch.call(this, input, init);
+    };
+  }
+
+  // Intercept getElementsByTagName('object') so HbbTV scripts find our div mock objects
+  var origGetElementsByTagName = document.getElementsByTagName.bind(document);
+  document.getElementsByTagName = function(tag) {
+    if (tag && tag.toLowerCase() === 'object') {
+      var real = Array.prototype.slice.call(origGetElementsByTagName('object'));
+      var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #oipfcfg, #mybroadcast, #oipfAppMan, #oipfConfig'));
+      return real.concat(mocks);
+    }
+    return origGetElementsByTagName(tag);
+  };
+})();
+
+// Complete OIPF & Broadcast Object Polyfill
+var mockKeyset = {
+  setValue: function() {},
+  RED: 1,
+  GREEN: 2,
+  YELLOW: 4,
+  BLUE: 8,
+  NAVIGATION: 16,
+  VCR: 32,
+  NUMERIC: 256
+};
+var mockApp = {
+  show: function() {},
+  hide: function() {},
+  activate: function() {},
+  activateInput: function() {},
+  createApplication: function() {},
+  destroyApplication: function() {},
+  privateData: {
+    keyset: mockKeyset
+  }
+};
+var mockAppMan = {
+  getOwnerApplication: function() { return mockApp; }
+};
+var mockConfig = {
+  configuration: {},
+  keyset: mockKeyset,
+  localSystem: {
+    deviceID: 'smarttv-dvb-001',
+    modelName: 'SmartTV',
+    vendorName: 'Antigravity'
+  }
+};
+var mockBc = {
+  bindToCurrentChannel: function() {},
+  setFullScreen: function() {},
+  release: function() {},
+  stop: function() {},
+  play: function() { return 0; },
+  currentChannel: { name: 'DVB Broadcast', sid: 3500 },
+  getChannelConfig: function() {
+    return {
+      channelList: {
+        getChannelByTriplet: function() { return {}; }
+      }
+    };
+  }
+};
+
+window.oipfApplicationManager = function() { return mockAppMan; };
+window.oipfConfiguration = function() { return mockConfig; };
+
+function initHbbtvMocks() {
+  document.querySelectorAll('#appmgr, #oipfAppMan, [type*="ApplicationManager"], [data-type*="ApplicationManager"]').forEach(function(el) {
+    Object.assign(el, mockAppMan);
+  });
+  document.querySelectorAll('#oipfcfg, #oipfConfig, [type*="Configuration"], [data-type*="Configuration"]').forEach(function(el) {
+    Object.assign(el, mockConfig);
+  });
+  document.querySelectorAll('#mybroadcast, #tvbild, [type*="broadcast"], [data-type*="broadcast"]').forEach(function(el) {
+    Object.assign(el, mockBc);
+  });
+  var rb = document.getElementById('redbutton');
+  if (rb) {
+    rb.style.cursor = 'pointer';
+    rb.onclick = function() { window.sendHbbtvKey(403); };
+  }
+}
+
+// Auto-scale 1280x720 HbbTV canvas to perfectly fit any iframe/modal size
+function fitHbbTV() {
+  var w = window.innerWidth || document.documentElement.clientWidth || 1280;
+  var h = window.innerHeight || document.documentElement.clientHeight || 720;
+  var scale = Math.min(w / 1280, h / 720);
+  if (scale <= 0) scale = 1;
+  if (document.body) {
+    document.body.style.setProperty('width', '1280px', 'important');
+    document.body.style.setProperty('height', '720px', 'important');
+    document.body.style.setProperty('transform-origin', 'top left', 'important');
+    document.body.style.setProperty('transform', 'scale(' + scale + ')', 'important');
+    document.body.style.setProperty('position', 'absolute', 'important');
+    document.body.style.setProperty('left', Math.max(0, (w - 1280 * scale) / 2) + 'px', 'important');
+    document.body.style.setProperty('top', Math.max(0, (h - 720 * scale) / 2) + 'px', 'important');
+    document.body.style.setProperty('overflow', 'hidden', 'important');
+  }
+}
+
+window.sendHbbtvKey = function(code) {
+  var keys = [code];
+  if (code === 403) keys.push(116);
+  if (code === 404) keys.push(117);
+  if (code === 405) keys.push(118);
+  if (code === 406) keys.push(119);
+  keys.forEach(function(k) {
+    var evt = document.createEvent('Events');
+    evt.initEvent('keydown', true, true);
+    evt.keyCode = k;
+    evt.which = k;
+    document.dispatchEvent(evt);
+    window.dispatchEvent(evt);
+  });
+};
+
+window.addEventListener('keydown', function(e) {
+  var code = e.keyCode || e.which;
+  if (code === 82 || code === 49) { // R or 1 -> VK_RED
+    window.sendHbbtvKey(403);
+  } else if (code === 71 || code === 50) { // G or 2 -> VK_GREEN
+    window.sendHbbtvKey(404);
+  } else if (code === 89 || code === 51) { // Y or 3 -> VK_YELLOW
+    window.sendHbbtvKey(405);
+  } else if (code === 66 || code === 52) { // B or 4 -> VK_BLUE
+    window.sendHbbtvKey(406);
+  }
+});
+
+window.addEventListener('resize', fitHbbTV);
+document.addEventListener('DOMContentLoaded', function() {
+  initHbbtvMocks();
+  fitHbbTV();
+});
+window.addEventListener('load', function() {
+  initHbbtvMocks();
+  fitHbbTV();
+});
+setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 80);
+setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 400);
+</script>`, baseURL)
+
+		if idx := strings.Index(strings.ToLower(bodyStr), "</head>"); idx != -1 {
+			bodyStr = bodyStr[:idx] + baseTag + polyfill + bodyStr[idx:]
+		} else if idx := strings.Index(strings.ToLower(bodyStr), "<head>"); idx != -1 {
+			bodyStr = bodyStr[:idx+6] + baseTag + polyfill + bodyStr[idx+6:]
+		} else if idx := strings.Index(strings.ToLower(bodyStr), "<head "); idx != -1 {
+			endHead := strings.Index(bodyStr[idx:], ">")
+			if endHead != -1 {
+				insertAt := idx + endHead + 1
+				bodyStr = bodyStr[:insertAt] + baseTag + polyfill + bodyStr[insertAt:]
+			}
+		} else {
+			bodyStr = baseTag + polyfill + bodyStr
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write([]byte(bodyStr))
+		return
+	}
+
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }

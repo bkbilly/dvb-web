@@ -19,10 +19,13 @@ let scanDiff = null;
 // ==========================================================
 function showToast(msg, type = 'info') {
   let toast = document.getElementById('app-toast');
+  const targetParent = document.fullscreenElement || document.body;
   if (!toast) {
     toast = document.createElement('div');
     toast.id = 'app-toast';
-    document.body.appendChild(toast);
+  }
+  if (toast.parentElement !== targetParent) {
+    targetParent.appendChild(toast);
   }
 
   let borderCol = 'rgba(59, 130, 246, 0.4)';
@@ -39,9 +42,13 @@ function showToast(msg, type = 'info') {
     textCol = '#86efac';
   }
 
+  const isFs = !!document.fullscreenElement;
+  const bottomPos = isFs ? '80px' : '24px';
+  const posType = isFs ? 'absolute' : 'fixed';
+
   toast.style.cssText = `
-    position: fixed;
-    bottom: 24px;
+    position: ${posType};
+    bottom: ${bottomPos};
     left: 50%;
     transform: translateX(-50%);
     background: ${bgCol};
@@ -53,7 +60,7 @@ function showToast(msg, type = 'info') {
     border-radius: 8px;
     font-size: 0.88rem;
     font-weight: 600;
-    z-index: 9999;
+    z-index: 99999;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
     transition: opacity 0.3s ease, transform 0.3s ease;
     pointer-events: none;
@@ -861,19 +868,7 @@ function startStream(channel) {
   resetStandbyCard();
   updateRadioOverlay(channel);
 
-  const hbbtvBadge = document.getElementById('osd-hbbtv-badge');
-  const txtBadge = document.getElementById('osd-teletext-badge');
-  const hbbtv = (availableChannelTracks && availableChannelTracks.hbbtv_url) || channel.hbbtv_url;
-  const hasTxt = (availableChannelTracks && availableChannelTracks.has_teletext) || channel.has_teletext;
-
-  if (hbbtvBadge) {
-    if (hbbtv) hbbtvBadge.classList.remove('hidden');
-    else hbbtvBadge.classList.add('hidden');
-  }
-  if (txtBadge) {
-    if (hasTxt) txtBadge.classList.remove('hidden');
-    else txtBadge.classList.add('hidden');
-  }
+  updateInteractiveFeaturesUI(channel);
 
   standbyOverlay.classList.add('hidden');
   const streamLoader = document.getElementById('stream-loader');
@@ -886,7 +881,7 @@ function startStream(channel) {
     streamLoader.style.opacity = '1';
   }
 
-  const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}&audio_track=${currentAudioTrack}&sub_track=${currentSubTrack}`;
+  const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}&audio_track=${currentAudioTrack}&sub_track=${currentSubTrack}&sub_offset=${currentSubOffsetMs}`;
 
   if (window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
     player = mpegts.createPlayer({
@@ -900,7 +895,7 @@ function startStream(channel) {
       autoCleanupMaxBackwardDuration: 1800,
       autoCleanupMinBackwardDuration: 900,
       liveBufferLatencyChasing: false,
-      liveSync: true,
+      liveSync: false,
     });
 
     player.attachMediaElement(video);
@@ -908,6 +903,13 @@ function startStream(channel) {
 
     player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
       console.warn('[Player] mpegts error:', errorType, errorDetail, errorInfo);
+      if (currentSubTrack >= 0) {
+        showToast('⚠️ Subtitles not available in this broadcast; switching to live stream', 'warning');
+        currentSubTrack = -1;
+        renderTrackMenus();
+        switchStreamTracks(channel);
+        return;
+      }
       if (errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         handleStreamStopped('Stream connection was closed by the server.', true);
       } else if (errorType === mpegts.ErrorTypes.MEDIA_ERROR) {
@@ -925,6 +927,17 @@ function startStream(channel) {
     player.play().catch(e => {
       console.log('[Player] Play error:', e);
     });
+
+    if (currentSubTrack >= 0) {
+      setTimeout(() => {
+        if (player && currentSubTrack >= 0 && video.paused && (!video.buffered || video.buffered.length === 0)) {
+          showToast('⚠️ Subtitle stream timed out; switching to live stream', 'warning');
+          currentSubTrack = -1;
+          renderTrackMenus();
+          switchStreamTracks(channel);
+        }
+      }, 8000);
+    }
   } else {
     video.src = streamUrl;
     video.muted = false;
@@ -1000,6 +1013,35 @@ let playerHideTimer = null;
 let isMouseOverControls = false;
 let isMouseOverOSD = false;
 
+function isOverlayOrModalOpen() {
+  const ids = ['shortcuts-modal', 'hbbtv-modal', 'teletext-overlay', 'rf-analyzer-overlay', 'epg-modal', 'conflict-modal'];
+  return ids.some(id => {
+    const el = document.getElementById(id);
+    return el && !el.classList.contains('hidden');
+  });
+}
+
+function updateInteractiveFeaturesUI(channel) {
+  const ch = channel || activeChannel;
+  if (!ch) return;
+
+  const hasTxt = !!(availableChannelTracks && availableChannelTracks.has_teletext);
+  const hbbtv = (availableChannelTracks && availableChannelTracks.hbbtv_url) || (ch && ch.hbbtv_url) || '';
+
+  const btnHbbtv = document.getElementById('btn-hbbtv-ctrl');
+  const btnTxt = document.getElementById('btn-teletext-ctrl');
+
+  if (btnHbbtv) btnHbbtv.classList.toggle('hidden', !hbbtv);
+  if (btnTxt) btnTxt.classList.toggle('hidden', !hasTxt);
+
+  if (!hasTxt) {
+    const teletextOverlay = document.getElementById('teletext-overlay');
+    if (teletextOverlay && !teletextOverlay.classList.contains('hidden')) {
+      toggleTeletext(false);
+    }
+  }
+}
+
 function showPlayerUI(channel) {
   if (playerHideTimer) {
     clearTimeout(playerHideTimer);
@@ -1037,13 +1079,15 @@ function schedulePlayerUIHide(delay = 3500) {
     playerHideTimer = null;
   }
 
-  // If mouse is currently hovering over controls or OSD, NEVER hide!
-  if (isMouseOverControls || isMouseOverOSD) {
+  // If mouse is currently hovering over controls or OSD, or any overlay/modal is open, NEVER hide!
+  if (isMouseOverControls || isMouseOverOSD || isOverlayOrModalOpen()) {
+    const wrapper = document.getElementById('video-wrapper');
+    if (wrapper) wrapper.classList.remove('cursor-hidden');
     return;
   }
 
   playerHideTimer = setTimeout(() => {
-    if (isMouseOverControls || isMouseOverOSD) return;
+    if (isMouseOverControls || isMouseOverOSD || isOverlayOrModalOpen()) return;
 
     const playerControls = document.querySelector('.player-controls');
     const timeshiftBar = document.getElementById('timeshift-bar');
@@ -1051,12 +1095,17 @@ function schedulePlayerUIHide(delay = 3500) {
     if (isControlsOverVideo()) {
       if (playerControls) playerControls.classList.add('controls-autohidden');
       if (timeshiftBar) timeshiftBar.classList.add('controls-autohidden');
-      videoOsd.classList.add('controls-autohidden');
       if (wrapper) wrapper.classList.add('cursor-hidden');
     } else {
-      // Controls are in the dark letterbox space outside the video:
-      // They stay visible, while the OSD above hides
+      if (playerControls) playerControls.classList.remove('controls-autohidden');
+      if (timeshiftBar) timeshiftBar.classList.remove('controls-autohidden');
+      if (wrapper) wrapper.classList.remove('cursor-hidden');
+    }
+
+    if (isOSDOverVideo()) {
       videoOsd.classList.add('controls-autohidden');
+    } else {
+      videoOsd.classList.remove('controls-autohidden');
     }
   }, delay);
 }
@@ -1071,19 +1120,7 @@ function updateOSD(channel) {
 
   updateRadioOverlay(channel);
 
-  const hbbtvBadge = document.getElementById('osd-hbbtv-badge');
-  const txtBadge = document.getElementById('osd-teletext-badge');
-  const hbbtv = (availableChannelTracks && availableChannelTracks.hbbtv_url) || channel.hbbtv_url;
-  const hasTxt = (availableChannelTracks && availableChannelTracks.has_teletext) || channel.has_teletext;
-
-  if (hbbtvBadge) {
-    if (hbbtv) hbbtvBadge.classList.remove('hidden');
-    else hbbtvBadge.classList.add('hidden');
-  }
-  if (txtBadge) {
-    if (hasTxt) txtBadge.classList.remove('hidden');
-    else txtBadge.classList.add('hidden');
-  }
+  updateInteractiveFeaturesUI(channel);
 
   const nowShow = channel.now_playing;
   if (nowShow) {
@@ -1386,6 +1423,22 @@ function isControlsOverVideo() {
   return overlapsY && overlapsX;
 }
 
+// Check if video OSD banner intersects the actual rendered video content
+function isOSDOverVideo() {
+  if (!video || !videoOsd) return false;
+  const standby = document.getElementById('standby-overlay');
+  if (standby && !standby.classList.contains('hidden')) return false;
+
+  const videoRect = video.getBoundingClientRect();
+  const osdRect = videoOsd.getBoundingClientRect();
+
+  if (videoRect.width === 0 || videoRect.height === 0 || osdRect.width === 0 || osdRect.height === 0) return false;
+
+  const overlapsY = osdRect.top < videoRect.bottom - 2 && osdRect.bottom > videoRect.top + 2;
+  const overlapsX = osdRect.left < videoRect.right && osdRect.right > videoRect.left;
+  return overlapsY && overlapsX;
+}
+
 function toggleFullscreen() {
   const wrapper = document.getElementById('video-wrapper');
   if (!document.fullscreenElement) {
@@ -1579,23 +1632,9 @@ function getTimeshiftBufferRange() {
   if (!video || !video.buffered || video.buffered.length === 0) {
     return { start: 0, end: video.currentTime || 0, duration: 0 };
   }
-  const cur = video.currentTime;
-  let activeRange = null;
-  for (let i = 0; i < video.buffered.length; i++) {
-    const s = video.buffered.start(i);
-    const e = video.buffered.end(i);
-    if (cur >= s - 0.5 && cur <= e + 0.5) {
-      activeRange = { start: s, end: e, duration: e - s };
-      break;
-    }
-  }
-  if (!activeRange) {
-    const lastIdx = video.buffered.length - 1;
-    const s = video.buffered.start(lastIdx);
-    const e = video.buffered.end(lastIdx);
-    activeRange = { start: s, end: e, duration: e - s };
-  }
-  return activeRange;
+  const s = video.buffered.start(0);
+  const e = video.buffered.end(video.buffered.length - 1);
+  return { start: s, end: e, duration: Math.max(0, e - s) };
 }
 
 function formatTimeshiftOffset(seconds) {
@@ -1655,8 +1694,13 @@ function toggleTimeshiftPlayPause() {
 function seekTimeshift(deltaSeconds) {
   if (!video) return;
   const range = getTimeshiftBufferRange();
-  if (!range || range.duration <= 0) return;
-  const target = Math.min(Math.max(video.currentTime + deltaSeconds, range.start), range.end - 0.2);
+  if (!range || range.duration <= 0.5) return;
+  let target = video.currentTime + deltaSeconds;
+  if (target > range.end - 0.5) {
+    target = Math.max(range.start, range.end - 0.5);
+  } else if (target < range.start) {
+    target = range.start;
+  }
   video.currentTime = target;
   updateTimeshiftUI();
   showPlayerUI();
@@ -1692,7 +1736,8 @@ function initTimeshift() {
     slider.addEventListener('input', () => {
       isScrubbingTimeshift = true;
       const val = parseFloat(slider.value);
-      const max = parseFloat(slider.max);
+      const range = getTimeshiftBufferRange();
+      const max = range ? range.end : parseFloat(slider.max);
       const offset = Math.max(0, max - val);
       if (offsetText) {
         offsetText.textContent = offset < 3.0 ? 'LIVE' : formatTimeshiftOffset(offset);
@@ -1700,7 +1745,15 @@ function initTimeshift() {
     });
 
     slider.addEventListener('change', () => {
-      const val = parseFloat(slider.value);
+      let val = parseFloat(slider.value);
+      const range = getTimeshiftBufferRange();
+      if (range && range.duration > 0.5) {
+        if (val > range.end - 0.5) {
+          val = Math.max(range.start, range.end - 0.5);
+        } else if (val < range.start) {
+          val = range.start;
+        }
+      }
       video.currentTime = val;
       isScrubbingTimeshift = false;
       updateTimeshiftUI();
@@ -1782,6 +1835,10 @@ function renderRFAnalyzer(sig) {
 function toggleRFAnalyzer(force) {
   const el = document.getElementById('rf-analyzer-overlay');
   if (!el) return;
+  const wrapper = document.getElementById('video-wrapper');
+  if (wrapper && el.parentElement !== wrapper) {
+    wrapper.appendChild(el);
+  }
   const show = typeof force === 'boolean' ? force : el.classList.contains('hidden');
   el.classList.toggle('hidden', !show);
   if (show) {
@@ -1804,6 +1861,15 @@ function updateTeletextClock() {
 function toggleTeletext(force) {
   const el = document.getElementById('teletext-overlay');
   if (!el) return;
+  const hasTxt = !!(availableChannelTracks && availableChannelTracks.has_teletext);
+  if (!hasTxt && force !== false && el.classList.contains('hidden')) {
+    showToast('ℹ️ Teletext is not broadcast on this channel', 'info');
+    return;
+  }
+  const wrapper = document.getElementById('video-wrapper');
+  if (wrapper && el.parentElement !== wrapper) {
+    wrapper.appendChild(el);
+  }
   const show = typeof force === 'boolean' ? force : el.classList.contains('hidden');
   el.classList.toggle('hidden', !show);
   if (show) {
@@ -1971,20 +2037,53 @@ function toggleHbbTV(force) {
     if (iframe) iframe.src = 'about:blank';
     return;
   }
-  const url = (availableChannelTracks && availableChannelTracks.hbbtv_url) || (activeChannel && activeChannel.hbbtv_url);
+  const url = (availableChannelTracks && availableChannelTracks.hbbtv_url) || (activeChannel && activeChannel.hbbtv_url) || '';
   if (!url) {
-    showToast('ℹ️ No HbbTV portal configured or detected for this channel', 'info');
+    showToast('ℹ️ HbbTV is not supported or signaled by this channel', 'info');
     return;
+  }
+  const targetParent = document.fullscreenElement || document.body;
+  if (modal.parentElement !== targetParent) {
+    targetParent.appendChild(modal);
   }
   const iframe = document.getElementById('hbbtv-iframe');
   const title = document.getElementById('hbbtv-modal-title');
-  const ext = document.getElementById('btn-hbbtv-external');
-  if (iframe) iframe.src = url;
+  if (iframe) iframe.src = `/api/hbbtv/proxy?url=${encodeURIComponent(url)}`;
   if (title && activeChannel) title.textContent = `🔴 HbbTV: ${activeChannel.name}`;
-  if (ext) ext.href = url;
   modal.classList.remove('hidden');
+  const wrapper = document.getElementById('video-wrapper');
+  if (wrapper) wrapper.classList.remove('cursor-hidden');
+  showPlayerUI();
 }
 window.toggleHbbTV = toggleHbbTV;
+
+function sendHbbtvKeyToIframe(keyCode) {
+  const iframe = document.getElementById('hbbtv-iframe');
+  if (!iframe) return;
+  try {
+    const targetDoc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+    const targetWin = iframe.contentWindow;
+    if (!targetWin) return;
+
+    if (typeof targetWin.sendHbbtvKey === 'function') {
+      targetWin.sendHbbtvKey(keyCode);
+    } else {
+      const evt = new (targetWin.KeyboardEvent || KeyboardEvent)('keydown', {
+        keyCode: keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true
+      });
+      Object.defineProperty(evt, 'keyCode', { value: keyCode });
+      Object.defineProperty(evt, 'which', { value: keyCode });
+      if (targetDoc) targetDoc.dispatchEvent(evt);
+      targetWin.dispatchEvent(evt);
+    }
+  } catch (e) {
+    console.warn('Could not dispatch key into HbbTV iframe:', e);
+  }
+}
+window.sendHbbtvKeyToIframe = sendHbbtvKeyToIframe;
 
 // ==========================================================
 // KEYBOARD SHORTCUTS HELP MODAL
@@ -1993,6 +2092,15 @@ function toggleShortcutsModal(force) {
   const modal = document.getElementById('shortcuts-modal');
   if (!modal) return;
   const show = typeof force === 'boolean' ? force : modal.classList.contains('hidden');
+  if (show) {
+    const targetParent = document.fullscreenElement || document.body;
+    if (modal.parentElement !== targetParent) {
+      targetParent.appendChild(modal);
+    }
+    const wrapper = document.getElementById('video-wrapper');
+    if (wrapper) wrapper.classList.remove('cursor-hidden');
+    showPlayerUI();
+  }
   modal.classList.toggle('hidden', !show);
 }
 window.toggleShortcutsModal = toggleShortcutsModal;
@@ -2016,21 +2124,46 @@ function setupInteractiveFeatures() {
     };
   }
 
-  const osdHbbtvBadge = document.getElementById('osd-hbbtv-badge');
-  if (osdHbbtvBadge) {
-    osdHbbtvBadge.onclick = (e) => {
+  // Player Control Bar Buttons
+  const btnTeletextCtrl = document.getElementById('btn-teletext-ctrl');
+  if (btnTeletextCtrl) {
+    btnTeletextCtrl.onclick = (e) => {
+      e.stopPropagation();
+      toggleTeletext();
+    };
+  }
+
+  const btnHbbtvCtrl = document.getElementById('btn-hbbtv-ctrl');
+  if (btnHbbtvCtrl) {
+    btnHbbtvCtrl.onclick = (e) => {
       e.stopPropagation();
       toggleHbbTV();
     };
   }
 
-  const osdTeletextBadge = document.getElementById('osd-teletext-badge');
-  if (osdTeletextBadge) {
-    osdTeletextBadge.onclick = (e) => {
-      e.stopPropagation();
-      toggleTeletext();
-    };
-  }
+  // Keep player overlays inside #video-wrapper, and keep global modals/toasts inside fullscreen element when active
+  document.addEventListener('fullscreenchange', () => {
+    const videoWrapper = document.getElementById('video-wrapper');
+    const isFullscreen = !!document.fullscreenElement;
+
+    // Player HUD overlays MUST always reside inside the video surface container
+    const videoTarget = document.getElementById('video-screen') || videoWrapper;
+    ['teletext-overlay', 'rf-analyzer-overlay'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && videoTarget && el.parentElement !== videoTarget) {
+        videoTarget.appendChild(el);
+      }
+    });
+
+    // Modals and toasts move into videoWrapper during fullscreen so they are visible, and return to document.body outside fullscreen
+    const modalTarget = isFullscreen ? videoWrapper : document.body;
+    ['shortcuts-modal', 'hbbtv-modal', 'app-toast'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && el.parentElement !== modalTarget) {
+        modalTarget.appendChild(el);
+      }
+    });
+  });
 }
 
 function zapDelta(delta) {
@@ -2086,6 +2219,48 @@ function setupKeybindings() {
       return;
     }
 
+    const hbbtvModal = document.getElementById('hbbtv-modal');
+    if (hbbtvModal && !hbbtvModal.classList.contains('hidden')) {
+      if (e.key === 'h' || e.key === 'H') {
+        e.preventDefault();
+        toggleHbbTV(false);
+        return;
+      }
+      if (e.key === 'r' || e.key === 'R' || e.key === '1') {
+        e.preventDefault();
+        sendHbbtvKeyToIframe(403);
+        return;
+      }
+      if (e.key === 'g' || e.key === 'G' || e.key === '2') {
+        e.preventDefault();
+        sendHbbtvKeyToIframe(404);
+        return;
+      }
+      if (e.key === 'y' || e.key === 'Y' || e.key === '3') {
+        e.preventDefault();
+        sendHbbtvKeyToIframe(405);
+        return;
+      }
+      if (e.key === 'b' || e.key === 'B' || e.key === '4') {
+        e.preventDefault();
+        sendHbbtvKeyToIframe(406);
+        return;
+      }
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'Backspace'].includes(e.key)) {
+        e.preventDefault();
+        const codeMap = {
+          ArrowUp: 38,
+          ArrowDown: 40,
+          ArrowLeft: 37,
+          ArrowRight: 39,
+          Enter: 13,
+          Backspace: 461
+        };
+        sendHbbtvKeyToIframe(codeMap[e.key] || e.keyCode);
+        return;
+      }
+    }
+
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
 
     if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
@@ -2121,6 +2296,12 @@ function setupKeybindings() {
     } else if (e.key === '-' || e.key === '_') {
       e.preventDefault();
       adjustVolume(-0.05);
+    } else if (e.key === '[' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      adjustSubtitleOffset(-500);
+    } else if (e.key === ']' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      adjustSubtitleOffset(500);
     } else if ((e.key === 'a' || e.key === 'A') && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       cycleAspectRatio();
@@ -3048,7 +3229,34 @@ function setupSettingsUI() {
 // ==========================================================
 let currentAudioTrack = 0;
 let currentSubTrack = -1; // -1 = off
+let currentSubOffsetMs = parseInt(localStorage.getItem('dvb_sub_offset_ms') || '-1000', 10);
+if (isNaN(currentSubOffsetMs)) currentSubOffsetMs = -1000;
 let availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
+
+function adjustSubtitleOffset(deltaMs) {
+  currentSubOffsetMs += deltaMs;
+  if (currentSubOffsetMs < -5000) currentSubOffsetMs = -5000;
+  if (currentSubOffsetMs > 5000) currentSubOffsetMs = 5000;
+  localStorage.setItem('dvb_sub_offset_ms', currentSubOffsetMs);
+  const sec = (currentSubOffsetMs / 1000).toFixed(1);
+  showToast(`⏱️ Subtitle Sync: ${sec > 0 ? '+' : ''}${sec}s`, 'info');
+  renderTrackMenus();
+  if (currentSubTrack >= 0 && activeChannel) {
+    switchStreamTracks(activeChannel);
+  }
+}
+window.adjustSubtitleOffset = adjustSubtitleOffset;
+
+function resetSubtitleOffset() {
+  currentSubOffsetMs = -1000;
+  localStorage.setItem('dvb_sub_offset_ms', currentSubOffsetMs);
+  showToast('⏱️ Subtitle Sync reset to default (-1.0s)', 'info');
+  renderTrackMenus();
+  if (currentSubTrack >= 0 && activeChannel) {
+    switchStreamTracks(activeChannel);
+  }
+}
+window.resetSubtitleOffset = resetSubtitleOffset;
 
 async function fetchAndRenderChannelTracks(channelId) {
   try {
@@ -3056,20 +3264,17 @@ async function fetchAndRenderChannelTracks(channelId) {
     if (res.ok) {
       availableChannelTracks = await res.json();
       renderTrackMenus();
-      const hbbtvBadge = document.getElementById('osd-hbbtv-badge');
-      const txtBadge = document.getElementById('osd-teletext-badge');
-      const hbbtv = availableChannelTracks.hbbtv_url || (activeChannel && activeChannel.hbbtv_url);
-      const hasTxt = availableChannelTracks.has_teletext || (activeChannel && activeChannel.has_teletext);
-      if (hbbtvBadge) hbbtvBadge.classList.toggle('hidden', !hbbtv);
-      if (txtBadge) txtBadge.classList.toggle('hidden', !hasTxt);
+      updateInteractiveFeaturesUI(activeChannel);
     } else {
       availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
       renderTrackMenus();
+      updateInteractiveFeaturesUI(activeChannel);
     }
   } catch (e) {
     console.warn('[Tracks] Failed to fetch channel tracks:', e);
     availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
     renderTrackMenus();
+    updateInteractiveFeaturesUI(activeChannel);
   }
 }
 
@@ -3094,9 +3299,10 @@ function renderTrackMenus() {
     }
   }
 
-  // Hide subtitle dropdown if there are 0 subtitle tracks available
+  // Show subtitle dropdown for all non-radio television channels
+  const isRadio = activeChannel && activeChannel.is_radio;
   if (subWrap) {
-    if (subTracks.length > 0) {
+    if (!isRadio) {
       subWrap.classList.remove('hidden');
     } else {
       subWrap.classList.add('hidden');
@@ -3117,14 +3323,14 @@ function renderTrackMenus() {
       audioTracks.forEach(t => {
         const item = document.createElement('button');
         item.className = `track-item ${currentAudioTrack === t.index ? 'active' : ''}`;
-        const desc = t.description || (t.language ? t.language.toUpperCase() : `Audio Track ${t.index + 1}`);
+        const desc = t.description || t.title || (t.language ? t.language.toUpperCase() : `Audio Track ${t.index + 1}`);
         item.innerHTML = `<span>${desc}</span><span class="track-item-tag">${t.codec ? t.codec.toUpperCase() : ''}</span>`;
         item.onclick = (e) => {
           e.stopPropagation();
           currentAudioTrack = t.index;
           audioMenu.classList.add('hidden');
           renderTrackMenus();
-          reloadCurrentStream();
+          switchStreamTracks(activeChannel);
         };
         audioMenu.appendChild(item);
       });
@@ -3141,6 +3347,11 @@ function renderTrackMenus() {
   if (subMenu) {
     subMenu.innerHTML = '';
 
+    // If channel has no subtitles broadcast, force currentSubTrack to off
+    if (currentSubTrack >= 0 && subTracks.length === 0) {
+      currentSubTrack = -1;
+    }
+
     // Always include "Off" option
     const offItem = document.createElement('button');
     offItem.className = `track-item ${currentSubTrack === -1 ? 'active' : ''}`;
@@ -3150,29 +3361,100 @@ function renderTrackMenus() {
       currentSubTrack = -1;
       subMenu.classList.add('hidden');
       renderTrackMenus();
-      reloadCurrentStream();
+      switchStreamTracks(activeChannel);
     };
     subMenu.appendChild(offItem);
 
-    subTracks.forEach(s => {
-      const item = document.createElement('button');
-      item.className = `track-item ${currentSubTrack === s.index ? 'active' : ''}`;
-      const desc = s.description || (s.language ? s.language.toUpperCase() : `Subtitle ${s.index + 1}`);
-      item.innerHTML = `<span>${desc}</span><span class="track-item-tag">Burned In</span>`;
-      item.onclick = (e) => {
+    if (subTracks.length > 0) {
+      subTracks.forEach(s => {
+        const item = document.createElement('button');
+        item.className = `track-item ${currentSubTrack === s.index ? 'active' : ''}`;
+        const desc = s.title || s.description || (s.language && s.language !== 'und' ? s.language.toUpperCase() : `Subtitle Track ${s.index + 1}`);
+        item.innerHTML = `<span>${desc}</span><span class="track-item-tag">Burned In</span>`;
+        item.onclick = (e) => {
+          e.stopPropagation();
+          currentSubTrack = s.index;
+          subMenu.classList.add('hidden');
+          renderTrackMenus();
+          switchStreamTracks(activeChannel);
+        };
+        subMenu.appendChild(item);
+      });
+    } else {
+      const noSubItem = document.createElement('div');
+      noSubItem.className = 'track-item disabled';
+      noSubItem.style.opacity = '0.65';
+      noSubItem.style.cursor = 'pointer';
+      noSubItem.style.pointerEvents = 'auto';
+      noSubItem.innerHTML = `<span>No Subtitles Broadcast</span><span class="track-item-tag">N/A</span>`;
+      noSubItem.onclick = (e) => {
         e.stopPropagation();
-        currentSubTrack = s.index;
-        subMenu.classList.add('hidden');
-        renderTrackMenus();
-        reloadCurrentStream();
+        showToast('ℹ️ No subtitles are broadcast on this channel', 'info');
       };
-      subMenu.appendChild(item);
-    });
+      subMenu.appendChild(noSubItem);
+    }
+
+    // Subtitle Sync / Delay Controls (when subtitles are active)
+    if (currentSubTrack >= 0) {
+      const syncDivider = document.createElement('div');
+      syncDivider.className = 'track-menu-divider';
+      subMenu.appendChild(syncDivider);
+
+      const syncHeader = document.createElement('div');
+      syncHeader.className = 'track-menu-section-title';
+      syncHeader.textContent = '⏱️ Subtitle Sync';
+      subMenu.appendChild(syncHeader);
+
+      const syncRow = document.createElement('div');
+      syncRow.className = 'sub-sync-control-row';
+      syncRow.onclick = (e) => e.stopPropagation();
+
+      const btnEarlier = document.createElement('button');
+      btnEarlier.type = 'button';
+      btnEarlier.className = 'btn-sync-adj';
+      btnEarlier.title = 'Show subtitles 0.5s earlier (Key: [)';
+      btnEarlier.textContent = '◀ Earlier (-0.5s)';
+      btnEarlier.onclick = (e) => {
+        e.stopPropagation();
+        adjustSubtitleOffset(-500);
+      };
+
+      const syncLabel = document.createElement('span');
+      syncLabel.className = 'sub-sync-label';
+      const offsetSec = (currentSubOffsetMs / 1000).toFixed(1);
+      syncLabel.textContent = `${offsetSec > 0 ? '+' : ''}${offsetSec}s`;
+
+      const btnLater = document.createElement('button');
+      btnLater.type = 'button';
+      btnLater.className = 'btn-sync-adj';
+      btnLater.title = 'Show subtitles 0.5s later (Key: ])';
+      btnLater.textContent = 'Later (+0.5s) ▶';
+      btnLater.onclick = (e) => {
+        e.stopPropagation();
+        adjustSubtitleOffset(500);
+      };
+
+      const btnReset = document.createElement('button');
+      btnReset.type = 'button';
+      btnReset.className = 'btn-sync-adj';
+      btnReset.title = 'Reset to default (-1.0s)';
+      btnReset.textContent = 'Reset';
+      btnReset.onclick = (e) => {
+        e.stopPropagation();
+        resetSubtitleOffset();
+      };
+
+      syncRow.appendChild(btnEarlier);
+      syncRow.appendChild(syncLabel);
+      syncRow.appendChild(btnLater);
+      syncRow.appendChild(btnReset);
+      subMenu.appendChild(syncRow);
+    }
 
     if (subBtn) {
       if (currentSubTrack >= 0) {
         const activeSub = subTracks.find(s => s.index === currentSubTrack);
-        const activeDesc = activeSub ? (activeSub.language ? activeSub.language.toUpperCase() : `Sub ${activeSub.index + 1}`) : 'Subs';
+        const activeDesc = activeSub ? (activeSub.title || (activeSub.language && activeSub.language !== 'und' ? activeSub.language.toUpperCase() : `Sub ${activeSub.index + 1}`)) : `Subs (#${currentSubTrack + 1})`;
         subBtn.textContent = `💬 ${activeDesc}`;
         subBtn.classList.add('has-active');
       } else {
@@ -3188,6 +3470,108 @@ function reloadCurrentStream() {
   stopStream();
   currentStreamingChannelId = null;
   startStream(activeChannel);
+}
+
+let isSwitchingTracks = false;
+
+function switchStreamTracks(channel) {
+  if (!channel) return;
+  if (!player || currentStreamingChannelId !== channel.id) {
+    reloadCurrentStream();
+    return;
+  }
+
+  if (isSwitchingTracks) return;
+  isSwitchingTracks = true;
+
+  const audioBtn = document.getElementById('btn-audio-select');
+  const subBtn = document.getElementById('btn-sub-select');
+  if (audioBtn) audioBtn.classList.add('track-switching');
+  if (subBtn) subBtn.classList.add('track-switching');
+
+  if (currentSubTrack >= 0) {
+    showToast('💬 Applying subtitles...', 'info');
+  }
+
+  const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}&audio_track=${currentAudioTrack}&sub_track=${currentSubTrack}&sub_offset=${currentSubOffsetMs}&_sw=${Date.now()}`;
+
+  // Keep existing video frame visible; cleanly rebind player without full-screen loading screen
+  try {
+    player.pause();
+    player.unload();
+    player.detachMediaElement();
+    player.destroy();
+  } catch (e) {
+    console.warn('[Player] Track switch player cleanup error:', e);
+  }
+  player = null;
+
+  const cleanupSwitchUI = () => {
+    isSwitchingTracks = false;
+    if (audioBtn) audioBtn.classList.remove('track-switching');
+    if (subBtn) subBtn.classList.remove('track-switching');
+  };
+
+  if (window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
+    player = mpegts.createPlayer({
+      type: 'mpegts',
+      isLive: true,
+      url: window.location.origin + streamUrl,
+    }, {
+      enableWorker: false,
+      lazyLoad: false,
+      autoCleanupSourceBuffer: true,
+      autoCleanupMaxBackwardDuration: 1800,
+      autoCleanupMinBackwardDuration: 900,
+      liveBufferLatencyChasing: false,
+      liveSync: false,
+    });
+
+    player.attachMediaElement(video);
+    player.load();
+
+    player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+      console.warn('[Player] Track switch error:', errorType, errorDetail, errorInfo);
+      cleanupSwitchUI();
+      if (errorType === mpegts.ErrorTypes.MEDIA_ERROR || errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
+        if (currentSubTrack >= 0) {
+          showToast('⚠️ Subtitles not available in this broadcast; turning off subtitles', 'warning');
+          currentSubTrack = -1;
+          renderTrackMenus();
+          switchStreamTracks(channel);
+        } else {
+          handleStreamStopped('Stream interrupted during track switch.', true);
+        }
+      }
+    });
+
+    player.on(mpegts.Events.MEDIA_INFO, () => {
+      cleanupSwitchUI();
+      video.muted = false;
+      video.play().catch(e => console.log('[Player] Autoplay error:', e));
+    });
+
+    player.play().catch(e => {
+      console.log('[Player] Play error:', e);
+    });
+
+    setTimeout(() => {
+      if (isSwitchingTracks) {
+        cleanupSwitchUI();
+        if (currentSubTrack >= 0) {
+          showToast('⚠️ Subtitle stream timed out; reverting to standard stream', 'warning');
+          currentSubTrack = -1;
+          renderTrackMenus();
+          switchStreamTracks(channel);
+        }
+      }
+    }, 8000);
+  } else {
+    video.src = streamUrl;
+    video.muted = false;
+    video.play().catch(e => console.log('[Player] Fallback play error:', e));
+    cleanupSwitchUI();
+  }
 }
 
 // Track button click handlers
@@ -3322,16 +3706,168 @@ if (btnRecordInstant) {
 // DVR RECORDINGS & SCHEDULER
 // ==========================================================
 let currentRecordings = [];
+let recordingStorageStats = null;
+let recSearchQuery = '';
+let recSelectedChannel = 'all';
+let recSelectedSort = 'newest';
+let isRecFiltersInitialized = false;
 
 async function loadRecordings() {
   try {
-    const res = await fetch('/api/recordings');
-    if (!res.ok) return;
-    currentRecordings = await res.json();
+    const [resRecs, resStorage] = await Promise.all([
+      fetch('/api/recordings'),
+      fetch('/api/recordings/storage').catch(() => null)
+    ]);
+
+    if (resRecs && resRecs.ok) {
+      currentRecordings = await resRecs.json();
+    }
+    if (resStorage && resStorage.ok) {
+      recordingStorageStats = await resStorage.json();
+    }
+    initRecordingsFilterControls();
+    renderRecordingsStats();
     renderRecordingsList();
   } catch (e) {
     console.error('Failed to load recordings:', e);
   }
+}
+
+function getRecordingChannelName(r) {
+  if (r.channel_name && r.channel_name !== 'Unknown') return r.channel_name;
+  if (channels && channels.length > 0) {
+    const found = channels.find(c => c.id === r.channel_id);
+    if (found && found.name) return found.name;
+  }
+  if (r.file_path) {
+    const base = r.file_path.split('/').pop().split('\\').pop();
+    const parts = base.split('_');
+    if (parts.length >= 3) {
+      return parts[1].replace(/-/g, ' ');
+    }
+  }
+  return `Channel ${r.channel_id}`;
+}
+
+function renderRecordingsStats() {
+  const statCount = document.getElementById('stat-total-count');
+  const statSize = document.getElementById('stat-total-size');
+  const statTime = document.getElementById('stat-total-time');
+  const statDisk = document.getElementById('stat-disk-free');
+
+  const totalCount = currentRecordings.length;
+  let totalBytes = 0;
+  let totalDuration = 0;
+
+  currentRecordings.forEach(r => {
+    if (r.file_size) totalBytes += r.file_size;
+    if (r.duration) totalDuration += r.duration;
+  });
+
+  if (statCount) statCount.textContent = `${totalCount}`;
+  if (statSize) statSize.textContent = formatBytes(recordingStorageStats?.total_bytes ?? totalBytes);
+  if (statTime) statTime.textContent = formatDuration(recordingStorageStats?.total_duration ?? totalDuration);
+  if (statDisk) {
+    if (recordingStorageStats && recordingStorageStats.free_bytes) {
+      statDisk.textContent = `${formatBytes(recordingStorageStats.free_bytes)} Free`;
+      statDisk.title = `Total disk capacity: ${formatBytes(recordingStorageStats.total_disk_bytes)}`;
+    } else {
+      statDisk.textContent = 'Available';
+    }
+  }
+}
+
+function initRecordingsFilterControls() {
+  if (isRecFiltersInitialized) {
+    updateRecordingsChannelFilterOptions();
+    return;
+  }
+  isRecFiltersInitialized = true;
+
+  const searchInput = document.getElementById('rec-search-input');
+  const clearSearchBtn = document.getElementById('btn-clear-rec-search');
+  const channelFilter = document.getElementById('rec-channel-filter');
+  const sortSelect = document.getElementById('rec-sort-select');
+  const clearFailedBtn = document.getElementById('btn-clear-failed');
+
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      recSearchQuery = e.target.value.trim().toLowerCase();
+      if (clearSearchBtn) {
+        clearSearchBtn.classList.toggle('hidden', recSearchQuery.length === 0);
+      }
+      renderRecordingsList();
+    });
+  }
+
+  if (clearSearchBtn) {
+    clearSearchBtn.onclick = () => {
+      recSearchQuery = '';
+      if (searchInput) searchInput.value = '';
+      clearSearchBtn.classList.add('hidden');
+      renderRecordingsList();
+    };
+  }
+
+  if (channelFilter) {
+    channelFilter.addEventListener('change', (e) => {
+      recSelectedChannel = e.target.value;
+      renderRecordingsList();
+    });
+  }
+
+  if (sortSelect) {
+    sortSelect.addEventListener('change', (e) => {
+      recSelectedSort = e.target.value;
+      renderRecordingsList();
+    });
+  }
+
+  if (clearFailedBtn) {
+    clearFailedBtn.onclick = async () => {
+      const confirmed = await showConfirm(
+        'Clear all failed recordings from the database?',
+        'Clear Failed Recordings',
+        'Clear Failed',
+        true
+      );
+      if (confirmed) {
+        try {
+          const res = await fetch('/api/recordings/clear-failed', { method: 'POST' });
+          if (res.ok) {
+            const data = await res.json();
+            showToast(`Cleared ${data.cleared || 0} failed recording(s)`, 'success');
+            loadRecordings();
+          }
+        } catch (err) {
+          showToast('Failed to clear recordings', 'danger');
+        }
+      }
+    };
+  }
+
+  updateRecordingsChannelFilterOptions();
+}
+
+function updateRecordingsChannelFilterOptions() {
+  const channelFilter = document.getElementById('rec-channel-filter');
+  if (!channelFilter) return;
+
+  const channelNames = new Set();
+  currentRecordings.forEach(r => {
+    const ch = getRecordingChannelName(r);
+    if (ch) channelNames.add(ch);
+  });
+
+  const currentVal = channelFilter.value || 'all';
+  channelFilter.innerHTML = '<option value="all">All Channels</option>';
+  Array.from(channelNames).sort().forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = `📺 ${name}`;
+    if (name === currentVal) opt.selected = true;
+    channelFilter.appendChild(opt);
+  });
 }
 
 function formatBytes(bytes) {
@@ -3359,6 +3895,8 @@ function renderRecordingsList() {
   const activeCount = document.getElementById('active-rec-count');
   const schedCount = document.getElementById('sched-rec-count');
   const compCount = document.getElementById('completed-rec-count');
+  const filterCountEl = document.getElementById('rec-filter-count');
+  const clearFailedBtn = document.getElementById('btn-clear-failed');
 
   const active = currentRecordings.filter(r => r.status === 'recording');
   const scheduled = currentRecordings.filter(r => r.status === 'scheduled');
@@ -3367,6 +3905,16 @@ function renderRecordingsList() {
   if (activeCount) activeCount.textContent = active.length;
   if (schedCount) schedCount.textContent = scheduled.length;
   if (compCount) compCount.textContent = completed.length;
+
+  const failedCount = completed.filter(r => r.status === 'failed').length;
+  if (clearFailedBtn) {
+    if (failedCount > 0) {
+      clearFailedBtn.classList.remove('hidden');
+      clearFailedBtn.textContent = `🗑️ Clear Failed (${failedCount})`;
+    } else {
+      clearFailedBtn.classList.add('hidden');
+    }
+  }
 
   // 1. Active Recordings
   if (activeList) {
@@ -3377,28 +3925,37 @@ function renderRecordingsList() {
     } else {
       activeList.className = 'recordings-grid';
       active.forEach(r => {
+        const chName = getRecordingChannelName(r);
         const start = new Date(r.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const elapsedSec = Math.max(0, Math.floor((Date.now() - new Date(r.start_time).getTime()) / 1000));
+        const plannedDuration = r.duration || 3600;
+        const progressPct = Math.min(100, Math.max(5, Math.round((elapsedSec / plannedDuration) * 100)));
 
         const card = document.createElement('div');
         card.className = 'recording-card card-active';
         card.innerHTML = `
           <div class="rec-card-header">
-            <div>
+            <div class="rec-card-title-wrap">
               <div class="rec-card-title">${r.title}</div>
-              <div class="rec-card-channel">📺 ${r.channel_name}</div>
+              <span class="rec-card-channel-badge">📺 ${chName}</span>
             </div>
-            <span class="rec-status-tag active">🔴 Recording</span>
+            <span class="rec-status-tag active"><span class="live-dot pulse" style="width:7px;height:7px;margin-right:3px;"></span> Recording</span>
           </div>
           <div class="rec-card-body">
-            <div class="rec-info-row">⏱️ Started at ${start} (${formatDuration(elapsedSec)} elapsed)</div>
-            <div class="rec-info-row">💾 Captured: ${formatBytes(r.file_size)}</div>
+            <div class="rec-meta-grid">
+              <span class="rec-meta-chip">⏱️ Started: ${start} (${formatDuration(elapsedSec)} elapsed)</span>
+              <span class="rec-meta-chip">💾 Captured: ${formatBytes(r.file_size)}</span>
+            </div>
+            <div class="rec-progress-wrap" title="Recording progress: ${progressPct}%">
+              <div class="rec-progress-bar" style="width: ${progressPct}%;"></div>
+            </div>
           </div>
           <div class="rec-card-actions">
             <button class="btn-rec-action stop-btn" data-id="${r.id}">⏹ Stop Recording</button>
           </div>
         `;
-        card.querySelector('.stop-btn').onclick = async () => {
+        card.querySelector('.stop-btn').onclick = async (e) => {
+          e.stopPropagation();
           const confirmed = await showConfirm(`Stop recording "${r.title}"?`, 'Stop Recording', 'Stop Recording', true);
           if (confirmed) {
             await fetch(`/api/recordings/${r.id}/stop`, { method: 'POST' });
@@ -3422,6 +3979,7 @@ function renderRecordingsList() {
     } else {
       schedList.className = 'recordings-grid';
       scheduled.forEach(r => {
+        const chName = getRecordingChannelName(r);
         const startDate = new Date(r.start_time).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
         const startTime = new Date(r.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const endTime = new Date(r.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -3430,21 +3988,25 @@ function renderRecordingsList() {
         card.className = 'recording-card';
         card.innerHTML = `
           <div class="rec-card-header">
-            <div>
+            <div class="rec-card-title-wrap">
               <div class="rec-card-title">${r.title}</div>
-              <div class="rec-card-channel">📺 ${r.channel_name}</div>
+              <span class="rec-card-channel-badge">📺 ${chName}</span>
             </div>
             <span class="rec-status-tag scheduled">⏱️ Scheduled</span>
           </div>
           <div class="rec-card-body">
-            <div class="rec-info-row">📅 ${startDate} • ${startTime} - ${endTime}</div>
-            <div class="rec-info-row">⏳ Duration: ${formatDuration(r.duration)}</div>
+            ${r.description ? `<div class="rec-card-desc" title="${r.description}">${r.description}</div>` : ''}
+            <div class="rec-meta-grid">
+              <span class="rec-meta-chip">📅 ${startDate} • ${startTime} - ${endTime}</span>
+              <span class="rec-meta-chip">⏳ Duration: ${formatDuration(r.duration)}</span>
+            </div>
           </div>
           <div class="rec-card-actions">
             <button class="btn-rec-action del-btn" data-id="${r.id}">❌ Cancel Timer</button>
           </div>
         `;
-        card.querySelector('.del-btn').onclick = async () => {
+        card.querySelector('.del-btn').onclick = async (e) => {
+          e.stopPropagation();
           const confirmed = await showConfirm(`Cancel scheduled recording for "${r.title}"?`, 'Cancel Timer', 'Cancel Timer', true);
           if (confirmed) {
             await fetch(`/api/recordings/${r.id}`, { method: 'DELETE' });
@@ -3457,15 +4019,60 @@ function renderRecordingsList() {
     }
   }
 
-  // 3. Completed Recordings
+  // 3. Completed Recordings (Filtered & Sorted)
   if (compList) {
     compList.innerHTML = '';
-    if (completed.length === 0) {
+
+    // Apply Filter & Search
+    let filtered = completed.filter(r => {
+      const chName = getRecordingChannelName(r);
+      if (recSelectedChannel !== 'all' && chName !== recSelectedChannel) {
+        return false;
+      }
+      if (recSearchQuery) {
+        const titleMatch = (r.title || '').toLowerCase().includes(recSearchQuery);
+        const descMatch = (r.description || '').toLowerCase().includes(recSearchQuery);
+        const chMatch = chName.toLowerCase().includes(recSearchQuery);
+        if (!titleMatch && !descMatch && !chMatch) return false;
+      }
+      return true;
+    });
+
+    // Apply Sort
+    filtered.sort((a, b) => {
+      if (recSelectedSort === 'oldest') {
+        return new Date(a.start_time) - new Date(b.start_time);
+      } else if (recSelectedSort === 'title') {
+        return (a.title || '').localeCompare(b.title || '');
+      } else if (recSelectedSort === 'duration') {
+        return (b.duration || 0) - (a.duration || 0);
+      } else if (recSelectedSort === 'size') {
+        return (b.file_size || 0) - (a.file_size || 0);
+      } else {
+        // 'newest' default
+        return new Date(b.start_time) - new Date(a.start_time);
+      }
+    });
+
+    if (filterCountEl) {
+      if (recSearchQuery || recSelectedChannel !== 'all') {
+        filterCountEl.textContent = `Showing ${filtered.length} of ${completed.length} recordings`;
+      } else {
+        filterCountEl.textContent = `${completed.length} total recordings`;
+      }
+    }
+
+    if (filtered.length === 0) {
       compList.className = 'recordings-grid empty-grid';
-      compList.innerHTML = '<div class="empty-state">No saved recordings found.</div>';
+      if (completed.length === 0) {
+        compList.innerHTML = '<div class="empty-state">No saved recordings found. You can schedule recordings from the TV Guide or start an instant recording anytime.</div>';
+      } else {
+        compList.innerHTML = '<div class="empty-state">No recordings matched your search/filter criteria.</div>';
+      }
     } else {
       compList.className = 'recordings-grid';
-      completed.forEach(r => {
+      filtered.forEach(r => {
+        const chName = getRecordingChannelName(r);
         const dateStr = new Date(r.start_time).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
         const timeStr = new Date(r.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const isFailed = r.status === 'failed';
@@ -3474,30 +4081,51 @@ function renderRecordingsList() {
 
         const card = document.createElement('div');
         card.className = 'recording-card';
+        card.style.cursor = !isFailed ? 'pointer' : 'default';
         card.innerHTML = `
           <div class="rec-card-header">
-            <div>
+            <div class="rec-card-title-wrap">
               <div class="rec-card-title">${r.title}</div>
-              <div class="rec-card-channel">📺 ${r.channel_name}</div>
+              <span class="rec-card-channel-badge">📺 ${chName}</span>
             </div>
             <span class="rec-status-tag ${tagClass}">${tagText}</span>
           </div>
           <div class="rec-card-body">
-            <div class="rec-info-row">📅 Recorded: ${dateStr} at ${timeStr}</div>
-            <div class="rec-info-row">⏳ Duration: ${formatDuration(r.duration)} • 💾 Size: ${formatBytes(r.file_size)}</div>
-            ${r.error_message ? `<div class="rec-info-row" style="color: var(--danger);">⚠️ ${r.error_message}</div>` : ''}
+            ${r.description ? `<div class="rec-card-desc" title="${r.description}">${r.description}</div>` : ''}
+            <div class="rec-meta-grid">
+              <span class="rec-meta-chip">📅 Recorded: ${dateStr} • ${timeStr}</span>
+              <span class="rec-meta-chip">⏳ ${formatDuration(r.duration)}</span>
+              <span class="rec-meta-chip">💾 ${formatBytes(r.file_size)}</span>
+            </div>
+            ${r.error_message ? `<div class="rec-info-row" style="color: var(--danger); font-weight: 500;">⚠️ ${r.error_message}</div>` : ''}
           </div>
           <div class="rec-card-actions">
             ${!isFailed ? `<button class="btn-rec-action play-btn" data-id="${r.id}">▶ Play</button>` : ''}
-            ${!isFailed ? `<a href="/api/recordings/${r.id}/download" download class="btn-rec-action">⬇ Download</a>` : ''}
+            ${!isFailed ? `<a href="/api/recordings/${r.id}/download" download class="btn-rec-action download-btn">⬇ Download</a>` : ''}
             <button class="btn-rec-action del-btn" data-id="${r.id}">🗑 Delete</button>
           </div>
         `;
-        const playBtn = card.querySelector('.play-btn');
-        if (playBtn) {
-          playBtn.onclick = () => openRecordingPlayer(r);
+
+        if (!isFailed) {
+          card.onclick = (e) => {
+            if (e.target.closest('button') || e.target.closest('a')) return;
+            openRecordingPlayer(r);
+          };
+          const playBtn = card.querySelector('.play-btn');
+          if (playBtn) {
+            playBtn.onclick = (e) => {
+              e.stopPropagation();
+              openRecordingPlayer(r);
+            };
+          }
+          const dlBtn = card.querySelector('.download-btn');
+          if (dlBtn) {
+            dlBtn.onclick = (e) => e.stopPropagation();
+          }
         }
-        card.querySelector('.del-btn').onclick = async () => {
+
+        card.querySelector('.del-btn').onclick = async (e) => {
+          e.stopPropagation();
           const confirmed = await showConfirm(`Delete recording "${r.title}"? This will delete the file from disk.`, 'Delete Recording', 'Delete Permanently', true);
           if (confirmed) {
             await fetch(`/api/recordings/${r.id}`, { method: 'DELETE' });
@@ -3505,6 +4133,7 @@ function renderRecordingsList() {
             loadRecordings();
           }
         };
+
         compList.appendChild(card);
       });
     }

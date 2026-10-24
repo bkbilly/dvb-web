@@ -207,6 +207,14 @@ func (d *Database) migrate() error {
 	_, _ = d.db.Exec("ALTER TABLE recordings ADD COLUMN pre_padding INTEGER DEFAULT 2;")
 	_, _ = d.db.Exec("ALTER TABLE recordings ADD COLUMN post_padding INTEGER DEFAULT 5;")
 
+	// Clear legacy hardcoded teletext flags so teletext is only enabled when actually broadcast in PMT
+	_, _ = d.db.Exec("UPDATE channels SET has_teletext = 0;")
+
+	// Fix known frequency-specific service ID discrepancies (e.g. 522MHz Digea SD multiplex)
+	_, _ = d.db.Exec("UPDATE channels SET service_id = 3500 WHERE frequency = 522000000 AND service_id = 1500;")
+	_, _ = d.db.Exec("UPDATE channels SET service_id = 3600 WHERE frequency = 522000000 AND service_id = 1600;")
+	_, _ = d.db.Exec("UPDATE channels SET service_id = 3700 WHERE frequency = 522000000 AND service_id = 1700;")
+
 	// Clean up any corrupt dates or duplicate event_ids from older schema versions
 	_, _ = d.db.Exec(`
 		DELETE FROM epg_events WHERE id NOT IN (
@@ -379,6 +387,15 @@ func (d *Database) SaveChannel(c *Channel) error {
 
 func (d *Database) UpdateChannelLogo(id int64, logoURL string) error {
 	_, err := d.db.Exec("UPDATE channels SET logo_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", logoURL, id)
+	return err
+}
+
+func (d *Database) UpdateChannelTeletext(id int64, hasTeletext bool) error {
+	val := 0
+	if hasTeletext {
+		val = 1
+	}
+	_, err := d.db.Exec("UPDATE channels SET has_teletext = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", val, id)
 	return err
 }
 
@@ -885,4 +902,12 @@ func (d *Database) UpdateRecording(rec *Recording) error {
 func (d *Database) DeleteRecording(id int64) error {
 	_, err := d.db.Exec("DELETE FROM recordings WHERE id = ?", id)
 	return err
+}
+
+func (d *Database) ClearFailedRecordings() (int64, error) {
+	res, err := d.db.Exec("DELETE FROM recordings WHERE status = 'failed'")
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
