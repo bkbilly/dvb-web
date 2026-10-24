@@ -58,6 +58,8 @@ type TrackInfo struct {
 type ChannelTracks struct {
 	AudioTracks    []TrackInfo `json:"audio_tracks"`
 	SubtitleTracks []TrackInfo `json:"subtitle_tracks"`
+	HasTeletext    bool        `json:"has_teletext"`
+	HbbtvURL       string      `json:"hbbtv_url,omitempty"`
 }
 
 type TunerStatus struct {
@@ -1148,6 +1150,7 @@ func parseProbeOutput(data []byte, serviceID int) ChannelTracks {
 	var subList []TrackInfo
 	aIdx := 0
 	sIdx := 0
+	hasTeletext := false
 
 	for _, s := range parsed.Streams {
 		lang := s.Tags["language"]
@@ -1168,6 +1171,9 @@ func parseProbeOutput(data []byte, serviceID int) ChannelTracks {
 			})
 			aIdx++
 		} else if s.CodecType == "subtitle" {
+			if strings.Contains(strings.ToLower(s.CodecName), "teletext") || strings.Contains(strings.ToLower(title), "teletext") {
+				hasTeletext = true
+			}
 			if title == "" {
 				title = fmt.Sprintf("Subtitle %d (%s)", sIdx+1, strings.ToUpper(lang))
 			}
@@ -1195,6 +1201,7 @@ func parseProbeOutput(data []byte, serviceID int) ChannelTracks {
 	return ChannelTracks{
 		AudioTracks:    audioList,
 		SubtitleTracks: subList,
+		HasTeletext:    hasTeletext,
 	}
 }
 
@@ -1207,11 +1214,23 @@ func (p *Pool) GetChannelTracks(channel *db.Channel) ChannelTracks {
 		return cached
 	}
 
+	hbbtv := channel.HbbtvURL
+	if hbbtv == "" {
+		upperName := strings.ToUpper(channel.Name)
+		if strings.Contains(upperName, "ERT") {
+			hbbtv = "https://hbbtv.ert.gr/"
+		} else if strings.Contains(upperName, "BBC") {
+			hbbtv = "https://www.bbc.co.uk/iplayer/"
+		}
+	}
+
 	tracks := ChannelTracks{
 		AudioTracks: []TrackInfo{
 			{Index: 0, Type: "audio", Codec: "aac", Language: "und", Title: "Stereo (Default)"},
 		},
 		SubtitleTracks: []TrackInfo{},
+		HasTeletext:    channel.HasTeletext,
+		HbbtvURL:       hbbtv,
 	}
 
 	if p.isMockMode {
@@ -1227,6 +1246,8 @@ func (p *Pool) GetChannelTracks(channel *db.Channel) ChannelTracks {
 				{Index: 1, Type: "audio", Codec: "aac", Language: "qaa", Title: "Original Audio (Secondary)"},
 			},
 			SubtitleTracks: subList,
+			HasTeletext:    !channel.IsRadio,
+			HbbtvURL:       hbbtv,
 		}
 		tracksCacheMu.Lock()
 		tracksCache[channel.ID] = tracks
@@ -1260,6 +1281,10 @@ func (p *Pool) GetChannelTracks(channel *db.Channel) ChannelTracks {
 			if err == nil {
 				parsed := parseProbeOutput(out, channel.ServiceID)
 				if len(parsed.AudioTracks) > 0 {
+					parsed.HbbtvURL = hbbtv
+					if channel.HasTeletext {
+						parsed.HasTeletext = true
+					}
 					tracks = parsed
 					tracksCacheMu.Lock()
 					tracksCache[channel.ID] = tracks

@@ -1307,6 +1307,8 @@ func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
 			EndTime     time.Time `json:"end_time"`
 			Duration    int       `json:"duration"`
 			EventID     int       `json:"event_id"`
+			PrePadding  *int      `json:"pre_padding,omitempty"`
+			PostPadding *int      `json:"post_padding,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -1356,6 +1358,23 @@ func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		prePad := 2
+		postPad := 5
+		if req.PrePadding != nil {
+			prePad = *req.PrePadding
+		} else {
+			if p, err := strconv.Atoi(s.db.GetSetting("rec_pre_padding", "2")); err == nil {
+				prePad = p
+			}
+		}
+		if req.PostPadding != nil {
+			postPad = *req.PostPadding
+		} else {
+			if p, err := strconv.Atoi(s.db.GetSetting("rec_post_padding", "5")); err == nil {
+				postPad = p
+			}
+		}
+
 		rec := &db.Recording{
 			ChannelID:   channel.ID,
 			ChannelName: channel.Name,
@@ -1365,6 +1384,8 @@ func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
 			EndTime:     req.EndTime,
 			Duration:    req.Duration,
 			EventID:     req.EventID,
+			PrePadding:  prePad,
+			PostPadding: postPad,
 			Status:      "scheduled",
 			CreatedAt:   time.Now(),
 		}

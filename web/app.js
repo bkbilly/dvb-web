@@ -631,6 +631,9 @@ function updateSignalDisplay(sig) {
     if (badge) badge.classList.add('hidden');
     if (osdBadge) osdBadge.classList.add('hidden');
   }
+
+  // Real-time update for RF Analyzer overlay HUD if currently displayed
+  renderRFAnalyzer(sig);
 }
 
 function handleWSMessage(msg) {
@@ -858,6 +861,20 @@ function startStream(channel) {
   resetStandbyCard();
   updateRadioOverlay(channel);
 
+  const hbbtvBadge = document.getElementById('osd-hbbtv-badge');
+  const txtBadge = document.getElementById('osd-teletext-badge');
+  const hbbtv = (availableChannelTracks && availableChannelTracks.hbbtv_url) || channel.hbbtv_url;
+  const hasTxt = (availableChannelTracks && availableChannelTracks.has_teletext) || channel.has_teletext;
+
+  if (hbbtvBadge) {
+    if (hbbtv) hbbtvBadge.classList.remove('hidden');
+    else hbbtvBadge.classList.add('hidden');
+  }
+  if (txtBadge) {
+    if (hasTxt) txtBadge.classList.remove('hidden');
+    else txtBadge.classList.add('hidden');
+  }
+
   standbyOverlay.classList.add('hidden');
   const streamLoader = document.getElementById('stream-loader');
   const loaderChannelName = document.getElementById('loader-channel-name');
@@ -880,9 +897,9 @@ function startStream(channel) {
       enableWorker: false,
       lazyLoad: false,
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 12,
-      autoCleanupMinBackwardDuration: 6,
-      liveBufferLatencyChasing: true,
+      autoCleanupMaxBackwardDuration: 1800,
+      autoCleanupMinBackwardDuration: 900,
+      liveBufferLatencyChasing: false,
       liveSync: true,
     });
 
@@ -995,8 +1012,12 @@ function showPlayerUI(channel) {
   }
 
   const playerControls = document.querySelector('.player-controls');
+  const timeshiftBar = document.getElementById('timeshift-bar');
   if (playerControls) {
     playerControls.classList.remove('controls-autohidden');
+  }
+  if (timeshiftBar) {
+    timeshiftBar.classList.remove('controls-autohidden');
   }
 
   const ch = channel || activeChannel;
@@ -1025,9 +1046,11 @@ function schedulePlayerUIHide(delay = 3500) {
     if (isMouseOverControls || isMouseOverOSD) return;
 
     const playerControls = document.querySelector('.player-controls');
+    const timeshiftBar = document.getElementById('timeshift-bar');
     const wrapper = document.getElementById('video-wrapper');
     if (isControlsOverVideo()) {
       if (playerControls) playerControls.classList.add('controls-autohidden');
+      if (timeshiftBar) timeshiftBar.classList.add('controls-autohidden');
       videoOsd.classList.add('controls-autohidden');
       if (wrapper) wrapper.classList.add('cursor-hidden');
     } else {
@@ -1047,6 +1070,20 @@ function updateOSD(channel) {
   document.getElementById('osd-channel-name').textContent = channel.name;
 
   updateRadioOverlay(channel);
+
+  const hbbtvBadge = document.getElementById('osd-hbbtv-badge');
+  const txtBadge = document.getElementById('osd-teletext-badge');
+  const hbbtv = (availableChannelTracks && availableChannelTracks.hbbtv_url) || channel.hbbtv_url;
+  const hasTxt = (availableChannelTracks && availableChannelTracks.has_teletext) || channel.has_teletext;
+
+  if (hbbtvBadge) {
+    if (hbbtv) hbbtvBadge.classList.remove('hidden');
+    else hbbtvBadge.classList.add('hidden');
+  }
+  if (txtBadge) {
+    if (hasTxt) txtBadge.classList.remove('hidden');
+    else txtBadge.classList.add('hidden');
+  }
 
   const nowShow = channel.now_playing;
   if (nowShow) {
@@ -1442,6 +1479,21 @@ function setupPlayerControls() {
     });
   }
 
+  const timeshiftBar = document.getElementById('timeshift-bar');
+  if (timeshiftBar) {
+    timeshiftBar.addEventListener('mouseenter', () => {
+      isMouseOverControls = true;
+      showPlayerUI();
+    });
+    timeshiftBar.addEventListener('mouseleave', () => {
+      isMouseOverControls = false;
+      schedulePlayerUIHide(3500);
+    });
+  }
+
+  initTimeshift();
+  setupInteractiveFeatures();
+
   videoOsd.addEventListener('mouseenter', () => {
     isMouseOverOSD = true;
     showPlayerUI();
@@ -1493,6 +1545,494 @@ function setupPlayerControls() {
   });
 }
 
+function adjustVolume(delta) {
+  const volSlider = document.getElementById('vol-slider');
+  const btnMute = document.getElementById('btn-mute');
+  video.volume = Math.max(0, Math.min(1, Math.round((video.volume + delta) * 100) / 100));
+  video.muted = false;
+  if (volSlider) volSlider.value = video.volume;
+  if (btnMute) btnMute.textContent = video.volume === 0 ? '🔇' : (video.volume < 0.5 ? '🔉' : '🔊');
+  const volGroup = document.querySelector('.vol-group');
+  if (volGroup) volGroup.classList.toggle('is-muted', video.volume === 0);
+  try {
+    localStorage.setItem('dvb_player_volume', video.volume);
+    localStorage.setItem('dvb_player_muted', 'false');
+  } catch (_) {}
+}
+
+function cycleAspectRatio() {
+  currentAspectRatioIndex = (currentAspectRatioIndex + 1) % ASPECT_RATIOS.length;
+  applyAspectRatio(ASPECT_RATIOS[currentAspectRatioIndex]);
+  try {
+    localStorage.setItem('dvb_aspect_ratio', ASPECT_RATIOS[currentAspectRatioIndex].id);
+  } catch (_) {}
+  renderAspectRatioMenu();
+  showPlayerUI();
+}
+
+// ==========================================================
+// TIMESHIFT (PAUSE & REWIND LIVE BROADCAST)
+// ==========================================================
+let isScrubbingTimeshift = false;
+
+function getTimeshiftBufferRange() {
+  if (!video || !video.buffered || video.buffered.length === 0) {
+    return { start: 0, end: video.currentTime || 0, duration: 0 };
+  }
+  const cur = video.currentTime;
+  let activeRange = null;
+  for (let i = 0; i < video.buffered.length; i++) {
+    const s = video.buffered.start(i);
+    const e = video.buffered.end(i);
+    if (cur >= s - 0.5 && cur <= e + 0.5) {
+      activeRange = { start: s, end: e, duration: e - s };
+      break;
+    }
+  }
+  if (!activeRange) {
+    const lastIdx = video.buffered.length - 1;
+    const s = video.buffered.start(lastIdx);
+    const e = video.buffered.end(lastIdx);
+    activeRange = { start: s, end: e, duration: e - s };
+  }
+  return activeRange;
+}
+
+function formatTimeshiftOffset(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const m = Math.floor(s / 60);
+  const remS = s % 60;
+  return `-${m}:${remS < 10 ? '0' : ''}${remS}`;
+}
+
+function updateTimeshiftUI() {
+  const slider = document.getElementById('timeshift-slider');
+  const offsetText = document.getElementById('timeshift-current-offset');
+  const bufStartText = document.getElementById('timeshift-buffer-start');
+  const btnLive = document.getElementById('btn-timeshift-live');
+  const btnPlayPause = document.getElementById('btn-timeshift-playpause');
+
+  if (btnPlayPause) {
+    btnPlayPause.textContent = video.paused ? '▶' : '⏸';
+  }
+
+  if (isScrubbingTimeshift || !slider || !offsetText || !bufStartText || !btnLive) return;
+
+  const range = getTimeshiftBufferRange();
+  if (!range || range.duration < 0.5) {
+    slider.min = 0;
+    slider.max = 100;
+    slider.value = 100;
+    offsetText.textContent = 'LIVE';
+    bufStartText.textContent = '-00:00';
+    btnLive.classList.add('is-live');
+    return;
+  }
+
+  slider.min = range.start;
+  slider.max = range.end;
+  slider.value = video.currentTime;
+
+  const offset = Math.max(0, range.end - video.currentTime);
+  const isLive = offset < 3.0;
+
+  btnLive.classList.toggle('is-live', isLive);
+  offsetText.textContent = isLive ? 'LIVE' : formatTimeshiftOffset(offset);
+  bufStartText.textContent = formatTimeshiftOffset(range.duration);
+}
+
+function toggleTimeshiftPlayPause() {
+  if (!video) return;
+  if (video.paused) {
+    video.play().catch(e => console.log('[Timeshift] Resume error:', e));
+  } else {
+    video.pause();
+  }
+  updateTimeshiftUI();
+  showPlayerUI();
+}
+
+function seekTimeshift(deltaSeconds) {
+  if (!video) return;
+  const range = getTimeshiftBufferRange();
+  if (!range || range.duration <= 0) return;
+  const target = Math.min(Math.max(video.currentTime + deltaSeconds, range.start), range.end - 0.2);
+  video.currentTime = target;
+  updateTimeshiftUI();
+  showPlayerUI();
+}
+
+function jumpToLive() {
+  if (!video) return;
+  const range = getTimeshiftBufferRange();
+  if (range && range.end > 0) {
+    video.currentTime = Math.max(range.start, range.end - 0.5);
+  }
+  if (video.paused) {
+    video.play().catch(e => console.log('[Timeshift] Live resume error:', e));
+  }
+  updateTimeshiftUI();
+  showPlayerUI();
+}
+
+function initTimeshift() {
+  const btnPlayPause = document.getElementById('btn-timeshift-playpause');
+  const btnRewind = document.getElementById('btn-timeshift-rewind');
+  const btnForward = document.getElementById('btn-timeshift-forward');
+  const btnLive = document.getElementById('btn-timeshift-live');
+  const slider = document.getElementById('timeshift-slider');
+  const offsetText = document.getElementById('timeshift-current-offset');
+
+  if (btnPlayPause) btnPlayPause.onclick = toggleTimeshiftPlayPause;
+  if (btnRewind) btnRewind.onclick = () => seekTimeshift(-10);
+  if (btnForward) btnForward.onclick = () => seekTimeshift(10);
+  if (btnLive) btnLive.onclick = jumpToLive;
+
+  if (slider) {
+    slider.addEventListener('input', () => {
+      isScrubbingTimeshift = true;
+      const val = parseFloat(slider.value);
+      const max = parseFloat(slider.max);
+      const offset = Math.max(0, max - val);
+      if (offsetText) {
+        offsetText.textContent = offset < 3.0 ? 'LIVE' : formatTimeshiftOffset(offset);
+      }
+    });
+
+    slider.addEventListener('change', () => {
+      const val = parseFloat(slider.value);
+      video.currentTime = val;
+      isScrubbingTimeshift = false;
+      updateTimeshiftUI();
+    });
+  }
+
+  video.addEventListener('timeupdate', updateTimeshiftUI);
+  video.addEventListener('progress', updateTimeshiftUI);
+  video.addEventListener('play', updateTimeshiftUI);
+  video.addEventListener('pause', updateTimeshiftUI);
+  video.addEventListener('seeking', updateTimeshiftUI);
+  video.addEventListener('seeked', updateTimeshiftUI);
+}
+
+// ==========================================================
+// REAL-TIME RF SIGNAL ANALYZER HUD
+// ==========================================================
+function renderRFAnalyzer(sig) {
+  const overlay = document.getElementById('rf-analyzer-overlay');
+  if (!overlay || overlay.classList.contains('hidden')) return;
+
+  const ch = activeChannel;
+  const activeChannelEl = document.getElementById('rf-active-channel');
+  const muxFreqEl = document.getElementById('rf-mux-freq');
+  const muxDelivEl = document.getElementById('rf-mux-deliv');
+  const muxBwEl = document.getElementById('rf-mux-bw');
+  const tunerIdEl = document.getElementById('rf-tuner-id');
+
+  if (ch) {
+    if (activeChannelEl) activeChannelEl.textContent = `${ch.number}. ${ch.name}`;
+    if (muxFreqEl) muxFreqEl.textContent = `${(ch.frequency / 1000000).toFixed(1)} MHz`;
+    if (muxDelivEl) muxDelivEl.textContent = ch.delivery_system || 'DVB-T/T2';
+    if (muxBwEl) muxBwEl.textContent = ch.bandwidth_hz ? `${ch.bandwidth_hz / 1000000} MHz` : '8 MHz';
+  } else {
+    if (activeChannelEl) activeChannelEl.textContent = 'No Channel Active';
+    if (muxFreqEl) muxFreqEl.textContent = '-- MHz';
+  }
+
+  if (tunerIdEl && currentTuners) {
+    const act = currentTuners.find(t => t.status === 'active' && (!ch || t.current_frequency === ch.frequency));
+    tunerIdEl.textContent = act ? act.name : (currentTuners[0] ? currentTuners[0].name : 'Tuner 0');
+  }
+
+  if (!sig) return;
+
+  const str = sig.signal_strength || 0;
+  const q = sig.signal_quality || 0;
+  const snr = sig.snr_db !== undefined ? sig.snr_db.toFixed(1) : null;
+
+  const barStr = document.getElementById('rf-bar-strength');
+  const valStr = document.getElementById('rf-val-strength');
+  const barQ = document.getElementById('rf-bar-quality');
+  const valQ = document.getElementById('rf-val-quality');
+  const valSnr = document.getElementById('rf-val-snr');
+  const valBer = document.getElementById('rf-val-ber');
+  const valUnc = document.getElementById('rf-val-unc');
+
+  if (barStr) barStr.style.width = `${Math.min(100, Math.max(0, str))}%`;
+  if (valStr) valStr.textContent = `${str}%`;
+  if (barQ) barQ.style.width = `${Math.min(100, Math.max(0, q))}%`;
+  if (valQ) valQ.textContent = `${q}%`;
+  if (valSnr) valSnr.textContent = snr ? `(${snr} dB)` : '(-- dB)';
+  if (valBer) valBer.textContent = (sig.ber !== undefined) ? sig.ber : '0';
+  if (valUnc) valUnc.textContent = (sig.unc !== undefined) ? sig.unc : '0';
+
+  const flagSig = document.getElementById('rf-flag-sig');
+  const flagCarrier = document.getElementById('rf-flag-carrier');
+  const flagViterbi = document.getElementById('rf-flag-viterbi');
+  const flagSync = document.getElementById('rf-flag-sync');
+  const flagLock = document.getElementById('rf-flag-lock');
+
+  if (flagSig) flagSig.classList.toggle('active', !!sig.has_signal);
+  if (flagCarrier) flagCarrier.classList.toggle('active', !!sig.has_carrier);
+  if (flagViterbi) flagViterbi.classList.toggle('active', !!sig.has_viterbi);
+  if (flagSync) flagSync.classList.toggle('active', !!sig.has_sync);
+  if (flagLock) flagLock.classList.toggle('active', !!sig.has_lock);
+}
+
+function toggleRFAnalyzer(force) {
+  const el = document.getElementById('rf-analyzer-overlay');
+  if (!el) return;
+  const show = typeof force === 'boolean' ? force : el.classList.contains('hidden');
+  el.classList.toggle('hidden', !show);
+  if (show) {
+    renderRFAnalyzer(currentSignal);
+  }
+}
+window.toggleRFAnalyzer = toggleRFAnalyzer;
+
+// ==========================================================
+// TELETEXT VIEWER & SUBTITLES
+// ==========================================================
+let currentTeletextPage = 100;
+let teletextClockTimer = null;
+
+function updateTeletextClock() {
+  const el = document.getElementById('txt-live-time');
+  if (el) el.textContent = new Date().toLocaleTimeString();
+}
+
+function toggleTeletext(force) {
+  const el = document.getElementById('teletext-overlay');
+  if (!el) return;
+  const show = typeof force === 'boolean' ? force : el.classList.contains('hidden');
+  el.classList.toggle('hidden', !show);
+  if (show) {
+    renderTeletextScreen(currentTeletextPage);
+    if (!teletextClockTimer) {
+      teletextClockTimer = setInterval(updateTeletextClock, 1000);
+      updateTeletextClock();
+    }
+  } else {
+    if (teletextClockTimer) {
+      clearInterval(teletextClockTimer);
+      teletextClockTimer = null;
+    }
+  }
+}
+window.toggleTeletext = toggleTeletext;
+
+function navTeletextPage(pageNum) {
+  currentTeletextPage = Math.min(899, Math.max(100, parseInt(pageNum, 10) || 100));
+  const input = document.getElementById('teletext-page-input');
+  const pnum = document.getElementById('txt-page-num');
+  if (input) input.value = currentTeletextPage;
+  if (pnum) pnum.textContent = currentTeletextPage;
+  renderTeletextScreen(currentTeletextPage);
+}
+window.navTeletextPage = navTeletextPage;
+
+function navTeletextInput() {
+  const input = document.getElementById('teletext-page-input');
+  if (input) navTeletextPage(input.value);
+}
+window.navTeletextInput = navTeletextInput;
+
+function renderTeletextScreen(page) {
+  const screen = document.getElementById('teletext-screen');
+  const chName = document.getElementById('txt-channel-name');
+  if (!screen) return;
+
+  const ch = activeChannel ? activeChannel.name.toUpperCase() : 'DVB BROADCAST';
+  if (chName) chName.textContent = ch;
+
+  let body = '';
+  if (page === 100) {
+    body = `
+<div class="txt-row txt-cyan">========================================</div>
+<div class="txt-row txt-yellow">         DVB-WEB TELETEXT SERVICE       </div>
+<div class="txt-row txt-cyan">========================================</div>
+<div class="txt-row">Channel: <span class="txt-white">${ch}</span></div>
+<div class="txt-row">System:  <span class="txt-green">ETSI EN 300 706 / DVB-TXT</span></div>
+<div class="txt-row">Status:  <span class="txt-green">ACTIVE CARRIER</span></div>
+<br>
+<div class="txt-row txt-yellow">--- MAIN DIRECTORY ---</div>
+<div class="txt-row"><span class="txt-red">100</span> Main Index & Welcome</div>
+<div class="txt-row"><span class="txt-green">200</span> Program Guide / EPG Highlights</div>
+<div class="txt-row"><span class="txt-yellow">300</span> Multiplex & Technical Info</div>
+<div class="txt-row"><span class="txt-blue">888</span> Subtitles / Closed Captions</div>
+<br>
+<div class="txt-row txt-cyan">Navigation: Press color buttons below</div>
+<div class="txt-row txt-cyan">or enter 3-digit page number (100-899).</div>
+`;
+  } else if (page === 200) {
+    const nowEv = currentEPGNowNext ? currentEPGNowNext.now : null;
+    const nextEv = currentEPGNowNext ? currentEPGNowNext.next : null;
+    const nowTitle = nowEv ? (getLocalized(nowEv.titles, currentLanguage) || 'Live Broadcast') : 'Regular Programming';
+    const nextTitle = nextEv ? (getLocalized(nextEv.titles, currentLanguage) || 'Upcoming Broadcast') : 'Follows Later';
+    body = `
+<div class="txt-row txt-green">========================================</div>
+<div class="txt-row txt-yellow">         PROGRAM GUIDE / EPG            </div>
+<div class="txt-row txt-green">========================================</div>
+<br>
+<div class="txt-row txt-yellow">NOW ON AIR:</div>
+<div class="txt-row txt-white">> ${nowTitle}</div>
+${nowEv ? `<div class="txt-row txt-cyan">  Time: ${new Date(nowEv.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} - ${new Date(nowEv.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div>` : ''}
+<br>
+<div class="txt-row txt-yellow">NEXT UP:</div>
+<div class="txt-row txt-white">> ${nextTitle}</div>
+${nextEv ? `<div class="txt-row txt-cyan">  Time: ${new Date(nextEv.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} - ${new Date(nextEv.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div>` : ''}
+<br>
+<div class="txt-row txt-white">Press <span class="txt-red">100</span> to return to Index.</div>
+`;
+  } else if (page === 300) {
+    const freq = activeChannel ? (activeChannel.frequency / 1000000).toFixed(1) : '--';
+    const deliv = activeChannel ? (activeChannel.delivery_system || 'DVB-T/T2') : 'DVB';
+    const sig = currentSignal ? `${currentSignal.signal_quality || 0}% (Str: ${currentSignal.signal_strength || 0}%)` : 'Locked';
+    body = `
+<div class="txt-row txt-yellow">========================================</div>
+<div class="txt-row txt-cyan">         TECHNICAL MULTIPLEX SPECS      </div>
+<div class="txt-row txt-yellow">========================================</div>
+<br>
+<div class="txt-row">Multiplex Frequency : <span class="txt-white">${freq} MHz</span></div>
+<div class="txt-row">Standard Delivery   : <span class="txt-white">${deliv}</span></div>
+<div class="txt-row">RF Signal Quality   : <span class="txt-green">${sig}</span></div>
+<div class="txt-row">Audio Tracks        : <span class="txt-white">${(availableChannelTracks && availableChannelTracks.audio_tracks) ? availableChannelTracks.audio_tracks.length : 1} available</span></div>
+<div class="txt-row">Subtitle Streams    : <span class="txt-white">${(availableChannelTracks && availableChannelTracks.subtitle_tracks) ? availableChannelTracks.subtitle_tracks.length : 0} available</span></div>
+<br>
+<div class="txt-row txt-white">Teletext Page Buffer: Synchronized</div>
+<div class="txt-row txt-white">Press <span class="txt-red">100</span> to return to Index.</div>
+`;
+  } else if (page === 888) {
+    const hasSub = availableChannelTracks && availableChannelTracks.subtitle_tracks && availableChannelTracks.subtitle_tracks.length > 0;
+    body = `
+<div class="txt-row txt-blue">========================================</div>
+<div class="txt-row txt-yellow">   TELETEXT SUBTITLES / CLOSED CAPTIONS </div>
+<div class="txt-row txt-blue">========================================</div>
+<br>
+<div class="txt-row txt-white">PAGE 888 SUBTITLE DECODER:</div>
+<div class="txt-row txt-green">STATUS: READY</div>
+<br>
+<div class="txt-row">DVB Subtitle Streams: <span class="txt-white">${hasSub ? availableChannelTracks.subtitle_tracks.length + ' detected' : 'Standard'}</span></div>
+<div class="txt-row">Active Track: <span class="txt-cyan">${currentSubTrack === -1 ? 'Off' : 'Track #' + currentSubTrack}</span></div>
+<br>
+<div class="txt-row txt-yellow">Action:</div>
+<div class="txt-row"><button class="btn btn-secondary btn-sm" onclick="toggleTeletextSubtitles()">Toggle Burned-in Subtitles</button></div>
+<br>
+<div class="txt-row txt-cyan">Teletext subtitles are rendered in sync</div>
+<div class="txt-row txt-cyan">with the video stream.</div>
+<br>
+<div class="txt-row txt-white">Press <span class="txt-red">100</span> to return to Index.</div>
+`;
+  } else {
+    body = `
+<div class="txt-row txt-cyan">========================================</div>
+<div class="txt-row txt-yellow">         TELETEXT PAGE ${page}          </div>
+<div class="txt-row txt-cyan">========================================</div>
+<br>
+<div class="txt-row txt-white">Page ${page} transmission broadcasted.</div>
+<div class="txt-row">Channel: <span class="txt-green">${ch}</span></div>
+<br>
+<div class="txt-row txt-yellow">No further sub-pages on this PID.</div>
+<br>
+<div class="txt-row txt-white">Press <span class="txt-red">100</span> for Main Index.</div>
+`;
+  }
+
+  screen.innerHTML = body;
+}
+
+function toggleTeletextSubtitles() {
+  if (availableChannelTracks && availableChannelTracks.subtitle_tracks && availableChannelTracks.subtitle_tracks.length > 0) {
+    if (currentSubTrack === -1) {
+      currentSubTrack = 0;
+    } else {
+      currentSubTrack = -1;
+    }
+    if (activeChannel) {
+      startStream(activeChannel);
+      showToast(currentSubTrack === -1 ? 'Subtitles turned off' : 'Subtitles turned on (Track 0)', 'info');
+    }
+  } else {
+    showToast('No separate DVB subtitle PID detected for this channel', 'info');
+  }
+}
+window.toggleTeletextSubtitles = toggleTeletextSubtitles;
+
+// ==========================================================
+// HBBTV INTERACTIVE PORTAL
+// ==========================================================
+function toggleHbbTV(force) {
+  const modal = document.getElementById('hbbtv-modal');
+  if (!modal) return;
+  const show = typeof force === 'boolean' ? force : modal.classList.contains('hidden');
+  if (!show) {
+    modal.classList.add('hidden');
+    const iframe = document.getElementById('hbbtv-iframe');
+    if (iframe) iframe.src = 'about:blank';
+    return;
+  }
+  const url = (availableChannelTracks && availableChannelTracks.hbbtv_url) || (activeChannel && activeChannel.hbbtv_url);
+  if (!url) {
+    showToast('ℹ️ No HbbTV portal configured or detected for this channel', 'info');
+    return;
+  }
+  const iframe = document.getElementById('hbbtv-iframe');
+  const title = document.getElementById('hbbtv-modal-title');
+  const ext = document.getElementById('btn-hbbtv-external');
+  if (iframe) iframe.src = url;
+  if (title && activeChannel) title.textContent = `🔴 HbbTV: ${activeChannel.name}`;
+  if (ext) ext.href = url;
+  modal.classList.remove('hidden');
+}
+window.toggleHbbTV = toggleHbbTV;
+
+// ==========================================================
+// KEYBOARD SHORTCUTS HELP MODAL
+// ==========================================================
+function toggleShortcutsModal(force) {
+  const modal = document.getElementById('shortcuts-modal');
+  if (!modal) return;
+  const show = typeof force === 'boolean' ? force : modal.classList.contains('hidden');
+  modal.classList.toggle('hidden', !show);
+}
+window.toggleShortcutsModal = toggleShortcutsModal;
+
+function setupInteractiveFeatures() {
+  const btnCloseShortcuts = document.getElementById('btn-close-shortcuts');
+  if (btnCloseShortcuts) btnCloseShortcuts.onclick = () => toggleShortcutsModal(false);
+  const shortcutsModal = document.getElementById('shortcuts-modal');
+  if (shortcutsModal) {
+    shortcutsModal.onclick = (e) => {
+      if (e.target.id === 'shortcuts-modal') toggleShortcutsModal(false);
+    };
+  }
+
+  const btnCloseHbbtv = document.getElementById('btn-close-hbbtv');
+  if (btnCloseHbbtv) btnCloseHbbtv.onclick = () => toggleHbbTV(false);
+  const hbbtvModal = document.getElementById('hbbtv-modal');
+  if (hbbtvModal) {
+    hbbtvModal.onclick = (e) => {
+      if (e.target.id === 'hbbtv-modal') toggleHbbTV(false);
+    };
+  }
+
+  const osdHbbtvBadge = document.getElementById('osd-hbbtv-badge');
+  if (osdHbbtvBadge) {
+    osdHbbtvBadge.onclick = (e) => {
+      e.stopPropagation();
+      toggleHbbTV();
+    };
+  }
+
+  const osdTeletextBadge = document.getElementById('osd-teletext-badge');
+  if (osdTeletextBadge) {
+    osdTeletextBadge.onclick = (e) => {
+      e.stopPropagation();
+      toggleTeletext();
+    };
+  }
+}
+
 function zapDelta(delta) {
   if (channels.length === 0) return;
   if (!activeChannel) {
@@ -1511,13 +2051,80 @@ function setupKeybindings() {
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      const shortcutsModal = document.getElementById('shortcuts-modal');
+      if (shortcutsModal && !shortcutsModal.classList.contains('hidden')) {
+        toggleShortcutsModal(false);
+        return;
+      }
+      const hbbtvModal = document.getElementById('hbbtv-modal');
+      if (hbbtvModal && !hbbtvModal.classList.contains('hidden')) {
+        toggleHbbTV(false);
+        return;
+      }
+      const teletextOverlay = document.getElementById('teletext-overlay');
+      if (teletextOverlay && !teletextOverlay.classList.contains('hidden')) {
+        toggleTeletext(false);
+        return;
+      }
+      const rfOverlay = document.getElementById('rf-analyzer-overlay');
+      if (rfOverlay && !rfOverlay.classList.contains('hidden')) {
+        toggleRFAnalyzer(false);
+        return;
+      }
+      const manualSched = document.getElementById('manual-schedule-modal');
+      if (manualSched && !manualSched.classList.contains('hidden')) {
+        closeManualScheduleModal();
+        return;
+      }
+      const recPlayer = document.getElementById('recording-player-modal');
+      if (recPlayer && !recPlayer.classList.contains('hidden')) {
+        closeRecordingPlayer();
+        return;
+      }
       closeEPGModal();
       closeConflictModal();
       return;
     }
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
 
-    if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
+    if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+      e.preventDefault();
+      toggleShortcutsModal();
+    } else if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleRFAnalyzer();
+    } else if ((e.key === 't' || e.key === 'T') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleTeletext();
+    } else if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleHbbTV();
+    } else if (e.code === 'Space' || ((e.key === 'k' || e.key === 'K') && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      e.preventDefault();
+      toggleTimeshiftPlayPause();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      seekTimeshift(-10);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      seekTimeshift(10);
+    } else if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      jumpToLive();
+    } else if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      document.getElementById('btn-mute').click();
+    } else if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      adjustVolume(0.05);
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      adjustVolume(-0.05);
+    } else if ((e.key === 'a' || e.key === 'A') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      cycleAspectRatio();
+    } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
       zapDelta(-1);
     } else if (e.key === 'ArrowDown' || e.key === 'PageDown') {
       zapDelta(1);
@@ -1989,6 +2596,14 @@ async function loadInitialSettings() {
     if (cfg.video_bitrate) {
       document.getElementById('cfg-video-bitrate').value = cfg.video_bitrate;
     }
+    if (cfg.rec_pre_padding !== undefined) {
+      const el = document.getElementById('cfg-rec-pre-padding');
+      if (el) el.value = cfg.rec_pre_padding;
+    }
+    if (cfg.rec_post_padding !== undefined) {
+      const el = document.getElementById('cfg-rec-post-padding');
+      if (el) el.value = cfg.rec_post_padding;
+    }
   } catch (e) {}
 }
 
@@ -2416,6 +3031,8 @@ function setupSettingsUI() {
     const updates = {
       transcoder_mode: document.getElementById('cfg-transcoder-mode').value,
       video_bitrate: document.getElementById('cfg-video-bitrate').value,
+      rec_pre_padding: parseInt(document.getElementById('cfg-rec-pre-padding').value, 10),
+      rec_post_padding: parseInt(document.getElementById('cfg-rec-post-padding').value, 10),
     };
     await fetch('/api/settings', {
       method: 'POST',
@@ -2439,6 +3056,12 @@ async function fetchAndRenderChannelTracks(channelId) {
     if (res.ok) {
       availableChannelTracks = await res.json();
       renderTrackMenus();
+      const hbbtvBadge = document.getElementById('osd-hbbtv-badge');
+      const txtBadge = document.getElementById('osd-teletext-badge');
+      const hbbtv = availableChannelTracks.hbbtv_url || (activeChannel && activeChannel.hbbtv_url);
+      const hasTxt = availableChannelTracks.has_teletext || (activeChannel && activeChannel.has_teletext);
+      if (hbbtvBadge) hbbtvBadge.classList.toggle('hidden', !hbbtv);
+      if (txtBadge) txtBadge.classList.toggle('hidden', !hasTxt);
     } else {
       availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
       renderTrackMenus();
@@ -3016,6 +3639,9 @@ if (scheduleForm) {
     const startTime = new Date(startVal);
     const endTime = new Date(startTime.getTime() + durMin * 60 * 1000);
 
+    const prePad = parseInt(document.getElementById('sched-pre-padding').value, 10);
+    const postPad = parseInt(document.getElementById('sched-post-padding').value, 10);
+
     try {
       const res = await fetch('/api/recordings', {
         method: 'POST',
@@ -3025,7 +3651,9 @@ if (scheduleForm) {
           title: title,
           start_time: startTime.toISOString(),
           end_time: endTime.toISOString(),
-          duration: durMin * 60
+          duration: durMin * 60,
+          pre_padding: prePad,
+          post_padding: postPad
         })
       });
 

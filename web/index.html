@@ -102,6 +102,8 @@
                   <span id="osd-channel-num" class="badge">1</span>
                   <span id="osd-channel-name">Channel Name</span>
                   <span id="osd-signal-badge" class="osd-signal-badge hidden">📶 <span id="osd-signal-val">--%</span></span>
+                  <span id="osd-hbbtv-badge" class="osd-interactive-badge hidden clickable" onclick="toggleHbbTV()" title="Press H to open HbbTV interactive portal">🔴 HbbTV (H)</span>
+                  <span id="osd-teletext-badge" class="osd-interactive-badge hidden clickable" onclick="toggleTeletext()" title="Press T to open Teletext">TXT (T)</span>
                 </div>
                 <div id="osd-now-title" class="osd-show-title clickable" title="Click to view full program description">Program Title</div>
                 <div class="osd-time-bar-wrapper">
@@ -115,9 +117,99 @@
             </div>
           </div>
 
+          <!-- Real-Time RF Signal Analyzer HUD Overlay (Toggle with 'S') -->
+          <div id="rf-analyzer-overlay" class="rf-analyzer-overlay hidden">
+            <div class="rf-analyzer-header">
+              <div class="rf-analyzer-title">
+                <span class="rf-icon">📡</span>
+                <strong>RF Signal Analyzer</strong>
+                <span id="rf-tuner-id" class="rf-chip">Tuner 0</span>
+              </div>
+              <button class="rf-close-btn" onclick="toggleRFAnalyzer(false)" title="Close (S or Esc)">✕</button>
+            </div>
+            <div class="rf-analyzer-grid">
+              <div class="rf-metric-card">
+                <div class="rf-metric-label">Signal Strength</div>
+                <div class="rf-bar-bg"><div id="rf-bar-strength" class="rf-bar-fill" style="width: 0%"></div></div>
+                <div class="rf-metric-val"><span id="rf-val-strength">0%</span></div>
+              </div>
+              <div class="rf-metric-card">
+                <div class="rf-metric-label">Signal Quality / SNR</div>
+                <div class="rf-bar-bg"><div id="rf-bar-quality" class="rf-bar-fill" style="width: 0%"></div></div>
+                <div class="rf-metric-val"><span id="rf-val-quality">0%</span> <span id="rf-val-snr" class="rf-subval">(-- dB)</span></div>
+              </div>
+              <div class="rf-metric-card">
+                <div class="rf-metric-label">Bit Error Rate (BER)</div>
+                <div class="rf-metric-val" id="rf-val-ber">0</div>
+              </div>
+              <div class="rf-metric-card">
+                <div class="rf-metric-label">Uncorrected Blocks</div>
+                <div class="rf-metric-val" id="rf-val-unc">0</div>
+              </div>
+            </div>
+            <div class="rf-lock-flags">
+              <span id="rf-flag-sig" class="rf-flag">SIGNAL</span>
+              <span id="rf-flag-carrier" class="rf-flag">CARRIER</span>
+              <span id="rf-flag-viterbi" class="rf-flag">VITERBI</span>
+              <span id="rf-flag-sync" class="rf-flag">SYNC</span>
+              <span id="rf-flag-lock" class="rf-flag">LOCK</span>
+            </div>
+            <div class="rf-multiplex-info">
+              <span id="rf-mux-freq">-- MHz</span> •
+              <span id="rf-mux-deliv">DVB</span> •
+              <span id="rf-mux-bw">8 MHz</span> •
+              <span id="rf-active-channel">No Channel</span>
+            </div>
+          </div>
+
+          <!-- Retro Teletext Viewer Overlay (Toggle with 'T') -->
+          <div id="teletext-overlay" class="teletext-overlay hidden">
+            <div class="teletext-window">
+              <div class="teletext-header">
+                <span class="teletext-page-indicator">P<span id="txt-page-num">100</span></span>
+                <span class="teletext-title" id="txt-channel-name">DVB-TELETEXT</span>
+                <span id="txt-live-time">--:--:--</span>
+                <button class="teletext-close-btn" onclick="toggleTeletext(false)" title="Close Teletext (T or Esc)">✕</button>
+              </div>
+              <div class="teletext-screen" id="teletext-screen">
+                <!-- Dynamically populated page -->
+              </div>
+              <div class="teletext-controls">
+                <div class="teletext-nav-row">
+                  <button class="txt-btn-color txt-red" onclick="navTeletextPage(100)">Index 100</button>
+                  <button class="txt-btn-color txt-green" onclick="navTeletextPage(200)">Guide 200</button>
+                  <button class="txt-btn-color txt-yellow" onclick="navTeletextPage(300)">News 300</button>
+                  <button class="txt-btn-color txt-blue" onclick="navTeletextPage(888)">Subtitles 888</button>
+                </div>
+                <div class="teletext-input-row">
+                  <span>Page:</span>
+                  <input type="number" id="teletext-page-input" min="100" max="899" value="100" class="teletext-page-input">
+                  <button class="btn btn-secondary btn-sm" onclick="navTeletextInput()">Go</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Quick Zap Indicator -->
           <div id="zap-indicator" class="zap-indicator hidden">
             <span id="zap-number">1</span>
+          </div>
+
+          <!-- Timeshift Scrubber & Live Controls -->
+          <div id="timeshift-bar" class="timeshift-bar">
+            <button id="btn-timeshift-playpause" class="timeshift-btn" title="Pause / Resume Live TV (Space)">⏸</button>
+            <button id="btn-timeshift-rewind" class="timeshift-btn" title="Rewind 10 seconds (←)">⏪ 10s</button>
+            <button id="btn-timeshift-forward" class="timeshift-btn" title="Forward 10 seconds (→)">10s ⏩</button>
+            <div class="timeshift-track-wrap">
+              <input type="range" id="timeshift-slider" min="0" max="100" value="100" class="timeshift-slider" title="Seek in live broadcast buffer">
+              <div class="timeshift-time-labels">
+                <span id="timeshift-buffer-start">-00:00</span>
+                <span id="timeshift-current-offset" class="timeshift-offset-text">LIVE</span>
+              </div>
+            </div>
+            <button id="btn-timeshift-live" class="timeshift-live-pill is-live" title="Jump to Live Stream (L)">
+              <span class="live-dot">●</span> LIVE
+            </button>
           </div>
 
           <!-- Player Controls Bar -->
@@ -300,6 +392,26 @@
                   <option value="1500k">1500 kbps (Low Bandwidth)</option>
                   <option value="2500k">2500 kbps (Standard 720p/1080p)</option>
                   <option value="4500k">4500 kbps (High Quality HD)</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Default Pre-Recording Padding:</label>
+                <select id="cfg-rec-pre-padding" class="form-select">
+                  <option value="0">0 minutes (Exact EPG start)</option>
+                  <option value="1">1 minute</option>
+                  <option value="2" selected>2 minutes (Recommended)</option>
+                  <option value="5">5 minutes</option>
+                  <option value="10">10 minutes</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Default Post-Recording Padding:</label>
+                <select id="cfg-rec-post-padding" class="form-select">
+                  <option value="0">0 minutes (Exact EPG end)</option>
+                  <option value="2">2 minutes</option>
+                  <option value="5" selected>5 minutes (Recommended)</option>
+                  <option value="10">10 minutes</option>
+                  <option value="15">15 minutes</option>
                 </select>
               </div>
               <button type="submit" class="btn btn-primary">Save Settings</button>
@@ -485,11 +597,86 @@
           <label for="sched-duration-input">Duration (minutes):</label>
           <input type="number" id="sched-duration-input" class="form-input" min="1" max="1440" value="60" required>
         </div>
+        <div class="form-row">
+          <label for="sched-pre-padding">Start Early (Pre-padding):</label>
+          <select id="sched-pre-padding" class="form-select">
+            <option value="0">0 minutes (Exact EPG start)</option>
+            <option value="1">1 minute</option>
+            <option value="2" selected>2 minutes (Recommended)</option>
+            <option value="5">5 minutes</option>
+            <option value="10">10 minutes</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="sched-post-padding">End Late (Post-padding):</label>
+          <select id="sched-post-padding" class="form-select">
+            <option value="0">0 minutes (Exact EPG end)</option>
+            <option value="2">2 minutes</option>
+            <option value="5" selected>5 minutes (Recommended)</option>
+            <option value="10">10 minutes</option>
+            <option value="15">15 minutes</option>
+          </select>
+        </div>
         <div class="modal-actions" style="margin-top: 1rem;">
           <button type="button" id="btn-cancel-manual-sched" class="btn btn-secondary">Cancel</button>
           <button type="submit" class="btn btn-primary">Save Timer</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Keyboard Shortcuts Help Modal (Toggle with '?') -->
+  <div id="shortcuts-modal" class="modal hidden">
+    <div class="modal-card shortcuts-modal-card">
+      <div class="modal-header">
+        <h3>⌨️ Keyboard Shortcuts Help</h3>
+        <button id="btn-close-shortcuts" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body shortcuts-modal-body">
+        <div class="shortcuts-section">
+          <h4>📺 Channel Navigation</h4>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>PgUp</kbd> / <kbd>PgDn</kbd></span><span class="shortcut-desc">Previous / Next Channel</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>0</kbd> – <kbd>9</kbd></span><span class="shortcut-desc">Direct Channel Number Zap</span></div>
+        </div>
+        <div class="shortcuts-section">
+          <h4>⏯️ Playback & Timeshift</h4>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>Space</kbd> / <kbd>K</kbd></span><span class="shortcut-desc">Pause / Resume Live Broadcast</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>←</kbd> / <kbd>→</kbd></span><span class="shortcut-desc">Rewind / Skip Forward 10s</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>L</kbd></span><span class="shortcut-desc">Jump Back to Live Stream</span></div>
+        </div>
+        <div class="shortcuts-section">
+          <h4>🔊 Audio & Display</h4>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>M</kbd></span><span class="shortcut-desc">Mute / Unmute Audio</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>+</kbd> / <kbd>-</kbd></span><span class="shortcut-desc">Volume Up / Down</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>F</kbd></span><span class="shortcut-desc">Toggle Fullscreen (or Double-Click Video)</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>A</kbd></span><span class="shortcut-desc">Select / Cycle Aspect Ratio</span></div>
+        </div>
+        <div class="shortcuts-section">
+          <h4>🔍 Tools, Diagnostics & Features</h4>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>S</kbd></span><span class="shortcut-desc">Real-Time RF Signal Analyzer HUD</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>T</kbd></span><span class="shortcut-desc">Teletext Screen Viewer & Subtitles</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>H</kbd></span><span class="shortcut-desc">HbbTV Interactive Broadcast Portal</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>I</kbd></span><span class="shortcut-desc">Live Program Synopsis & Details</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>?</kbd></span><span class="shortcut-desc">Show / Hide Keyboard Shortcuts Cheat-Sheet</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>Esc</kbd></span><span class="shortcut-desc">Close any Open Modal or Overlay</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- HbbTV Interactive Portal Modal (Toggle with 'H') -->
+  <div id="hbbtv-modal" class="modal hidden">
+    <div class="modal-card hbbtv-modal-card">
+      <div class="modal-header">
+        <h3 id="hbbtv-modal-title">🔴 HbbTV Interactive Application</h3>
+        <div class="hbbtv-header-actions">
+          <a id="btn-hbbtv-external" href="#" target="_blank" class="btn btn-secondary btn-sm" title="Open in new window">↗ Open New Tab</a>
+          <button id="btn-close-hbbtv" class="modal-close-btn">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body hbbtv-modal-body">
+        <iframe id="hbbtv-iframe" src="about:blank" class="hbbtv-iframe" allowfullscreen></iframe>
+      </div>
     </div>
   </div>
 

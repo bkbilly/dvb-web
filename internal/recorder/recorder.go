@@ -126,7 +126,8 @@ func (r *Recorder) checkRecordings(now time.Time) {
 	// 1. Check for active recordings that reached their end_time
 	r.mu.Lock()
 	for id, job := range r.jobs {
-		if now.After(job.Recording.EndTime) || now.Equal(job.Recording.EndTime) {
+		effEnd := job.Recording.EffectiveEndTime()
+		if now.After(effEnd) || now.Equal(effEnd) {
 			go r.finalizeJob(id, "completed", "")
 		}
 	}

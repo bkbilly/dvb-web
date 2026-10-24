@@ -15,7 +15,11 @@ A fast, lightweight web TV streaming server and DVR for digital broadcast televi
 - 💤 **Zero-Resource Idle**: Automatically releases tuners and stops FFmpeg when idle (0% CPU and low power).
 - 🍿 **Plex & Jellyfin Integration**: Built-in HDHomeRun emulation (UDP discovery on port `65001`), M3U playlist (`/playlist.m3u`), and XMLTV guide (`/epg.xml`).
 - 🔀 **Smart Multi-Tuner Pooling**: Multiplex sharing allows multiple viewers to watch channels on the same frequency using a single tuner.
-- 🔴 **Integrated DVR**: Schedule future broadcasts from the EPG or record live TV with one click; automatically remuxes to fast-start MP4.
+- 🔴 **Integrated DVR with Grace Periods**: Schedule future broadcasts from the EPG or record live TV with one click; configurable pre-padding and post-padding ensure full program capture, automatically remuxing to fast-start MP4.
+- ⏸️ **Live TV Timeshifting**: Pause, rewind, and scrub through live broadcast buffers with instant jump-to-live.
+- 📡 **Real-Time RF Signal Analyzer**: Floating HUD diagnostics for RF signal strength, SNR/quality dB, BER, UNC, and carrier/sync/lock flags (press `S`).
+- 📟 **Teletext & Subtitles**: Retro CRT teletext viewer (press `T`) with index, technical specs, and synchronized subtitles (page 888).
+- 🔴 **HbbTV Interactive Portal**: Seamless access to interactive TV portals and catch-up services on supported channels (press `H`).
 - 📻 **Radio & Multi-Track Audio/Subtitles**: Audio-only radio playback with equalizer display, plus live audio language and subtitle switching.
 - 🚀 **Hardware Acceleration**: Automatic detection for Intel/AMD VA-API, NVIDIA NVENC, and Raspberry Pi V4L2 M2M, with CPU fallback.
 - 📅 **Live Multi-Language EPG**: Interactive timeline guide with dynamic broadcast EIT table parsing and full program descriptions.
@@ -94,9 +98,20 @@ go build -o dvb-web cmd/server/main.go
 | Key | Action |
 | :--- | :--- |
 | `↑` / `↓` or `PageUp` / `PageDown` | Previous / Next Channel |
-| `0` – `9` | Direct Channel Number Input |
-| `F` or `Double-Click Video` | Toggle Fullscreen |
+| `0` – `9` | Direct Channel Number Zap |
+| `Space` / `K` | Pause / Resume Live Broadcast (Timeshift) |
+| `←` / `→` | Rewind / Skip Forward 10 seconds |
+| `L` | Jump Back to Live Stream |
 | `M` | Mute / Unmute Audio |
+| `+` / `-` | Volume Up / Down |
+| `F` or `Double-Click Video` | Toggle Fullscreen |
+| `A` | Cycle Aspect Ratio (Auto, 16:9, 4:3, Stretch, Zoom) |
+| `S` | Real-Time RF Signal Analyzer HUD Overlay |
+| `T` | Teletext Page Viewer & Subtitle Track |
+| `H` | HbbTV Interactive Portal |
+| `I` | Live Program Synopsis & Details |
+| `?` | Keyboard Shortcuts Cheat-Sheet Modal |
+| `Esc` | Close any Open Modal or Overlay |
 
 ---
 

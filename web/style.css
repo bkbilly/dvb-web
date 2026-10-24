@@ -2542,3 +2542,480 @@ input:checked + .slider:before {
     font-size: 0.75rem;
   }
 }
+
+/* ========================================================== */
+/* TIMESHIFT, RF ANALYZER, TELETEXT, HBBTV & SHORTCUTS HELP  */
+/* ========================================================== */
+
+/* Timeshift Scrubber & Live Controls Bar */
+.timeshift-bar {
+  position: absolute;
+  bottom: 50px;
+  left: 0;
+  right: 0;
+  height: 38px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0.45));
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+  gap: 0.6rem;
+  z-index: 10;
+  backdrop-filter: blur(4px);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+}
+
+.timeshift-bar.controls-autohidden {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.timeshift-btn {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.timeshift-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.timeshift-track-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.timeshift-slider {
+  width: 100%;
+  height: 6px;
+  -webkit-appearance: none;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+
+.timeshift-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(0,0,0,0.6);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.timeshift-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.25);
+}
+
+.timeshift-time-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.85);
+  font-family: monospace;
+}
+
+.timeshift-live-pill {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  color: #f87171;
+  border-radius: 12px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  letter-spacing: 0.05em;
+  transition: all 0.2s ease;
+}
+
+.timeshift-live-pill.is-live {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #fff;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+}
+
+.live-dot {
+  font-size: 0.65rem;
+  animation: pulse-dot 1.5s infinite;
+}
+
+/* Real-Time RF Signal Analyzer HUD Overlay */
+.rf-analyzer-overlay {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: min(380px, calc(100% - 2rem));
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: var(--radius);
+  padding: 1rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(10px);
+  z-index: 25;
+  color: var(--text-main);
+  animation: fadeIn 0.2s ease;
+}
+
+.rf-analyzer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.rf-analyzer-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.95rem;
+}
+
+.rf-chip {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.rf-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+}
+.rf-close-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.rf-analyzer-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+
+.rf-metric-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+}
+
+.rf-metric-label {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.rf-metric-val {
+  font-size: 0.9rem;
+  font-weight: 700;
+  font-family: monospace;
+}
+
+.rf-subval {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: #93c5fd;
+}
+
+.rf-bar-bg {
+  width: 100%;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.25rem;
+}
+
+.rf-bar-fill {
+  height: 100%;
+  background: linear-gradient(to right, #eab308, #22c55e);
+  transition: width 0.3s ease;
+}
+
+.rf-lock-flags {
+  display: flex;
+  gap: 0.35rem;
+  justify-content: space-between;
+  margin-bottom: 0.65rem;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.35rem;
+  border-radius: 6px;
+}
+
+.rf-flag {
+  font-size: 0.65rem;
+  font-weight: 800;
+  padding: 0.15rem 0.3rem;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  flex: 1;
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.rf-flag.locked {
+  background: rgba(34, 197, 94, 0.25);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.5);
+  text-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+}
+
+.rf-multiplex-info {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding-top: 0.4rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Retro Teletext CRT Screen Overlay */
+.teletext-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.92);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.teletext-window {
+  width: min(720px, 100%);
+  height: min(540px, 95%);
+  background: #000;
+  border: 3px solid #333;
+  box-shadow: 0 0 28px rgba(0, 255, 255, 0.2);
+  display: flex;
+  flex-direction: column;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.teletext-header {
+  background: #000;
+  border-bottom: 2px solid #333;
+  color: #00ffff;
+  font-weight: bold;
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  letter-spacing: 0.1em;
+}
+
+.teletext-title {
+  color: #ffff00;
+}
+
+.teletext-close-btn {
+  background: transparent;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  font-size: 1.1rem;
+}
+
+.teletext-screen {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+  color: #ffffff;
+  background: #000;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  font-size: 0.95rem;
+  text-shadow: 0 0 2px rgba(255,255,255,0.4);
+}
+
+.teletext-controls {
+  background: #111;
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid #333;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.teletext-nav-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.txt-btn-color {
+  border: none;
+  padding: 0.25rem 0.6rem;
+  font-family: inherit;
+  font-weight: bold;
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.txt-red { background: #ef4444; color: #fff; }
+.txt-green { background: #22c55e; color: #000; }
+.txt-yellow { background: #eab308; color: #000; }
+.txt-blue { background: #3b82f6; color: #fff; }
+
+.teletext-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #ccc;
+  font-size: 0.8rem;
+}
+
+.teletext-page-input {
+  width: 60px;
+  background: #222;
+  border: 1px solid #444;
+  color: #ffff00;
+  font-family: inherit;
+  font-weight: bold;
+  padding: 0.2rem 0.4rem;
+  text-align: center;
+}
+
+/* OSD Interactive Badges (HbbTV, Teletext) */
+.osd-interactive-badge {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.osd-interactive-badge:hover {
+  background: rgba(239, 68, 68, 0.4);
+  color: #fff;
+  transform: scale(1.05);
+}
+
+/* Shortcuts Modal */
+.shortcuts-modal-card {
+  max-width: 620px;
+  width: 90%;
+}
+
+.shortcuts-modal-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  padding: 1.25rem;
+}
+
+@media (max-width: 640px) {
+  .shortcuts-modal-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.shortcuts-section h4 {
+  font-size: 0.85rem;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 0.25rem;
+}
+
+.shortcut-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  margin-bottom: 0.4rem;
+  gap: 0.5rem;
+}
+
+.shortcut-keys kbd {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.75rem;
+  font-family: monospace;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+}
+
+.shortcut-desc {
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* HbbTV Modal */
+.hbbtv-modal-card {
+  max-width: 960px;
+  width: 95%;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.hbbtv-modal-body {
+  flex: 1;
+  padding: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.hbbtv-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.hbbtv-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.padding-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.padding-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}

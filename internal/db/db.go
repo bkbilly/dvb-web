@@ -31,6 +31,8 @@ type Channel struct {
 	ExtraParams    string    `json:"extra_params"`
 	Enabled        bool      `json:"enabled"`
 	IsRadio        bool      `json:"is_radio"`
+	HbbtvURL       string    `json:"hbbtv_url,omitempty"`
+	HasTeletext    bool      `json:"has_teletext"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	// Runtime enriched field:
@@ -59,11 +61,29 @@ type Recording struct {
 	StartTime    time.Time `json:"start_time"`
 	EndTime      time.Time `json:"end_time"`
 	Duration     int       `json:"duration"` // in seconds
+	PrePadding   int       `json:"pre_padding"` // in minutes
+	PostPadding  int       `json:"post_padding"` // in minutes
 	FilePath     string    `json:"file_path"`
 	FileSize     int64     `json:"file_size"` // in bytes
 	Status       string    `json:"status"` // "scheduled", "recording", "completed", "failed", "cancelled"
 	ErrorMessage string    `json:"error_message,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (r *Recording) EffectiveStartTime() time.Time {
+	pad := r.PrePadding
+	if pad < 0 {
+		pad = 0
+	}
+	return r.StartTime.Add(-time.Duration(pad) * time.Minute)
+}
+
+func (r *Recording) EffectiveEndTime() time.Time {
+	pad := r.PostPadding
+	if pad < 0 {
+		pad = 0
+	}
+	return r.EndTime.Add(time.Duration(pad) * time.Minute)
 }
 
 func Open(dataDir string) (*Database, error) {
@@ -133,6 +153,8 @@ func (d *Database) migrate() error {
 		extra_params TEXT DEFAULT '',
 		enabled INTEGER DEFAULT 1,
 		is_radio INTEGER DEFAULT 0,
+		hbbtv_url TEXT DEFAULT '',
+		has_teletext INTEGER DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
@@ -159,6 +181,8 @@ func (d *Database) migrate() error {
 		start_time DATETIME NOT NULL,
 		end_time DATETIME NOT NULL,
 		duration INTEGER NOT NULL,
+		pre_padding INTEGER DEFAULT 2,
+		post_padding INTEGER DEFAULT 5,
 		file_path TEXT DEFAULT '',
 		file_size INTEGER DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'scheduled',
@@ -176,8 +200,12 @@ func (d *Database) migrate() error {
 		return err
 	}
 
-	// Ensure is_radio column exists for existing installations
+	// Ensure newer columns exist for existing installations
 	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN is_radio INTEGER DEFAULT 0;")
+	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN hbbtv_url TEXT DEFAULT '';")
+	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN has_teletext INTEGER DEFAULT 0;")
+	_, _ = d.db.Exec("ALTER TABLE recordings ADD COLUMN pre_padding INTEGER DEFAULT 2;")
+	_, _ = d.db.Exec("ALTER TABLE recordings ADD COLUMN post_padding INTEGER DEFAULT 5;")
 
 	// Clean up any corrupt dates or duplicate event_ids from older schema versions
 	_, _ = d.db.Exec(`
@@ -243,7 +271,8 @@ func (d *Database) SetSetting(key, value string) error {
 func (d *Database) ListChannels() ([]Channel, error) {
 	rows, err := d.db.Query(`
 		SELECT id, name, number, logo_url, frequency, bandwidth, delivery_system, 
-		       service_id, video_pid, audio_pid, extra_params, enabled, COALESCE(is_radio, 0), created_at, updated_at
+		       service_id, video_pid, audio_pid, extra_params, enabled, COALESCE(is_radio, 0),
+		       COALESCE(hbbtv_url, ''), COALESCE(has_teletext, 0), created_at, updated_at
 		FROM channels 
 		ORDER BY number ASC, id ASC
 	`)
@@ -255,16 +284,17 @@ func (d *Database) ListChannels() ([]Channel, error) {
 	var channels []Channel
 	for rows.Next() {
 		var c Channel
-		var enabledInt, isRadioInt int
+		var enabledInt, isRadioInt, hasTxtInt int
 		if err := rows.Scan(
 			&c.ID, &c.Name, &c.Number, &c.LogoURL, &c.Frequency, &c.Bandwidth,
 			&c.DeliverySystem, &c.ServiceID, &c.VideoPID, &c.AudioPID, &c.ExtraParams,
-			&enabledInt, &isRadioInt, &c.CreatedAt, &c.UpdatedAt,
+			&enabledInt, &isRadioInt, &c.HbbtvURL, &hasTxtInt, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		c.Enabled = (enabledInt == 1)
 		c.IsRadio = (isRadioInt == 1)
+		c.HasTeletext = (hasTxtInt == 1)
 		channels = append(channels, c)
 	}
 
@@ -281,21 +311,23 @@ func (d *Database) ListChannels() ([]Channel, error) {
 func (d *Database) GetChannel(id int64) (*Channel, error) {
 	row := d.db.QueryRow(`
 		SELECT id, name, number, logo_url, frequency, bandwidth, delivery_system, 
-		       service_id, video_pid, audio_pid, extra_params, enabled, COALESCE(is_radio, 0), created_at, updated_at
+		       service_id, video_pid, audio_pid, extra_params, enabled, COALESCE(is_radio, 0),
+		       COALESCE(hbbtv_url, ''), COALESCE(has_teletext, 0), created_at, updated_at
 		FROM channels WHERE id = ?
 	`, id)
 
 	var c Channel
-	var enabledInt, isRadioInt int
+	var enabledInt, isRadioInt, hasTxtInt int
 	if err := row.Scan(
 		&c.ID, &c.Name, &c.Number, &c.LogoURL, &c.Frequency, &c.Bandwidth,
 		&c.DeliverySystem, &c.ServiceID, &c.VideoPID, &c.AudioPID, &c.ExtraParams,
-		&enabledInt, &isRadioInt, &c.CreatedAt, &c.UpdatedAt,
+		&enabledInt, &isRadioInt, &c.HbbtvURL, &hasTxtInt, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	c.Enabled = (enabledInt == 1)
 	c.IsRadio = (isRadioInt == 1)
+	c.HasTeletext = (hasTxtInt == 1)
 
 	// Populate Now & Next EPG
 	now := time.Now().UTC()
@@ -315,12 +347,16 @@ func (d *Database) SaveChannel(c *Channel) error {
 	if c.IsRadio {
 		isRadioInt = 1
 	}
+	hasTxtInt := 0
+	if c.HasTeletext {
+		hasTxtInt = 1
+	}
 
 	if c.ID == 0 {
 		res, err := d.db.Exec(`
-			INSERT INTO channels (name, number, logo_url, frequency, bandwidth, delivery_system, service_id, video_pid, audio_pid, extra_params, enabled, is_radio, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, c.Name, c.Number, c.LogoURL, c.Frequency, c.Bandwidth, c.DeliverySystem, c.ServiceID, c.VideoPID, c.AudioPID, c.ExtraParams, enabledInt, isRadioInt, now, now)
+			INSERT INTO channels (name, number, logo_url, frequency, bandwidth, delivery_system, service_id, video_pid, audio_pid, extra_params, enabled, is_radio, hbbtv_url, has_teletext, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, c.Name, c.Number, c.LogoURL, c.Frequency, c.Bandwidth, c.DeliverySystem, c.ServiceID, c.VideoPID, c.AudioPID, c.ExtraParams, enabledInt, isRadioInt, c.HbbtvURL, hasTxtInt, now, now)
 		if err != nil {
 			return err
 		}
@@ -332,9 +368,9 @@ func (d *Database) SaveChannel(c *Channel) error {
 	}
 
 	_, err := d.db.Exec(`
-		UPDATE channels SET name=?, number=?, logo_url=?, frequency=?, bandwidth=?, delivery_system=?, service_id=?, video_pid=?, audio_pid=?, extra_params=?, enabled=?, is_radio=?, updated_at=?
+		UPDATE channels SET name=?, number=?, logo_url=?, frequency=?, bandwidth=?, delivery_system=?, service_id=?, video_pid=?, audio_pid=?, extra_params=?, enabled=?, is_radio=?, hbbtv_url=?, has_teletext=?, updated_at=?
 		WHERE id = ?
-	`, c.Name, c.Number, c.LogoURL, c.Frequency, c.Bandwidth, c.DeliverySystem, c.ServiceID, c.VideoPID, c.AudioPID, c.ExtraParams, enabledInt, isRadioInt, now, c.ID)
+	`, c.Name, c.Number, c.LogoURL, c.Frequency, c.Bandwidth, c.DeliverySystem, c.ServiceID, c.VideoPID, c.AudioPID, c.ExtraParams, enabledInt, isRadioInt, c.HbbtvURL, hasTxtInt, now, c.ID)
 	if err == nil {
 		c.UpdatedAt = now
 	}
@@ -717,14 +753,20 @@ func (d *Database) CreateRecording(rec *Recording) error {
 	if rec.CreatedAt.IsZero() {
 		rec.CreatedAt = time.Now()
 	}
+	if rec.PrePadding < 0 {
+		rec.PrePadding = 2
+	}
+	if rec.PostPadding < 0 {
+		rec.PostPadding = 5
+	}
 	sTime := rec.StartTime.UTC().Format("2006-01-02 15:04:05")
 	eTime := rec.EndTime.UTC().Format("2006-01-02 15:04:05")
 	cTime := rec.CreatedAt.UTC().Format("2006-01-02 15:04:05")
 
 	res, err := d.db.Exec(`
-		INSERT INTO recordings (channel_id, event_id, title, description, start_time, end_time, duration, file_path, file_size, status, error_message, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, rec.ChannelID, rec.EventID, rec.Title, rec.Description, sTime, eTime, rec.Duration, rec.FilePath, rec.FileSize, rec.Status, rec.ErrorMessage, cTime)
+		INSERT INTO recordings (channel_id, event_id, title, description, start_time, end_time, duration, pre_padding, post_padding, file_path, file_size, status, error_message, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, rec.ChannelID, rec.EventID, rec.Title, rec.Description, sTime, eTime, rec.Duration, rec.PrePadding, rec.PostPadding, rec.FilePath, rec.FileSize, rec.Status, rec.ErrorMessage, cTime)
 	if err != nil {
 		return err
 	}
@@ -739,7 +781,8 @@ func (d *Database) CreateRecording(rec *Recording) error {
 func (d *Database) GetRecording(id int64) (*Recording, error) {
 	row := d.db.QueryRow(`
 		SELECT r.id, r.channel_id, COALESCE(c.name, 'Unknown'), r.event_id, r.title, r.description,
-		       r.start_time, r.end_time, r.duration, r.file_path, r.file_size, r.status, r.error_message, r.created_at
+		       r.start_time, r.end_time, r.duration, COALESCE(r.pre_padding, 2), COALESCE(r.post_padding, 5),
+		       r.file_path, r.file_size, r.status, r.error_message, r.created_at
 		FROM recordings r
 		LEFT JOIN channels c ON r.channel_id = c.id
 		WHERE r.id = ?
@@ -749,7 +792,8 @@ func (d *Database) GetRecording(id int64) (*Recording, error) {
 	var startRaw, endRaw, createdRaw interface{}
 	err := row.Scan(
 		&rec.ID, &rec.ChannelID, &rec.ChannelName, &rec.EventID, &rec.Title, &rec.Description,
-		&startRaw, &endRaw, &rec.Duration, &rec.FilePath, &rec.FileSize, &rec.Status, &rec.ErrorMessage, &createdRaw,
+		&startRaw, &endRaw, &rec.Duration, &rec.PrePadding, &rec.PostPadding,
+		&rec.FilePath, &rec.FileSize, &rec.Status, &rec.ErrorMessage, &createdRaw,
 	)
 	if err != nil {
 		return nil, err
@@ -763,7 +807,8 @@ func (d *Database) GetRecording(id int64) (*Recording, error) {
 func (d *Database) ListRecordings() ([]Recording, error) {
 	rows, err := d.db.Query(`
 		SELECT r.id, r.channel_id, COALESCE(c.name, 'Unknown'), r.event_id, r.title, r.description,
-		       r.start_time, r.end_time, r.duration, r.file_path, r.file_size, r.status, r.error_message, r.created_at
+		       r.start_time, r.end_time, r.duration, COALESCE(r.pre_padding, 2), COALESCE(r.post_padding, 5),
+		       r.file_path, r.file_size, r.status, r.error_message, r.created_at
 		FROM recordings r
 		LEFT JOIN channels c ON r.channel_id = c.id
 		ORDER BY r.start_time DESC
@@ -779,7 +824,8 @@ func (d *Database) ListRecordings() ([]Recording, error) {
 		var startRaw, endRaw, createdRaw interface{}
 		if err := rows.Scan(
 			&rec.ID, &rec.ChannelID, &rec.ChannelName, &rec.EventID, &rec.Title, &rec.Description,
-			&startRaw, &endRaw, &rec.Duration, &rec.FilePath, &rec.FileSize, &rec.Status, &rec.ErrorMessage, &createdRaw,
+			&startRaw, &endRaw, &rec.Duration, &rec.PrePadding, &rec.PostPadding,
+			&rec.FilePath, &rec.FileSize, &rec.Status, &rec.ErrorMessage, &createdRaw,
 		); err == nil {
 			rec.StartTime = parseDBTime(startRaw)
 			rec.EndTime = parseDBTime(endRaw)
@@ -794,10 +840,13 @@ func (d *Database) ListDueScheduledRecordings(now time.Time) ([]Recording, error
 	nowStr := now.UTC().Format("2006-01-02 15:04:05")
 	rows, err := d.db.Query(`
 		SELECT r.id, r.channel_id, COALESCE(c.name, 'Unknown'), r.event_id, r.title, r.description,
-		       r.start_time, r.end_time, r.duration, r.file_path, r.file_size, r.status, r.error_message, r.created_at
+		       r.start_time, r.end_time, r.duration, COALESCE(r.pre_padding, 2), COALESCE(r.post_padding, 5),
+		       r.file_path, r.file_size, r.status, r.error_message, r.created_at
 		FROM recordings r
 		LEFT JOIN channels c ON r.channel_id = c.id
-		WHERE r.status = 'scheduled' AND r.start_time <= ? AND r.end_time > ?
+		WHERE r.status = 'scheduled'
+		  AND datetime(r.start_time, '-' || COALESCE(r.pre_padding, 2) || ' minutes') <= ?
+		  AND datetime(r.end_time, '+' || COALESCE(r.post_padding, 5) || ' minutes') > ?
 		ORDER BY r.start_time ASC
 	`, nowStr, nowStr)
 	if err != nil {
@@ -811,7 +860,8 @@ func (d *Database) ListDueScheduledRecordings(now time.Time) ([]Recording, error
 		var startRaw, endRaw, createdRaw interface{}
 		if err := rows.Scan(
 			&rec.ID, &rec.ChannelID, &rec.ChannelName, &rec.EventID, &rec.Title, &rec.Description,
-			&startRaw, &endRaw, &rec.Duration, &rec.FilePath, &rec.FileSize, &rec.Status, &rec.ErrorMessage, &createdRaw,
+			&startRaw, &endRaw, &rec.Duration, &rec.PrePadding, &rec.PostPadding,
+			&rec.FilePath, &rec.FileSize, &rec.Status, &rec.ErrorMessage, &createdRaw,
 		); err == nil {
 			rec.StartTime = parseDBTime(startRaw)
 			rec.EndTime = parseDBTime(endRaw)
@@ -826,9 +876,9 @@ func (d *Database) UpdateRecording(rec *Recording) error {
 	eTime := rec.EndTime.UTC().Format("2006-01-02 15:04:05")
 	_, err := d.db.Exec(`
 		UPDATE recordings
-		SET file_path = ?, file_size = ?, status = ?, error_message = ?, end_time = ?, duration = ?
+		SET file_path = ?, file_size = ?, status = ?, error_message = ?, end_time = ?, duration = ?, pre_padding = ?, post_padding = ?
 		WHERE id = ?
-	`, rec.FilePath, rec.FileSize, rec.Status, rec.ErrorMessage, eTime, rec.Duration, rec.ID)
+	`, rec.FilePath, rec.FileSize, rec.Status, rec.ErrorMessage, eTime, rec.Duration, rec.PrePadding, rec.PostPadding, rec.ID)
 	return err
 }
 
