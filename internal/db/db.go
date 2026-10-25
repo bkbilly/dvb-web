@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
 
@@ -622,13 +625,39 @@ func (d *Database) GetAllEPG(from, to time.Time) ([]EPGEvent, error) {
 	return d.scanEPGEvents(rows)
 }
 
+// NormalizeSearchText strips accents, tones, diacritics, punctuation, and normalizes casing for unicode search.
+func NormalizeSearchText(s string) string {
+	t := norm.NFD.String(s)
+	var b strings.Builder
+	b.Grow(len(t))
+	for _, r := range t {
+		if unicode.IsPunct(r) || unicode.IsSymbol(r) {
+			b.WriteByte(' ')
+			continue
+		}
+		if !unicode.Is(unicode.Mn, r) {
+			lr := unicode.ToLower(r)
+			if lr == 'ς' {
+				lr = 'σ'
+			}
+			b.WriteRune(lr)
+		}
+	}
+	return b.String()
+}
+
 func (d *Database) SearchEPG(query string, limit int) ([]EPGSearchResult, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
+	queryNorm := NormalizeSearchText(query)
+	tokens := strings.Fields(queryNorm)
+	if len(tokens) == 0 {
+		return []EPGSearchResult{}, nil
+	}
+
 	nowStr := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
 	maxFutureStr := time.Now().UTC().Add(8 * 24 * time.Hour).Format("2006-01-02 15:04:05")
-	searchPattern := "%" + query + "%"
 
 	rows, err := d.db.Query(`
 		SELECT e.id, e.channel_id, e.event_id, e.start_time, e.end_time,
@@ -636,11 +665,9 @@ func (d *Database) SearchEPG(query string, limit int) ([]EPGSearchResult, error)
 		       c.name, c.number, c.logo_url, c.is_radio
 		FROM epg_events e
 		JOIN channels c ON e.channel_id = c.id
-		WHERE (e.titles_json LIKE ? OR e.descriptions_json LIKE ?)
-		  AND e.end_time >= ? AND e.start_time <= ?
+		WHERE e.end_time >= ? AND e.start_time <= ?
 		ORDER BY e.start_time ASC
-		LIMIT ?
-	`, searchPattern, searchPattern, nowStr, maxFutureStr, limit)
+	`, nowStr, maxFutureStr)
 	if err != nil {
 		return nil, err
 	}
@@ -670,7 +697,39 @@ func (d *Database) SearchEPG(query string, limit int) ([]EPGSearchResult, error)
 		_ = json.Unmarshal([]byte(descJSON), &res.Descriptions)
 		_ = json.Unmarshal([]byte(genresJSON), &res.Genres)
 
-		results = append(results, res)
+		var sb strings.Builder
+		for _, t := range res.Titles {
+			sb.WriteString(t)
+			sb.WriteByte(' ')
+		}
+		for _, desc := range res.Descriptions {
+			sb.WriteString(desc)
+			sb.WriteByte(' ')
+		}
+		for _, g := range res.Genres {
+			sb.WriteString(g)
+			sb.WriteByte(' ')
+		}
+		sb.WriteString(res.ChannelName)
+		sb.WriteByte(' ')
+		sb.WriteString(strconv.Itoa(res.ChannelNumber))
+
+		normalizedTarget := NormalizeSearchText(sb.String())
+
+		matched := true
+		for _, tok := range tokens {
+			if !strings.Contains(normalizedTarget, tok) {
+				matched = false
+				break
+			}
+		}
+
+		if matched {
+			results = append(results, res)
+			if len(results) >= limit {
+				break
+			}
+		}
 	}
 
 	if results == nil {

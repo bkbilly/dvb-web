@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DVB-Web — Live TV & EPG</title>
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=9">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220%22 fill=%22%233b82f6%22><text y=%2226%22 font-size=%2228%22>📺</text></svg>">
 </head>
 <body>
@@ -302,7 +302,6 @@
             <button id="btn-epg-prev" class="btn btn-secondary epg-nav-btn" title="Scroll 2 hours back">◀ -2h</button>
             <button id="btn-epg-now" class="btn btn-primary epg-nav-btn" title="Jump to Current Time">🔴 Now</button>
             <button id="btn-epg-next" class="btn btn-secondary epg-nav-btn" title="Scroll 2 hours forward">+2h ▶</button>
-            <button id="btn-epg-refresh" class="btn btn-secondary epg-nav-btn" title="Refresh TV Guide">🔄</button>
           </div>
         </div>
 
@@ -429,15 +428,10 @@
                 </div>
               </div>
 
-              <!-- Filter tabs bar for results -->
+              <!-- Filter search bar for results -->
               <div class="scan-filter-bar">
-                <div class="scan-filter-btns">
-                  <button type="button" class="scan-filter-btn active" data-filter="all">All Discovered (<span id="filter-cnt-all">0</span>)</button>
-                  <button type="button" class="scan-filter-btn" data-filter="new">✨ New Only (<span id="filter-cnt-new">0</span>)</button>
-                  <button type="button" class="scan-filter-btn" data-filter="missing">⚠️ Missing (<span id="filter-cnt-missing">0</span>)</button>
-                </div>
                 <div class="scan-search-wrap">
-                  <input type="text" id="scan-results-search" class="form-input scan-search-input" placeholder="Search discovered channels..." />
+                  <input type="text" id="scan-results-search" class="form-input scan-search-input" placeholder="🔍 Search discovered channels..." />
                 </div>
               </div>
 
@@ -878,6 +872,6 @@
   </div>
 
   <script src="mpegts.min.js"></script>
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

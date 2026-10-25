@@ -334,14 +334,33 @@ const KNOWN_LANGUAGES = {
   rus: { name: 'Русский', flag: '🇷🇺' },
 };
 
+// Unicode search normalization: case-insensitive, tone/accent/diacritic-insensitive, Greek sigma-agnostic
+function normalizeSearchText(str) {
+  if (!str) return '';
+  return String(str)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // remove combining diacritics / tones
+    .toLowerCase()
+    .replace(/ς/g, 'σ') // normalize Greek final sigma to standard sigma
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ') // treat punctuation and symbols as whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 let availableLanguages = [];
 
 // Multi-language Support
 function setupLanguagePicker() {
-  langSelect.addEventListener('change', (e) => {
+  langSelect.addEventListener('change', async (e) => {
     currentLanguage = e.target.value;
     try {
       localStorage.setItem('dvb_epg_language', currentLanguage);
+      // Persist chosen language to server settings so it survives refresh & server sync
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preferred_language: currentLanguage })
+      });
     } catch (_) {}
     renderChannelList();
     if (activeChannel) {
@@ -458,10 +477,15 @@ function renderChannelList(filterText = '', forceReorder = false) {
     }
   }
 
+  const qNorm = normalizeSearchText(filterText);
+  const qTokens = qNorm.split(/\s+/).filter(Boolean);
+
   const filtered = channels.filter(c => {
-    const matchesSearch = c.name.toLowerCase().includes(filterText.toLowerCase()) || 
-      c.number.toString().includes(filterText);
-    if (!matchesSearch) return false;
+    if (qTokens.length > 0) {
+      const cNorm = normalizeSearchText(`${c.name} ${c.number}`);
+      const matchesSearch = qTokens.every(tok => cNorm.includes(tok));
+      if (!matchesSearch) return false;
+    }
     if (channelFilterType === 'tv') return !c.is_radio;
     if (channelFilterType === 'radio') return !!c.is_radio;
     return true;
@@ -2707,13 +2731,6 @@ function setupEPGScrolling() {
   if (btnNow) {
     btnNow.onclick = jumpToNow;
   }
-
-  const btnRefresh = document.getElementById('btn-epg-refresh');
-  if (btnRefresh) {
-    btnRefresh.onclick = () => {
-      loadEPGTimeline(false);
-    };
-  }
 }
 
 function renderTimeRuler(startTime, hoursCount) {
@@ -3099,6 +3116,8 @@ function renderEPGSearchResults(results, query) {
     const logoHtml = item.channel_logo ? 
       `<img src="${escapeHtml(item.channel_logo)}" alt="" style="width:20px; height:20px; object-fit:contain; border-radius:3px; margin-bottom:2px;">` : '';
 
+    const highlightedTitle = highlightMatchedTokens(title, query);
+
     html += `
       <div class="epg-search-result-item" data-channel-id="${item.channel_id}" data-start-time="${item.start_time}" data-event-id="${item.id}">
         <div class="epg-search-ch-badge">
@@ -3108,7 +3127,7 @@ function renderEPGSearchResults(results, query) {
         </div>
         <div class="epg-search-info">
           <div class="epg-search-prog-title">
-            <span>${escapeHtml(title)}</span>
+            <span>${highlightedTitle}</span>
             ${isLive ? '<span class="epg-search-live-tag">LIVE NOW</span>' : ''}
           </div>
           <div class="epg-search-prog-time">📅 ${timeStr}</div>
@@ -3217,12 +3236,58 @@ async function jumpToEPGEvent(chId, startTimeIso, eventId) {
   }, 400);
 }
 
+function highlightMatchedTokens(text, query) {
+  if (!text) return '';
+  const escaped = escapeHtml(text);
+  if (!query) return escaped;
+  const tokens = normalizeSearchText(query).split(/\s+/).filter(t => t.length >= 2);
+  if (tokens.length === 0) return escaped;
+
+  let result = escaped;
+  tokens.forEach(tok => {
+    const pattern = tok.split('').map(char => {
+      const greekMap = {
+        'α': '[αάΑΆ]',
+        'ε': '[εέΕΈ]',
+        'η': '[ηήΗΉ]',
+        'ι': '[ιίΐϊΙΊΪ]',
+        'ο': '[οόΟΌ]',
+        'υ': '[υύΰϋΥΎΫ]',
+        'ω': '[ωώΩΏ]',
+        'σ': '[σςΣ]',
+        'a': '[aáàâäAÁÀÂÄ]',
+        'e': '[eéèêëEÉÈÊË]',
+        'i': '[iíìîïIÍÌÎÏ]',
+        'o': '[oóòôöOÓÒÔÖ]',
+        'u': '[uúùûüUÚÙÛÜ]'
+      };
+      return greekMap[char] || char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }).join('');
+
+    try {
+      const rx = new RegExp(`(${pattern})`, 'gi');
+      result = result.replace(rx, '<mark class="epg-search-hl">$1</mark>');
+    } catch (_) {}
+  });
+  return result;
+}
+
 function highlightInGridEvents(query) {
-  const q = query.toLowerCase();
+  const qNorm = normalizeSearchText(query);
+  if (!qNorm) {
+    clearInGridSearchHighlights();
+    return;
+  }
+  const tokens = qNorm.split(/\s+/).filter(Boolean);
   document.querySelectorAll('.epg-event-block').forEach(b => {
-    const text = (b.textContent || '').toLowerCase();
-    const title = (b.dataset.title || b.title || '').toLowerCase();
-    const matches = text.includes(q) || title.includes(q);
+    const text = normalizeSearchText(b.textContent || '');
+    const title = normalizeSearchText(b.dataset.title || b.title || '');
+    let desc = '';
+    if (b._eventData && b._eventData.descriptions) {
+      desc = normalizeSearchText(Object.values(b._eventData.descriptions).join(' '));
+    }
+    const combined = `${text} ${title} ${desc}`;
+    const matches = tokens.every(tok => combined.includes(tok));
     b.classList.toggle('search-matched', matches);
     b.classList.toggle('search-dimmed', !matches);
   });
@@ -3289,7 +3354,11 @@ async function loadInitialSettings() {
   try {
     const res = await fetch('/api/settings');
     const cfg = await res.json();
-    if (cfg.preferred_language && availableLanguages.includes(cfg.preferred_language)) {
+    const cachedLang = localStorage.getItem('dvb_epg_language');
+    if (cachedLang && availableLanguages.includes(cachedLang)) {
+      currentLanguage = cachedLang;
+      langSelect.value = currentLanguage;
+    } else if (cfg.preferred_language && availableLanguages.includes(cfg.preferred_language)) {
       currentLanguage = cfg.preferred_language;
       langSelect.value = currentLanguage;
     }
@@ -3497,11 +3566,12 @@ function renderScanResultsCards() {
   }
 
   if (search.trim()) {
-    const q = search.trim().toLowerCase();
-    targetList = targetList.filter(c => 
-      (c.name && c.name.toLowerCase().includes(q)) || 
-      String(c.number).includes(q)
-    );
+    const sNorm = normalizeSearchText(search);
+    const sTokens = sNorm.split(/\s+/).filter(Boolean);
+    targetList = targetList.filter(c => {
+      const cNorm = normalizeSearchText(`${c.name} ${c.number}`);
+      return sTokens.every(tok => cNorm.includes(tok));
+    });
   }
 
   if (targetList.length === 0) {
@@ -3542,26 +3612,12 @@ function renderScanResultsCards() {
 }
 
 function setupScanFilterHandlers() {
-  const filterBtns = document.querySelectorAll('.scan-filter-btn');
-  filterBtns.forEach(btn => {
-    btn.onclick = () => {
-      filterBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      activeScanData.filter = btn.dataset.filter || 'all';
-      renderScanResultsCards();
-    };
-  });
-
   const statPills = document.querySelectorAll('.scan-stats-pills .stat-pill');
   statPills.forEach(pill => {
     pill.onclick = () => {
       statPills.forEach(p => p.classList.remove('active'));
       pill.classList.add('active');
-      const targetFilter = pill.dataset.filter || 'all';
-      activeScanData.filter = targetFilter;
-      filterBtns.forEach(b => {
-        b.classList.toggle('active', b.dataset.filter === targetFilter);
-      });
+      activeScanData.filter = pill.dataset.filter || 'all';
       renderScanResultsCards();
     };
   });
@@ -3650,14 +3706,6 @@ document.getElementById('btn-start-scan').onclick = async () => {
     const statMiss = document.getElementById('stat-missing');
     if (statMiss) statMiss.textContent = `${missingChannels.length} Missing`;
 
-    // Update filter button labels
-    const fCntAll = document.getElementById('filter-cnt-all');
-    if (fCntAll) fCntAll.textContent = allFound.length;
-    const fCntNew = document.getElementById('filter-cnt-new');
-    if (fCntNew) fCntNew.textContent = newChannels.length;
-    const fCntMiss = document.getElementById('filter-cnt-missing');
-    if (fCntMiss) fCntMiss.textContent = missingChannels.length;
-
     // Subtitle
     const subTitle = document.getElementById('scan-summary-subtitle');
     if (subTitle) {
@@ -3668,9 +3716,9 @@ document.getElementById('btn-start-scan').onclick = async () => {
     const sInput = document.getElementById('scan-results-search');
     if (sInput) sInput.value = '';
 
-    // Reset filter buttons state to 'all'
-    const filterBtns = document.querySelectorAll('.scan-filter-btn');
-    filterBtns.forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+    // Reset stat pills state to 'all'
+    const statPills = document.querySelectorAll('.scan-stats-pills .stat-pill');
+    statPills.forEach(p => p.classList.toggle('active', p.dataset.filter === 'all'));
 
     renderScanResultsCards();
 
@@ -3725,8 +3773,6 @@ document.getElementById('btn-prune-missing').onclick = async () => {
     document.getElementById('missing-channels-section').classList.add('hidden');
     const statMiss = document.getElementById('stat-missing');
     if (statMiss) statMiss.textContent = '0 Missing';
-    const fCntMiss = document.getElementById('filter-cnt-missing');
-    if (fCntMiss) fCntMiss.textContent = '0';
     renderScanResultsCards();
     showToast(`🗑️ Successfully deleted ${ids.length} missing channels`, 'info');
     await loadChannels();

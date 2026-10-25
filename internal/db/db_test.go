@@ -165,7 +165,7 @@ func TestSearchEPG(t *testing.T) {
 		t.Errorf("Expected title 'World News Today', got %s", res[0].Titles["eng"])
 	}
 
-	// 2. Search by Greek title
+	// 2. Search by Greek title (exact with tone)
 	resGreek, err := database.SearchEPG("Ταινίας", 10)
 	if err != nil {
 		t.Fatalf("SearchEPG Greek error: %v", err)
@@ -175,6 +175,33 @@ func TestSearchEPG(t *testing.T) {
 	}
 	if resGreek[0].Titles["eng"] != "Blockbuster Movie Night" {
 		t.Errorf("Expected movie title, got %s", resGreek[0].Titles["eng"])
+	}
+
+	// 2b. Search by Greek title without accents/tones (case-insensitive & tone-insensitive)
+	resGreekNoTone, err := database.SearchEPG("ταινιας", 10)
+	if err != nil {
+		t.Fatalf("SearchEPG Greek no-tone error: %v", err)
+	}
+	if len(resGreekNoTone) != 1 {
+		t.Fatalf("Expected 1 result for 'ταινιας' (no tone), got %d", len(resGreekNoTone))
+	}
+
+	// 2c. Search with uppercase and without tones
+	resGreekUpper, err := database.SearchEPG("ΤΑΙΝΙΑ", 10)
+	if err != nil {
+		t.Fatalf("SearchEPG Greek uppercase error: %v", err)
+	}
+	if len(resGreekUpper) != 1 {
+		t.Fatalf("Expected 1 result for 'ΤΑΙΝΙΑ', got %d", len(resGreekUpper))
+	}
+
+	// 2d. Search with multiple tokens across title and channel
+	resMultiToken, err := database.SearchEPG("bbc παγκοσμια", 10)
+	if err != nil {
+		t.Fatalf("SearchEPG multi-token error: %v", err)
+	}
+	if len(resMultiToken) != 1 {
+		t.Fatalf("Expected 1 result for 'bbc παγκοσμια', got %d", len(resMultiToken))
 	}
 
 	// 3. Search by description keyword
