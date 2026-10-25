@@ -142,6 +142,13 @@ func (cs *ChannelStream) ViewerCount() int {
 	return len(cs.subscribers)
 }
 
+func (cs *ChannelStream) HasSubscriber(sessionID string) bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	_, ok := cs.subscribers[sessionID]
+	return ok
+}
+
 func (cs *ChannelStream) Stop() {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -851,17 +858,6 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 				}
 			}
 
-			// Clean up this session from any other stream on this same tuner
-			for key, cs := range t.channels {
-				if key != streamKey {
-					cs.Unsubscribe(session.ID)
-					if cs.ViewerCount() == 0 {
-						cs.Stop()
-						delete(t.channels, key)
-					}
-				}
-			}
-
 			// Ensure this channel & track combination has an active ChannelStream on this multiplex!
 			if _, exists := t.channels[streamKey]; !exists {
 				cs, err := p.startChannelStreamLocked(t, channel, audioTrack, subTrack, subOffset)
@@ -1327,10 +1323,21 @@ func (p *Pool) ReleaseStreamViewerTrack(tunerID int, channelID int64, streamKey,
 		}
 
 		if v, exists := t.viewers[sessionID]; exists {
-			// If streamKey was provided and viewer has switched to another track on this tuner, keep viewer active!
-			if streamKey != "" && v.StreamKey != streamKey {
-				log.Printf("[TunerPool] Session %s stream %s ended; viewer already active on %s (Tuner %d)",
-					sessionID, streamKey, v.StreamKey, t.ID)
+			// Check if this viewer session is still subscribed to any other active stream on this tuner
+			hasOtherStream := false
+			activeStreamKey := ""
+			for key, cs := range t.channels {
+				if cs.HasSubscriber(sessionID) {
+					hasOtherStream = true
+					activeStreamKey = key
+					break
+				}
+			}
+
+			if hasOtherStream {
+				v.StreamKey = activeStreamKey
+				log.Printf("[TunerPool] Session %s stream %s ended; viewer still active on %s (Tuner %d)",
+					sessionID, streamKey, activeStreamKey, t.ID)
 			} else if v.ChannelID == channelID {
 				delete(t.viewers, sessionID)
 				log.Printf("[TunerPool] Session %s stream ended on Tuner %d (Channel %d). Remaining viewers: %d",

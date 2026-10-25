@@ -238,7 +238,7 @@ function bindPlayerVideoEvents(v) {
   });
 
   v.addEventListener('ended', () => {
-    if (v === video && activeChannel) {
+    if (v === video && activeChannel && !isSwitchingTracks && !v._ignoreEnded) {
       handleStreamStopped('Stream playback ended.', true);
     }
   });
@@ -1060,6 +1060,8 @@ function startStream(channel) {
   const v2 = document.getElementById('tv-video-next');
   if (v1 && v2) {
     video = v1;
+    v1._ignoreEnded = false;
+    v2._ignoreEnded = true;
     v1.classList.remove('video-stage-next');
     v1.classList.add('active-stage');
     v1.style.opacity = '1';
@@ -4424,6 +4426,10 @@ function switchStreamTracks(channel) {
     return;
   }
 
+  // Prevent old video from triggering ended event during handoff
+  currentVid._ignoreEnded = true;
+  nextVid._ignoreEnded = false;
+
   isSwitchingTracks = true;
   const switchId = ++currentSwitchSessionId;
 
@@ -4476,12 +4482,18 @@ function switchStreamTracks(channel) {
     }
     clearTimeout(fallbackTimer);
     clearTimeout(timeoutTimer);
+    if (!handoffDone && currentVid) {
+      currentVid._ignoreEnded = false;
+    }
   };
 
   const performHandoff = () => {
     if (handoffDone || switchId !== currentSwitchSessionId) return;
     handoffDone = true;
     cleanupCandidate();
+
+    currentVid._ignoreEnded = true;
+    nextVid._ignoreEnded = false;
 
     // 1. Unmute nextVid and inherit sound & play state
     nextVid.muted = currentVid.muted;
