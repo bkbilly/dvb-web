@@ -259,7 +259,15 @@ function bindPlayerVideoEvents(v) {
   });
 
   v.addEventListener('timeupdate', () => {
-    if (v === video) updateTimeshiftUI();
+    if (v === video) {
+      if (handoffBridge && v === handoffBridge.prevVideo && video === handoffBridge.prevVideo) {
+        if (v.currentTime >= handoffBridge.prevEnd - 0.25) {
+          seekToTimeshiftOffset(handoffBridge.nextLiveSeconds);
+          return;
+        }
+      }
+      updateTimeshiftUI();
+    }
   });
   v.addEventListener('progress', () => {
     if (v === video) updateTimeshiftUI();
@@ -1022,6 +1030,7 @@ function resetStandbyCard() {
 
 function stopStream() {
   currentStreamingChannelId = null;
+  cleanHandoffBridge();
   if (player) {
     try {
       player.pause();
@@ -1933,14 +1942,101 @@ function cycleAspectRatio() {
 // ==========================================================
 let isScrubbingTimeshift = false;
 let isUserTimeshifted = false;
+let handoffBridge = null;
+
+function cleanHandoffBridge() {
+  if (!handoffBridge) return;
+  const bridge = handoffBridge;
+  handoffBridge = null;
+  if (bridge.prevPlayer) {
+    try {
+      bridge.prevPlayer.pause();
+      bridge.prevPlayer.unload();
+      bridge.prevPlayer.detachMediaElement();
+      bridge.prevPlayer.destroy();
+    } catch (_) {}
+  }
+  if (bridge.prevVideo) {
+    try {
+      bridge.prevVideo.removeAttribute('src');
+      bridge.prevVideo.load();
+    } catch (_) {}
+  }
+}
+
+// Calculate unified timeshift buffer state across both the current live stream and any prior bridged buffer
+function getUnifiedTimeshiftState() {
+  const activeVid = video;
+  if (!activeVid) {
+    return { hasBuffer: false, totalDuration: 0, currentOffset: 0, isLive: true };
+  }
+
+  // If no bridge active, fallback to standard single-video buffer
+  if (!handoffBridge || !handoffBridge.prevVideo) {
+    if (!activeVid.buffered || activeVid.buffered.length === 0) {
+      return { hasBuffer: false, totalDuration: 0, currentOffset: 0, isLive: true };
+    }
+    const s = activeVid.buffered.start(0);
+    const e = activeVid.buffered.end(activeVid.buffered.length - 1);
+    const duration = Math.max(0, e - s);
+    const currentOffset = Math.max(0, e - activeVid.currentTime);
+    return {
+      hasBuffer: duration >= 0.5,
+      totalDuration: duration,
+      currentOffset: currentOffset,
+      isLive: currentOffset < 2.5,
+      activeVid: activeVid,
+    };
+  }
+
+  const { prevVideo, prevStart, prevEnd, prevDuration, nextVideo, nextStart } = handoffBridge;
+
+  // Measure buffer of next (live) video
+  const nextHasBuffer = nextVideo && nextVideo.buffered && nextVideo.buffered.length > 0;
+  const nextEnd = nextHasBuffer ? nextVideo.buffered.end(nextVideo.buffered.length - 1) : (nextVideo.currentTime || nextStart);
+  const nextBufStart = nextHasBuffer ? nextVideo.buffered.start(0) : nextStart;
+  const nextDuration = Math.max(0, nextEnd - nextBufStart);
+
+  // If nextVideo has accumulated 120s of its own backward buffer, the old bridge is no longer needed
+  if (nextDuration >= 120) {
+    cleanHandoffBridge();
+    return getUnifiedTimeshiftState();
+  }
+
+  // Combined buffer duration (past buffer from prevVideo + live stream buffer from nextVideo)
+  const nextLiveSeconds = Math.max(0, nextEnd - nextStart);
+  const totalDuration = prevDuration + nextLiveSeconds;
+
+  let currentOffset = 0;
+  if (activeVid === nextVideo) {
+    currentOffset = Math.max(0, nextEnd - nextVideo.currentTime);
+  } else if (activeVid === prevVideo) {
+    const secondsBeforeHandoff = Math.max(0, prevEnd - prevVideo.currentTime);
+    currentOffset = nextLiveSeconds + secondsBeforeHandoff;
+  }
+
+  return {
+    hasBuffer: totalDuration >= 0.5,
+    totalDuration: totalDuration,
+    currentOffset: currentOffset,
+    isLive: currentOffset < 2.5 && activeVid === nextVideo,
+    isBridged: true,
+    nextLiveSeconds: nextLiveSeconds,
+    nextEnd: nextEnd,
+    prevEnd: prevEnd,
+    prevStart: prevStart,
+    nextVideo: nextVideo,
+    prevVideo: prevVideo,
+  };
+}
 
 function getTimeshiftBufferRange() {
-  if (!video || !video.buffered || video.buffered.length === 0) {
-    return { start: 0, end: video.currentTime || 0, duration: 0 };
-  }
-  const s = video.buffered.start(0);
-  const e = video.buffered.end(video.buffered.length - 1);
-  return { start: s, end: e, duration: Math.max(0, e - s) };
+  const state = getUnifiedTimeshiftState();
+  return {
+    start: 0,
+    end: state.totalDuration,
+    duration: state.totalDuration,
+  };
 }
 
 function formatTimeshiftOffset(seconds) {
@@ -1948,6 +2044,84 @@ function formatTimeshiftOffset(seconds) {
   const m = Math.floor(s / 60);
   const remS = s % 60;
   return `-${m}:${remS < 10 ? '0' : ''}${remS}`;
+}
+
+function seekToTimeshiftOffset(targetOffset) {
+  const state = getUnifiedTimeshiftState();
+  if (!state.hasBuffer) return;
+
+  targetOffset = Math.max(0, Math.min(targetOffset, state.totalDuration));
+  const isTargetLive = targetOffset < 2.5;
+
+  if (!state.isBridged) {
+    // Normal single-video seek
+    if (!video || !video.buffered || video.buffered.length === 0) return;
+    const e = video.buffered.end(video.buffered.length - 1);
+    const s = video.buffered.start(0);
+    const targetTime = isTargetLive ? Math.max(s, e - 0.5) : Math.max(s, e - targetOffset);
+    isUserTimeshifted = !isTargetLive;
+    video.currentTime = targetTime;
+    if (isTargetLive && video.paused) {
+      video.play().catch(e => console.log('[Timeshift] Resume error:', e));
+    }
+    updateTimeshiftUI();
+    showPlayerUI();
+    return;
+  }
+
+  // Bridged dual-video seek: route to nextVideo (post-switch) or prevVideo (pre-switch history)
+  const { nextLiveSeconds, nextEnd, prevEnd, prevStart, nextVideo, prevVideo } = state;
+
+  if (targetOffset <= nextLiveSeconds) {
+    // Target is in nextVideo (live / post-switch stream with current track)
+    const nextStartBuf = (nextVideo.buffered && nextVideo.buffered.length > 0) ? nextVideo.buffered.start(0) : 0;
+    const targetTime = isTargetLive ? Math.max(nextStartBuf, nextEnd - 0.5) : Math.max(nextStartBuf, nextEnd - targetOffset);
+
+    if (video !== nextVideo) {
+      // Swap visual stage to nextVideo
+      prevVideo.pause();
+      prevVideo.muted = true;
+      nextVideo.classList.remove('video-stage-next');
+      nextVideo.classList.add('active-stage');
+      prevVideo.classList.remove('active-stage');
+      prevVideo.classList.add('video-stage-next');
+      video = nextVideo;
+      player = handoffBridge.nextPlayer;
+    }
+
+    nextVideo.muted = false;
+    nextVideo.currentTime = targetTime;
+    isUserTimeshifted = !isTargetLive;
+    if (nextVideo.paused) {
+      nextVideo.play().catch(e => console.log('[Timeshift] NextVid resume error:', e));
+    }
+  } else {
+    // Target is in prevVideo (pre-switch stream history)
+    const secondsBeforeHandoff = targetOffset - nextLiveSeconds;
+    const targetTime = Math.max(prevStart, prevEnd - secondsBeforeHandoff);
+
+    if (video !== prevVideo) {
+      // Swap visual stage to prevVideo
+      nextVideo.pause();
+      nextVideo.muted = true;
+      prevVideo.classList.remove('video-stage-next');
+      prevVideo.classList.add('active-stage');
+      nextVideo.classList.remove('active-stage');
+      nextVideo.classList.add('video-stage-next');
+      video = prevVideo;
+      player = handoffBridge.prevPlayer;
+    }
+
+    prevVideo.muted = false;
+    prevVideo.currentTime = targetTime;
+    isUserTimeshifted = true;
+    if (prevVideo.paused) {
+      prevVideo.play().catch(e => console.log('[Timeshift] PrevVid play error:', e));
+    }
+  }
+
+  updateTimeshiftUI();
+  showPlayerUI();
 }
 
 function updateTimeshiftUI() {
@@ -1963,14 +2137,14 @@ function updateTimeshiftUI() {
   const btnLive = document.getElementById('btn-timeshift-live');
   const btnPlayPause = document.getElementById('btn-timeshift-playpause');
 
-  if (btnPlayPause) {
+  if (btnPlayPause && video) {
     btnPlayPause.textContent = video.paused ? '▶' : '⏸';
   }
 
   if (isScrubbingTimeshift || !slider || !offsetText || !bufStartText || !btnLive) return;
 
-  const range = getTimeshiftBufferRange();
-  if (!range || range.duration < 0.5) {
+  const state = getUnifiedTimeshiftState();
+  if (!state.hasBuffer) {
     slider.min = 0;
     slider.max = 100;
     slider.value = 100;
@@ -1980,34 +2154,27 @@ function updateTimeshiftUI() {
     return;
   }
 
-  slider.min = range.start;
-  slider.max = range.end;
-  slider.value = video.currentTime;
+  slider.min = 0;
+  slider.max = Math.round(state.totalDuration);
+  slider.value = Math.round(state.totalDuration - state.currentOffset);
 
-  const offset = Math.max(0, range.end - video.currentTime);
-  const isLive = offset < 2.5;
-
-  // Auto Live-Chasing: keep viewers synchronized at true live edge if they have not paused or rewound
-  if (!isUserTimeshifted && !video.paused && !isScrubbingTimeshift) {
-    if (offset > 1.8 && offset < 5.0) {
-      // Gentle, pitch-corrected speedup (+5%) to smoothly glide back to live edge
-      if (video.playbackRate !== 1.05) {
-        video.playbackRate = 1.05;
-      }
-    } else if (offset >= 5.0) {
-      // Fell far behind (e.g. background tab or long network stall): seek forward to live edge
-      video.currentTime = Math.max(range.start, range.end - 0.5);
+  // Auto Live-Chasing when at live edge
+  if (!isUserTimeshifted && video && !video.paused && !isScrubbingTimeshift && state.isLive) {
+    if (state.currentOffset > 1.8 && state.currentOffset < 5.0) {
+      if (video.playbackRate !== 1.05) video.playbackRate = 1.05;
+    } else if (state.currentOffset >= 5.0) {
+      seekToTimeshiftOffset(0);
       video.playbackRate = 1.0;
-    } else if (offset <= 0.8 && video.playbackRate !== 1.0) {
+    } else if (state.currentOffset <= 0.8 && video.playbackRate !== 1.0) {
       video.playbackRate = 1.0;
     }
-  } else if (isUserTimeshifted && video.playbackRate !== 1.0) {
+  } else if (isUserTimeshifted && video && video.playbackRate !== 1.0) {
     video.playbackRate = 1.0;
   }
 
-  btnLive.classList.toggle('is-live', isLive);
-  offsetText.textContent = isLive ? 'LIVE' : formatTimeshiftOffset(offset);
-  bufStartText.textContent = formatTimeshiftOffset(range.duration);
+  btnLive.classList.toggle('is-live', state.isLive);
+  offsetText.textContent = state.isLive ? 'LIVE' : formatTimeshiftOffset(state.currentOffset);
+  bufStartText.textContent = formatTimeshiftOffset(state.totalDuration);
 }
 
 function toggleTimeshiftPlayPause() {
@@ -2023,37 +2190,16 @@ function toggleTimeshiftPlayPause() {
 }
 
 function seekTimeshift(deltaSeconds) {
-  if (!video) return;
-  const range = getTimeshiftBufferRange();
-  if (!range || range.duration <= 0.5) return;
-  let target = video.currentTime + deltaSeconds;
-  if (target > range.end - 0.5) {
-    target = Math.max(range.start, range.end - 0.5);
-    isUserTimeshifted = false;
-  } else if (target < range.start) {
-    target = range.start;
-    isUserTimeshifted = true;
-  } else {
-    isUserTimeshifted = (range.end - target) >= 2.0;
-  }
-  video.currentTime = target;
-  updateTimeshiftUI();
-  showPlayerUI();
+  const state = getUnifiedTimeshiftState();
+  if (!state.hasBuffer) return;
+  // deltaSeconds > 0 means jump forward (+10s closer to live)
+  // deltaSeconds < 0 means jump backward (-10s further from live)
+  const targetOffset = Math.max(0, state.currentOffset - deltaSeconds);
+  seekToTimeshiftOffset(targetOffset);
 }
 
 function jumpToLive() {
-  if (!video) return;
-  isUserTimeshifted = false;
-  video.playbackRate = 1.0;
-  const range = getTimeshiftBufferRange();
-  if (range && range.end > 0) {
-    video.currentTime = Math.max(range.start, range.end - 0.5);
-  }
-  if (video.paused) {
-    video.play().catch(e => console.log('[Timeshift] Live resume error:', e));
-  }
-  updateTimeshiftUI();
-  showPlayerUI();
+  seekToTimeshiftOffset(0);
 }
 
 function initTimeshift() {
@@ -2072,9 +2218,8 @@ function initTimeshift() {
   if (slider) {
     slider.addEventListener('input', () => {
       isScrubbingTimeshift = true;
+      const max = parseFloat(slider.max) || 100;
       const val = parseFloat(slider.value);
-      const range = getTimeshiftBufferRange();
-      const max = range ? range.end : parseFloat(slider.max);
       const offset = Math.max(0, max - val);
       if (offsetText) {
         offsetText.textContent = offset < 2.5 ? 'LIVE' : formatTimeshiftOffset(offset);
@@ -2082,29 +2227,13 @@ function initTimeshift() {
     });
 
     slider.addEventListener('change', () => {
-      let val = parseFloat(slider.value);
-      const range = getTimeshiftBufferRange();
-      if (range && range.duration > 0.5) {
-        if (val > range.end - 0.5) {
-          val = Math.max(range.start, range.end - 0.5);
-        } else if (val < range.start) {
-          val = range.start;
-        }
-      }
-      video.currentTime = val;
       isScrubbingTimeshift = false;
-      const offset = range ? Math.max(0, range.end - val) : 0;
-      isUserTimeshifted = offset >= 2.0;
-      updateTimeshiftUI();
+      const max = parseFloat(slider.max) || 100;
+      const val = parseFloat(slider.value);
+      const targetOffset = Math.max(0, max - val);
+      seekToTimeshiftOffset(targetOffset);
     });
   }
-
-  video.addEventListener('timeupdate', updateTimeshiftUI);
-  video.addEventListener('progress', updateTimeshiftUI);
-  video.addEventListener('play', updateTimeshiftUI);
-  video.addEventListener('pause', updateTimeshiftUI);
-  video.addEventListener('seeking', updateTimeshiftUI);
-  video.addEventListener('seeked', updateTimeshiftUI);
 
   updateTimeshiftUI();
 }
@@ -4529,23 +4658,36 @@ function switchStreamTracks(channel) {
     updateTimeshiftUI();
     updateMobileVideoHeight();
 
-    // 6. Gracefully tear down old player after visual crossfade (250ms)
+    // 6. Disconnect old player's network stream after visual crossfade (250ms) to free server resources,
+    // but KEEP its in-browser MSE buffer intact so the user can rewind and see what played before!
     setTimeout(() => {
       if (oldPlayer) {
         try {
           oldPlayer.pause();
-          oldPlayer.unload();
-          oldPlayer.detachMediaElement();
-          oldPlayer.destroy();
+          oldPlayer.unload(); // Closes network connection to server without destroying MediaSource buffer
         } catch (e) {
-          console.warn('[Player] Error destroying old player:', e);
+          console.warn('[Player] Error unloading old player network:', e);
         }
       }
-      try {
-        oldVid.removeAttribute('src');
-        oldVid.load();
-      } catch (_) {}
     }, 250);
+
+    // Snapshot buffer range of the retiring video to bridge timelapse
+    const oldBuf = (oldVid && oldVid.buffered && oldVid.buffered.length > 0)
+      ? { start: oldVid.buffered.start(0), end: oldVid.buffered.end(oldVid.buffered.length - 1) }
+      : { start: 0, end: oldVid.currentTime || 0 };
+
+    cleanHandoffBridge();
+
+    handoffBridge = {
+      prevVideo: oldVid,
+      prevPlayer: oldPlayer,
+      prevStart: oldBuf.start,
+      prevEnd: oldBuf.end,
+      prevDuration: Math.max(0, oldBuf.end - oldBuf.start),
+      nextStart: nextVid.currentTime || 0,
+      nextVideo: nextVid,
+      nextPlayer: player,
+    };
   };
 
   const checkReady = () => {
