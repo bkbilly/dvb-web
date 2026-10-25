@@ -1906,11 +1906,26 @@ function renderRFAnalyzer(sig) {
   const flagSync = document.getElementById('rf-flag-sync');
   const flagLock = document.getElementById('rf-flag-lock');
 
-  if (flagSig) flagSig.classList.toggle('active', !!sig.has_signal);
-  if (flagCarrier) flagCarrier.classList.toggle('active', !!sig.has_carrier);
-  if (flagViterbi) flagViterbi.classList.toggle('active', !!sig.has_viterbi);
-  if (flagSync) flagSync.classList.toggle('active', !!sig.has_sync);
-  if (flagLock) flagLock.classList.toggle('active', !!sig.has_lock);
+  if (flagSig) {
+    flagSig.classList.toggle('active', !!sig.has_signal);
+    flagSig.classList.toggle('locked', !!sig.has_signal);
+  }
+  if (flagCarrier) {
+    flagCarrier.classList.toggle('active', !!sig.has_carrier);
+    flagCarrier.classList.toggle('locked', !!sig.has_carrier);
+  }
+  if (flagViterbi) {
+    flagViterbi.classList.toggle('active', !!sig.has_viterbi);
+    flagViterbi.classList.toggle('locked', !!sig.has_viterbi);
+  }
+  if (flagSync) {
+    flagSync.classList.toggle('active', !!sig.has_sync);
+    flagSync.classList.toggle('locked', !!sig.has_sync);
+  }
+  if (flagLock) {
+    flagLock.classList.toggle('active', !!sig.has_lock);
+    flagLock.classList.toggle('locked', !!sig.has_lock);
+  }
 }
 
 function toggleRFAnalyzer(force) {
