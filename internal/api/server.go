@@ -700,7 +700,7 @@ func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *
 			subTrack = v
 		}
 	}
-	subOffset := -1000 // default -1000ms (-1.0s) offset to eliminate live broadcast delay
+	subOffset := 0 // default 0ms offset
 	if so := r.URL.Query().Get("sub_offset"); so != "" {
 		if v, err := strconv.Atoi(so); err == nil {
 			subOffset = v

@@ -259,6 +259,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Real-time clock tick for EPG
   setInterval(updateLiveClock, 1000);
   setInterval(updateNowMarkerPosition, 30000);
+
+  // Real-time progress and now-playing transition check for active player OSD
+  setInterval(() => {
+    if (activeChannel) {
+      updateOSD(activeChannel);
+    }
+  }, 2000);
 });
 
 // ==========================================================
@@ -768,8 +775,7 @@ function handleWSMessage(msg) {
       break;
 
     case 'epg_update':
-      // Do not wipe or reload the timeline grid while user is watching or browsing!
-      // Only silently refresh now/next metadata after a long debounce (60s)
+      // Promptly update now/next metadata without wiping timeline grid
       if (window._epgDebounceTimer) clearTimeout(window._epgDebounceTimer);
       window._epgDebounceTimer = setTimeout(async () => {
         try {
@@ -777,10 +783,18 @@ function handleWSMessage(msg) {
           const newChans = await res.json() || [];
           if (newChans.length > 0) {
             channels = newChans;
+            if (activeChannel) {
+              const freshActive = channels.find(c => c.id === activeChannel.id);
+              if (freshActive) {
+                activeChannel.now_playing = freshActive.now_playing;
+                activeChannel.next_playing = freshActive.next_playing;
+                updateOSD(activeChannel);
+              }
+            }
             renderChannelList();
           }
         } catch (_) {}
-      }, 60000);
+      }, 4000);
       break;
 
     case 'scan_progress': {
@@ -1244,31 +1258,92 @@ function showOSD(channel) {
   showPlayerUI(channel);
 }
 
+let isRefreshingChannelEPG = false;
+let lastChannelEPGRefreshTime = 0;
+
+async function refreshActiveChannelEPG(channelId) {
+  const now = Date.now();
+  if (isRefreshingChannelEPG || (now - lastChannelEPGRefreshTime < 4000)) return;
+  isRefreshingChannelEPG = true;
+  lastChannelEPGRefreshTime = now;
+
+  try {
+    const res = await fetch(`/api/channels/${channelId}`);
+    if (res.ok) {
+      const updatedChannel = await res.json();
+      if (activeChannel && activeChannel.id === channelId) {
+        activeChannel.now_playing = updatedChannel.now_playing;
+        activeChannel.next_playing = updatedChannel.next_playing;
+        updateOSD(activeChannel);
+        renderChannelList();
+        updateRadioOverlay(activeChannel);
+      }
+      const idx = channels.findIndex(c => c.id === channelId);
+      if (idx !== -1) {
+        channels[idx].now_playing = updatedChannel.now_playing;
+        channels[idx].next_playing = updatedChannel.next_playing;
+      }
+    }
+  } catch (err) {
+    console.warn('[EPG] Error refreshing active channel EPG:', err);
+  } finally {
+    isRefreshingChannelEPG = false;
+  }
+}
+
 function updateOSD(channel) {
-  document.getElementById('osd-channel-num').textContent = channel.number;
-  document.getElementById('osd-channel-name').textContent = channel.name;
+  if (!channel) return;
+  const numEl = document.getElementById('osd-channel-num');
+  const nameEl = document.getElementById('osd-channel-name');
+  if (numEl) numEl.textContent = channel.number;
+  if (nameEl) nameEl.textContent = channel.name;
 
   updateRadioOverlay(channel);
-
   updateInteractiveFeaturesUI(channel);
 
-  const nowShow = channel.now_playing;
+  const nowMs = Date.now();
+  let nowShow = channel.now_playing;
+
+  // Auto-advance to next program if the current program has finished
+  if (nowShow && nowShow.end_time && nowMs >= new Date(nowShow.end_time).getTime()) {
+    if (channel.next_playing) {
+      channel.now_playing = channel.next_playing;
+      channel.next_playing = null;
+      nowShow = channel.now_playing;
+    } else {
+      channel.now_playing = null;
+      nowShow = null;
+    }
+    // Asynchronously fetch fresh Now & Next from the server
+    refreshActiveChannelEPG(channel.id);
+  }
+
+  const titleEl = document.getElementById('osd-now-title');
+  const startEl = document.getElementById('osd-time-start');
+  const endEl = document.getElementById('osd-time-end');
+  const progressFill = document.getElementById('osd-progress-fill');
+
   if (nowShow) {
-    document.getElementById('osd-now-title').textContent = getLocalized(nowShow.titles, currentLanguage) || (channel.is_radio ? 'Digital Radio Stream' : 'Live Broadcast');
+    if (titleEl) titleEl.textContent = getLocalized(nowShow.titles, currentLanguage) || (channel.is_radio ? 'Digital Radio Stream' : 'Live Broadcast');
     const start = new Date(nowShow.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const end = new Date(nowShow.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    document.getElementById('osd-time-start').textContent = start;
-    document.getElementById('osd-time-end').textContent = end;
+    if (startEl) startEl.textContent = start;
+    if (endEl) endEl.textContent = end;
 
     const total = new Date(nowShow.end_time) - new Date(nowShow.start_time);
-    const elapsed = Date.now() - new Date(nowShow.start_time);
-    const pct = Math.min(100, Math.max(0, (elapsed / total) * 100));
-    document.getElementById('osd-progress-fill').style.width = `${pct}%`;
+    const elapsed = nowMs - new Date(nowShow.start_time);
+    const pct = total > 0 ? Math.min(100, Math.max(0, (elapsed / total) * 100)) : 0;
+    if (progressFill) progressFill.style.width = `${pct}%`;
   } else {
-    document.getElementById('osd-now-title').textContent = channel.is_radio ? 'Digital Radio Stream' : 'Live Broadcast';
-    document.getElementById('osd-time-start').textContent = '--:--';
-    document.getElementById('osd-time-end').textContent = '--:--';
-    document.getElementById('osd-progress-fill').style.width = '0%';
+    if (titleEl) titleEl.textContent = channel.is_radio ? 'Digital Radio Stream' : 'Live Broadcast';
+    if (startEl) startEl.textContent = '--:--';
+    if (endEl) endEl.textContent = '--:--';
+    if (progressFill) progressFill.style.width = '0%';
+
+    // If channel has no now_playing and hasn't queried recently, try to fetch EPG
+    if (nowMs - lastChannelEPGRefreshTime > 20000) {
+      refreshActiveChannelEPG(channel.id);
+    }
   }
 }
 
@@ -1277,6 +1352,10 @@ async function openLiveProgramDetails() {
   if (!ch) return;
 
   let event = ch.now_playing;
+  // If the stored event has expired, clear it so fresh current event is fetched
+  if (event && event.end_time && Date.now() >= new Date(event.end_time).getTime()) {
+    event = null;
+  }
 
   // If no now_playing or missing description, query EPG events around current time
   if (!event || !event.descriptions || Object.keys(event.descriptions).length === 0) {
@@ -4002,8 +4081,8 @@ function setupSettingsUI() {
 // ==========================================================
 let currentAudioTrack = 0;
 let currentSubTrack = -1; // -1 = off
-let currentSubOffsetMs = parseInt(localStorage.getItem('dvb_sub_offset_ms') || '-1000', 10);
-if (isNaN(currentSubOffsetMs)) currentSubOffsetMs = -1000;
+let currentSubOffsetMs = parseInt(localStorage.getItem('dvb_sub_offset_ms') || '0', 10);
+if (isNaN(currentSubOffsetMs)) currentSubOffsetMs = 0;
 let availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
 
 function adjustSubtitleOffset(deltaMs) {
@@ -4021,9 +4100,9 @@ function adjustSubtitleOffset(deltaMs) {
 window.adjustSubtitleOffset = adjustSubtitleOffset;
 
 function resetSubtitleOffset() {
-  currentSubOffsetMs = -1000;
+  currentSubOffsetMs = 0;
   localStorage.setItem('dvb_sub_offset_ms', currentSubOffsetMs);
-  showToast('⏱️ Subtitle Sync reset to default (-1.0s)', 'info');
+  showToast('⏱️ Subtitle Sync reset to 0.0s', 'info');
   renderTrackMenus();
   if (currentSubTrack >= 0 && activeChannel) {
     switchStreamTracks(activeChannel);
@@ -4186,7 +4265,7 @@ function renderTrackMenus() {
       btnEarlier.type = 'button';
       btnEarlier.className = 'btn-sync-adj';
       btnEarlier.title = 'Show subtitles 0.5s earlier (Key: [)';
-      btnEarlier.textContent = '◀ Earlier (-0.5s)';
+      btnEarlier.textContent = '-0.5s';
       btnEarlier.onclick = (e) => {
         e.stopPropagation();
         adjustSubtitleOffset(-500);
@@ -4201,7 +4280,7 @@ function renderTrackMenus() {
       btnLater.type = 'button';
       btnLater.className = 'btn-sync-adj';
       btnLater.title = 'Show subtitles 0.5s later (Key: ])';
-      btnLater.textContent = 'Later (+0.5s) ▶';
+      btnLater.textContent = '+0.5s';
       btnLater.onclick = (e) => {
         e.stopPropagation();
         adjustSubtitleOffset(500);
@@ -4210,7 +4289,7 @@ function renderTrackMenus() {
       const btnReset = document.createElement('button');
       btnReset.type = 'button';
       btnReset.className = 'btn-sync-adj';
-      btnReset.title = 'Reset to default (-1.0s)';
+      btnReset.title = 'Reset to 0.0s';
       btnReset.textContent = 'Reset';
       btnReset.onclick = (e) => {
         e.stopPropagation();
