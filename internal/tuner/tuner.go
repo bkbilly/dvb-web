@@ -596,8 +596,9 @@ var tsNullPacket = func() [188]byte {
 
 // SanitizeAndSyncTS processes raw DVR input bytes, ensures 188-byte MPEG-TS packet alignment,
 // and substitutes packets flagged with the Transport Error Indicator (TEI, bit 7 of byte 1)
-// with standard MPEG-TS Null Packets (PID 0x1FFF). This prevents broken bitstreams, corrupt macroblocks,
-// missing audio headers, and severe PTS/DTS discontinuities from crashing decoders during high BER.
+// or isolated corrupted sync bytes with standard MPEG-TS Null Packets (PID 0x1FFF).
+// This prevents broken bitstreams, corrupt macroblocks, missing audio headers,
+// and severe PTS/DTS discontinuities from crashing decoders during high BER.
 func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 	if len(leftover) > 0 {
 		input = append(leftover, input...)
@@ -612,43 +613,64 @@ func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 	i := 0
 
 	for i+188 <= limit {
-		if input[i] != 0x47 {
-			// Lost synchronization. Seek forward for a confirmed 0x47 packet boundary.
-			found := false
-			for j := i + 1; j+188 <= limit; j++ {
-				if input[j] == 0x47 {
-					// If another packet boundary is within this buffer, verify it also has 0x47
-					if j+376 <= limit && input[j+188] != 0x47 {
-						continue
-					}
-					i = j
-					found = true
-					break
-				}
+		if input[i] == 0x47 {
+			pkt := input[i : i+188]
+			// Check Transport Error Indicator (TEI bit 0x80 in byte 1).
+			// Tuner demodulators set TEI when uncorrectable bit errors occur (high BER).
+			if (pkt[1] & 0x80) != 0 {
+				output = append(output, tsNullPacket[:]...)
+			} else {
+				output = append(output, pkt...)
 			}
-			if !found {
-				// No valid sync byte found in remainder of input.
-				rem := limit - i
-				if rem > 187 {
-					rem = 187
+			i += 188
+			continue
+		}
+
+		// input[i] != 0x47.
+		// Check if this is an isolated corrupted sync byte in an already aligned stream
+		// (e.g. single bit error flipping 0x47 in RF noise).
+		// If the next packet boundary has 0x47, our 188-byte cadence is intact!
+		if i+188 < limit && input[i+188] == 0x47 {
+			output = append(output, tsNullPacket[:]...)
+			i += 188
+			continue
+		}
+		// Also check if 2 consecutive sync bytes were damaged but the 3rd boundary has 0x47:
+		if i+376 < limit && input[i+376] == 0x47 {
+			output = append(output, tsNullPacket[:]...)
+			i += 188
+			continue
+		}
+
+		// If neither boundary matches, we have genuine framing loss (or unaligned stream start).
+		// Seek forward for a confirmed MPEG-TS sync sequence (at least 2 consecutive 0x47 bytes spaced by 188).
+		found := false
+		for j := i + 1; j+188 <= limit; j++ {
+			if input[j] == 0x47 {
+				// Require the next 188-byte boundary to also have 0x47 (if within buffer)
+				if j+188*2 <= limit && input[j+188] != 0x47 {
+					continue
 				}
-				newLeftover := make([]byte, rem)
-				copy(newLeftover, input[limit-rem:])
-				return output, newLeftover
+				// And require the 3rd boundary if available
+				if j+188*3 <= limit && input[j+376] != 0x47 {
+					continue
+				}
+				i = j
+				found = true
+				break
 			}
 		}
 
-		packet := input[i : i+188]
-		i += 188
-
-		// Check Transport Error Indicator (TEI bit 0x80 in byte 1).
-		// Tuner hardware demodulators set TEI to 1 when uncorrectable bit errors occur (high BER).
-		if (packet[1] & 0x80) != 0 {
-			// Replace corrupt packet with null packet (PID 0x1FFF)
-			// Preserves multiplex timing without feeding corrupt NAL/PES payloads into decoders
-			output = append(output, tsNullPacket[:]...)
-		} else {
-			output = append(output, packet...)
+		if !found {
+			// No confirmed sync sequence in remainder of buffer.
+			// Preserve up to 3 packets of unaligned tail in leftover so next read can sync.
+			rem := limit - i
+			if rem > 187*3 {
+				rem = 187 * 3
+			}
+			newLeftover := make([]byte, rem)
+			copy(newLeftover, input[limit-rem:])
+			return output, newLeftover
 		}
 	}
 

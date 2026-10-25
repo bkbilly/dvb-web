@@ -170,7 +170,6 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			"-fpsprobesize", "0",
 			"-err_detect", "crccheck",
 			"-fflags", "+genpts+nobuffer",
-			"-ec", "favor_inter+deblock",
 			"-flags", "low_delay",
 		)
 	}
@@ -346,7 +345,6 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		"-b:a", audioBitrate,
 		"-ar", "48000",
 		"-ac", "2",
-		"-af", "aresample=async=1000",
 		"-f", "mpegts",
 		"-muxdelay", "0",
 		"-muxpreload", "0",

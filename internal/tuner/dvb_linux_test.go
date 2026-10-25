@@ -312,6 +312,8 @@ func TestSanitizeAndSyncTS(t *testing.T) {
 	}
 
 	// 5. Corrupted sync byte in middle packet (packet 2 has 0x46 instead of 0x47)
+	// Isolated bad sync byte is replaced with a standard MPEG-TS Null Packet (PID 0x1FFF)
+	// to strictly preserve the 188-byte grid and multiplex timing without corrupting downstream frames.
 	pkt3 := makeTestTSPacket(300, false, []byte("third"))
 	badSyncPkt := append([]byte(nil), pkt2...)
 	badSyncPkt[0] = 0x46 // bit flip in sync byte
@@ -322,10 +324,38 @@ func TestSanitizeAndSyncTS(t *testing.T) {
 	if len(leftover3) != 0 {
 		t.Fatalf("expected 0 leftover, got %d", len(leftover3))
 	}
-	if len(out3) != 188*2 {
-		t.Fatalf("expected 376 bytes output (pkt1 and pkt3), got %d", len(out3))
+	if len(out3) != 188*3 {
+		t.Fatalf("expected 564 bytes output (pkt1, null packet, pkt3), got %d", len(out3))
 	}
-	if out3[0] != 0x47 || out3[188] != 0x47 {
-		t.Errorf("sync bytes missing in output after bad sync byte")
+	if out3[0] != 0x47 {
+		t.Errorf("sync byte missing in packet 1")
+	}
+	if out3[188] != 0x47 || out3[189] != 0x1F || out3[190] != 0xFF {
+		t.Errorf("corrupted packet was not substituted with null packet (PID 0x1FFF): %v", out3[188:192])
+	}
+	if out3[376] != 0x47 {
+		t.Errorf("sync byte missing in packet 3")
+	}
+
+	// 6. Misaligned stream with H.264-like payload containing random 0x47 bytes
+	// The resync algorithm must not falsely lock onto payload 0x47 bytes.
+	pktWith0x47Payload1 := makeTestTSPacket(400, false, []byte{0x47, 0x00, 0x47, 0x01, 0x47})
+	pktWith0x47Payload2 := makeTestTSPacket(401, false, []byte{0x10, 0x47, 0x20, 0x47, 0x30})
+	pktWith0x47Payload3 := makeTestTSPacket(402, false, []byte{0xAA, 0xBB, 0x47, 0xCC, 0xDD})
+
+	trickyJunk := []byte{0x99, 0x88, 0x77, 0x47, 0x66} // contains an unaligned 0x47 in junk
+	trickyStream := append(trickyJunk, pktWith0x47Payload1...)
+	trickyStream = append(trickyStream, pktWith0x47Payload2...)
+	trickyStream = append(trickyStream, pktWith0x47Payload3...)
+
+	out4, leftover4 := SanitizeAndSyncTS(trickyStream, nil)
+	if len(leftover4) != 0 {
+		t.Fatalf("expected 0 leftover after tricky resync, got %d", len(leftover4))
+	}
+	if len(out4) != 188*3 {
+		t.Fatalf("expected 564 bytes output after tricky resync, got %d", len(out4))
+	}
+	if out4[0] != 0x47 || out4[188] != 0x47 || out4[376] != 0x47 {
+		t.Errorf("sync bytes missing or misaligned after tricky resync")
 	}
 }
