@@ -168,8 +168,9 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			"-analyzeduration", "1500000",
 			"-probesize", "2500000",
 			"-fpsprobesize", "0",
-			"-err_detect", "ignore_err",
-			"-fflags", "+genpts+nobuffer",
+			"-err_detect", "crccheck",
+			"-fflags", "+genpts+nobuffer+discardcorrupt",
+			"-ec", "favor_inter+deblock",
 			"-flags", "low_delay",
 		)
 	}

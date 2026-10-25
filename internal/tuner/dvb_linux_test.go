@@ -238,3 +238,76 @@ func TestScanDemuxer_MultiPacketSDT_AndSync(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeAndSyncTS(t *testing.T) {
+	// 1. Clean valid TS packets
+	pkt1 := makeTestTSPacket(100, false, []byte("hello"))
+	pkt2 := makeTestTSPacket(200, false, []byte("world"))
+	data := append(pkt1, pkt2...)
+
+	out, leftover := SanitizeAndSyncTS(data, nil)
+	if len(leftover) != 0 {
+		t.Fatalf("expected 0 leftover, got %d", len(leftover))
+	}
+	if len(out) != 188*2 {
+		t.Fatalf("expected 376 bytes output, got %d", len(out))
+	}
+	if out[0] != 0x47 || out[188] != 0x47 {
+		t.Errorf("sync bytes missing in output")
+	}
+
+	// 2. TEI (Transport Error Indicator) packet replacement with null packet
+	corruptPkt := makeTestTSPacket(100, false, []byte("corrupt-data"))
+	corruptPkt[1] |= 0x80 // Set TEI bit (simulating high bit error rate)
+	validPkt := makeTestTSPacket(200, false, []byte("valid-data"))
+	mixedData := append(corruptPkt, validPkt...)
+
+	out, leftover = SanitizeAndSyncTS(mixedData, nil)
+	if len(out) != 188*2 {
+		t.Fatalf("expected 376 bytes output, got %d", len(out))
+	}
+	// Packet 0 should be replaced with MPEG-TS Null Packet (PID 0x1FFF, 0x47 0x1F 0xFF 0x10)
+	if out[0] != 0x47 || out[1] != 0x1F || out[2] != 0xFF || out[3] != 0x10 {
+		t.Errorf("TEI packet was not properly replaced with Null packet: %v", out[:4])
+	}
+	// Packet 1 should remain untouched valid packet
+	if out[188] != 0x47 || (out[189]&0x1F) != byte((200>>8)&0x1F) || out[190] != byte(200&0xFF) {
+		t.Errorf("valid packet was corrupted: %v", out[188:192])
+	}
+
+	// 3. Junk bytes preceding stream (misalignment recovery)
+	junk := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x12, 0x34}
+	junkStream := append(junk, pkt1...)
+	junkStream = append(junkStream, pkt2...)
+
+	out, leftover = SanitizeAndSyncTS(junkStream, nil)
+	if len(out) != 188*2 {
+		t.Fatalf("expected 376 bytes output after junk resync, got %d", len(out))
+	}
+	if out[0] != 0x47 || out[188] != 0x47 {
+		t.Errorf("sync bytes missing after resync")
+	}
+
+	// 4. Incomplete packet leftover assembly
+	partial := pkt1[:100]
+	rest := append(pkt1[100:], pkt2...)
+
+	out1, leftover1 := SanitizeAndSyncTS(partial, nil)
+	if len(out1) != 0 {
+		t.Fatalf("expected 0 output for partial packet, got %d", len(out1))
+	}
+	if len(leftover1) != 100 {
+		t.Fatalf("expected 100 leftover bytes, got %d", len(leftover1))
+	}
+
+	out2, leftover2 := SanitizeAndSyncTS(rest, leftover1)
+	if len(leftover2) != 0 {
+		t.Fatalf("expected 0 leftover after reassembly, got %d", len(leftover2))
+	}
+	if len(out2) != 188*2 {
+		t.Fatalf("expected 376 bytes output after reassembly, got %d", len(out2))
+	}
+	if out2[0] != 0x47 || out2[188] != 0x47 {
+		t.Errorf("sync bytes missing after reassembly")
+	}
+}

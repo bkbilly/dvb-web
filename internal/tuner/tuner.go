@@ -581,6 +581,93 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 	return cs, nil
 }
 
+// Standard MPEG-TS Null Packet (PID 0x1FFF, payload 0xFF)
+var tsNullPacket = func() [188]byte {
+	var p [188]byte
+	p[0] = 0x47
+	p[1] = 0x1F
+	p[2] = 0xFF
+	p[3] = 0x10 // payload only, CC 0
+	for i := 4; i < 188; i++ {
+		p[i] = 0xFF
+	}
+	return p
+}()
+
+// SanitizeAndSyncTS processes raw DVR input bytes, ensures 188-byte MPEG-TS packet alignment,
+// and substitutes packets flagged with the Transport Error Indicator (TEI, bit 7 of byte 1)
+// with standard MPEG-TS Null Packets (PID 0x1FFF). This prevents broken bitstreams, corrupt macroblocks,
+// missing audio headers, and severe PTS/DTS discontinuities from crashing decoders during high BER.
+func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
+	if len(leftover) > 0 {
+		input = append(leftover, input...)
+	}
+
+	limit := len(input)
+	if limit < 188 {
+		return nil, input
+	}
+
+	var output []byte
+	i := 0
+
+	for i+188 <= limit {
+		// Verify 0x47 sync byte
+		if input[i] != 0x47 {
+			// Lost synchronization. Search forward byte-by-byte for next valid 0x47 boundary.
+			syncFound := false
+			for j := i + 1; j+188 <= limit; j++ {
+				if input[j] == 0x47 {
+					// Verify next boundary if available
+					if j+376 <= limit && input[j+188] != 0x47 {
+						continue
+					}
+					i = j
+					syncFound = true
+					break
+				}
+			}
+			if !syncFound {
+				rem := limit - i
+				if rem > 187 {
+					rem = 187
+				}
+				newLeftover := make([]byte, rem)
+				copy(newLeftover, input[limit-rem:])
+				return output, newLeftover
+			}
+		}
+
+		// Double-check: if a second packet is available, verify it also starts with 0x47
+		if i+376 <= limit && input[i+188] != 0x47 {
+			// False 0x47 sync byte in payload, scan forward
+			i++
+			continue
+		}
+
+		packet := input[i : i+188]
+		i += 188
+
+		// Check Transport Error Indicator (TEI bit 0x80 in byte 1).
+		// Tuner hardware demodulators set TEI to 1 when uncorrectable bit errors occur (high BER).
+		if (packet[1] & 0x80) != 0 {
+			// Replace corrupt packet with null packet (PID 0x1FFF)
+			// Preserves multiplex timing without feeding corrupt NAL/PES payloads into decoders
+			output = append(output, tsNullPacket[:]...)
+		} else {
+			output = append(output, packet...)
+		}
+	}
+
+	var newLeftover []byte
+	if i < limit {
+		newLeftover = make([]byte, limit-i)
+		copy(newLeftover, input[i:])
+	}
+
+	return output, newLeftover
+}
+
 func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 	if t.IsMock || t.dvrFD <= 0 {
 		return
@@ -620,13 +707,12 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 		}
 	}()
 
-	// Hardware DVR reader goroutine with 188-byte TS packet synchronization
+	// Hardware DVR reader goroutine with 188-byte TS packet synchronization and TEI filtering
 	go func() {
 		defer close(tsQueue)
 		defer close(parseQueue)
 		readBuf := make([]byte, 188*128) // 24KB chunk
 		var leftover []byte
-		synced := false
 
 		for {
 			select {
@@ -647,68 +733,20 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 				continue
 			}
 
-			data := readBuf[:n]
-			if len(leftover) > 0 {
-				data = append(leftover, data...)
-				leftover = nil
-			}
+			cleanData, newLeftover := SanitizeAndSyncTS(readBuf[:n], leftover)
+			leftover = newLeftover
 
-			// Synchronize to 188-byte MPEG-TS packet boundary starting with 0x47
-			if !synced {
-				syncIdx := -1
-				for i := 0; i+188 < len(data); i++ {
-					if data[i] == 0x47 && data[i+188] == 0x47 {
-						if i+188*2 < len(data) && data[i+188*2] != 0x47 {
-							continue
-						}
-						syncIdx = i
-						break
-					}
-				}
-				if syncIdx < 0 {
-					if len(data) > 188 {
-						leftover = append(leftover, data[len(data)-188:]...)
-					} else {
-						leftover = append(leftover, data...)
-					}
-					continue
-				}
-				data = data[syncIdx:]
-				synced = true
-			}
-
-			// If sync is lost (data doesn't begin with 0x47), mark un-synced to re-align
-			if len(data) > 0 && data[0] != 0x47 {
-				synced = false
-				leftover = append(leftover, data...)
-				if len(leftover) > 64*1024 {
-					leftover = leftover[len(leftover)-188:]
-				}
+			if len(cleanData) == 0 {
 				continue
 			}
-
-			// Preserve trailing incomplete TS packet for the next read
-			rem := len(data) % 188
-			if rem > 0 {
-				leftover = make([]byte, rem)
-				copy(leftover, data[len(data)-rem:])
-				data = data[:len(data)-rem]
-			}
-
-			if len(data) == 0 {
-				continue
-			}
-
-			chunk := make([]byte, len(data))
-			copy(chunk, data)
 
 			select {
-			case tsQueue <- chunk:
+			case tsQueue <- cleanData:
 			default:
 			}
 
 			select {
-			case parseQueue <- chunk:
+			case parseQueue <- cleanData:
 			default:
 			}
 		}
