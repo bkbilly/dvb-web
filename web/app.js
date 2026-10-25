@@ -203,15 +203,86 @@ const PIXELS_PER_MINUTE = 4; // 240px per hour
 let timelineStartTime = null;
 let timelineEndTime = null;
 
-const video = document.getElementById('tv-video');
+let video = document.getElementById('tv-video');
 const standbyOverlay = document.getElementById('standby-overlay');
 const videoOsd = document.getElementById('video-osd');
 const zapIndicator = document.getElementById('zap-indicator');
 const tunerBadge = document.getElementById('tuner-badge');
 const langSelect = document.getElementById('global-lang-select');
 
+function bindPlayerVideoEvents(v) {
+  if (!v || v._eventsBound) return;
+  v._eventsBound = true;
+
+  v.addEventListener('playing', () => {
+    if (v === video) {
+      standbyOverlay.classList.add('hidden');
+      updateInstantRecordButton();
+      updateTimeshiftUI();
+      const streamLoader = document.getElementById('stream-loader');
+      if (streamLoader) {
+        streamLoader.style.opacity = '0';
+        setTimeout(() => streamLoader.classList.add('hidden'), 250);
+      }
+      const alertEl = document.getElementById('stream-alert');
+      if (alertEl) {
+        alertEl.classList.remove('visible');
+        alertEl.classList.add('hidden');
+      }
+      updateMobileVideoHeight();
+      const playerControls = document.querySelector('.player-controls');
+      if (!isControlsOverVideo() && playerControls) {
+        playerControls.classList.remove('controls-autohidden');
+      }
+    }
+  });
+
+  v.addEventListener('ended', () => {
+    if (v === video && activeChannel) {
+      handleStreamStopped('Stream playback ended.', true);
+    }
+  });
+
+  v.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    toggleFullscreen();
+  });
+
+  v.addEventListener('loadedmetadata', () => {
+    if (v === video) {
+      updateMobileVideoHeight();
+      const playerControls = document.querySelector('.player-controls');
+      if (!isControlsOverVideo() && playerControls) {
+        playerControls.classList.remove('controls-autohidden');
+      }
+    }
+  });
+
+  v.addEventListener('timeupdate', () => {
+    if (v === video) updateTimeshiftUI();
+  });
+  v.addEventListener('progress', () => {
+    if (v === video) updateTimeshiftUI();
+  });
+  v.addEventListener('play', () => {
+    if (v === video) updateTimeshiftUI();
+  });
+  v.addEventListener('pause', () => {
+    if (v === video) updateTimeshiftUI();
+  });
+  v.addEventListener('seeking', () => {
+    if (v === video) updateTimeshiftUI();
+  });
+  v.addEventListener('seeked', () => {
+    if (v === video) updateTimeshiftUI();
+  });
+}
+
 // Initialize on Load
 document.addEventListener('DOMContentLoaded', async () => {
+  bindPlayerVideoEvents(document.getElementById('tv-video'));
+  bindPlayerVideoEvents(document.getElementById('tv-video-next'));
+
   setupLanguagePicker();
   setupPlayerControls();
   setupSettingsUI();
@@ -225,29 +296,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadInitialSettings();
   await loadChannels();
   initWebSocket();
-
-  // Video playback listener
-  video.addEventListener('playing', () => {
-    standbyOverlay.classList.add('hidden');
-    updateInstantRecordButton();
-    updateTimeshiftUI();
-    const streamLoader = document.getElementById('stream-loader');
-    if (streamLoader) {
-      streamLoader.style.opacity = '0';
-      setTimeout(() => streamLoader.classList.add('hidden'), 250);
-    }
-    const alertEl = document.getElementById('stream-alert');
-    if (alertEl) {
-      alertEl.classList.remove('visible');
-      alertEl.classList.add('hidden');
-    }
-  });
-
-  video.addEventListener('ended', () => {
-    if (activeChannel) {
-      handleStreamStopped('Stream playback ended.', true);
-    }
-  });
 
   window.addEventListener('beforeunload', () => {
     stopStream();
@@ -985,6 +1033,15 @@ function stopStream() {
     }
     player = null;
   }
+  if (window._nextPlayer) {
+    try {
+      window._nextPlayer.pause();
+      window._nextPlayer.unload();
+      window._nextPlayer.detachMediaElement();
+      window._nextPlayer.destroy();
+    } catch (_) {}
+    window._nextPlayer = null;
+  }
 }
 
 function startStream(channel) {
@@ -997,6 +1054,20 @@ function startStream(channel) {
   if (video) video.playbackRate = 1.0;
   stopStream();
   currentStreamingChannelId = channel.id;
+
+  // Reset to primary video stage
+  const v1 = document.getElementById('tv-video');
+  const v2 = document.getElementById('tv-video-next');
+  if (v1 && v2) {
+    video = v1;
+    v1.classList.remove('video-stage-next');
+    v1.classList.add('active-stage');
+    v1.style.opacity = '1';
+    v2.classList.remove('active-stage');
+    v2.classList.add('video-stage-next');
+    v2.style.opacity = '0';
+  }
+
   updateEPGPlayingHighlight();
   resetStandbyCard();
   updateRadioOverlay(channel);
@@ -1606,7 +1677,16 @@ function updateMobileVideoHeight() {
 
 function applyAspectRatio(ar) {
   const btn = document.getElementById('btn-aspect-ratio');
-  video.className = ar.className;
+  const v1 = document.getElementById('tv-video');
+  const v2 = document.getElementById('tv-video-next');
+  if (v1) {
+    const isNext = v1.classList.contains('video-stage-next');
+    v1.className = `tv-video-stage ${ar.className} ${isNext ? 'video-stage-next' : 'active-stage'}`;
+  }
+  if (v2) {
+    const isNext = v2.classList.contains('video-stage-next');
+    v2.className = `tv-video-stage ${ar.className} ${isNext ? 'video-stage-next' : 'active-stage'}`;
+  }
   if (btn) {
     btn.textContent = ar.label;
     btn.title = `Aspect Ratio: ${ar.desc}`;
@@ -4325,6 +4405,7 @@ function reloadCurrentStream() {
 }
 
 let isSwitchingTracks = false;
+let currentSwitchSessionId = 0;
 
 function switchStreamTracks(channel) {
   if (!channel) return;
@@ -4333,8 +4414,18 @@ function switchStreamTracks(channel) {
     return;
   }
 
-  if (isSwitchingTracks) return;
+  const currentVid = video;
+  const nextVid = (currentVid && currentVid.id === 'tv-video')
+    ? document.getElementById('tv-video-next')
+    : document.getElementById('tv-video');
+
+  if (!currentVid || !nextVid) {
+    reloadCurrentStream();
+    return;
+  }
+
   isSwitchingTracks = true;
+  const switchId = ++currentSwitchSessionId;
 
   const audioBtn = document.getElementById('btn-audio-select');
   const subBtn = document.getElementById('btn-sub-select');
@@ -4345,18 +4436,16 @@ function switchStreamTracks(channel) {
     showToast('💬 Applying subtitles...', 'info');
   }
 
-  const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}&audio_track=${currentAudioTrack}&sub_track=${currentSubTrack}&sub_offset=${currentSubOffsetMs}&_sw=${Date.now()}`;
-
-  // Keep existing video frame visible; cleanly rebind player without full-screen loading screen
-  try {
-    player.pause();
-    player.unload();
-    player.detachMediaElement();
-    player.destroy();
-  } catch (e) {
-    console.warn('[Player] Track switch player cleanup error:', e);
+  // Cancel any prior in-flight background switch
+  if (window._nextPlayer) {
+    try {
+      window._nextPlayer.pause();
+      window._nextPlayer.unload();
+      window._nextPlayer.detachMediaElement();
+      window._nextPlayer.destroy();
+    } catch (_) {}
+    window._nextPlayer = null;
   }
-  player = null;
 
   const cleanupSwitchUI = () => {
     isSwitchingTracks = false;
@@ -4364,8 +4453,100 @@ function switchStreamTracks(channel) {
     if (subBtn) subBtn.classList.remove('track-switching');
   };
 
+  // Match current aspect ratio class
+  const currentArClass = Array.from(currentVid.classList).find(c => c.startsWith('ar-')) || 'ar-auto';
+  nextVid.className = `tv-video-stage ${currentArClass} video-stage-next`;
+  nextVid.style.opacity = '0';
+  nextVid.muted = true;
+  nextVid.volume = currentVid.volume;
+  nextVid.playbackRate = currentVid.playbackRate || 1.0;
+
+  const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}&audio_track=${currentAudioTrack}&sub_track=${currentSubTrack}&sub_offset=${currentSubOffsetMs}&_sw=${Date.now()}`;
+
+  let handoffDone = false;
+  let checkReadyHandler = null;
+  let fallbackTimer = null;
+  let timeoutTimer = null;
+
+  const cleanupCandidate = () => {
+    if (checkReadyHandler) {
+      nextVid.removeEventListener('timeupdate', checkReadyHandler);
+      nextVid.removeEventListener('playing', checkReadyHandler);
+      checkReadyHandler = null;
+    }
+    clearTimeout(fallbackTimer);
+    clearTimeout(timeoutTimer);
+  };
+
+  const performHandoff = () => {
+    if (handoffDone || switchId !== currentSwitchSessionId) return;
+    handoffDone = true;
+    cleanupCandidate();
+
+    // 1. Unmute nextVid and inherit sound & play state
+    nextVid.muted = currentVid.muted;
+    nextVid.volume = currentVid.volume;
+    nextVid.playbackRate = currentVid.playbackRate || 1.0;
+    if (currentVid.paused) {
+      nextVid.pause();
+    } else {
+      nextVid.play().catch(e => console.log('[Player] Next player resume error:', e));
+    }
+
+    // 2. Immediately mute old video so there is no audio echo during visual crossfade
+    currentVid.muted = true;
+
+    // 3. Smooth visual crossfade via CSS transitions
+    nextVid.classList.remove('video-stage-next');
+    nextVid.classList.add('active-stage');
+    nextVid.style.opacity = '1';
+
+    currentVid.classList.remove('active-stage');
+    currentVid.classList.add('video-stage-next');
+    currentVid.style.opacity = '0';
+
+    // 4. Update global player and video references
+    const oldPlayer = player;
+    const oldVid = currentVid;
+    video = nextVid;
+    player = window._nextPlayer;
+    window._nextPlayer = null;
+
+    // 5. Update UI
+    cleanupSwitchUI();
+    updateTimeshiftUI();
+    updateMobileVideoHeight();
+
+    // 6. Gracefully tear down old player after visual crossfade (250ms)
+    setTimeout(() => {
+      if (oldPlayer) {
+        try {
+          oldPlayer.pause();
+          oldPlayer.unload();
+          oldPlayer.detachMediaElement();
+          oldPlayer.destroy();
+        } catch (e) {
+          console.warn('[Player] Error destroying old player:', e);
+        }
+      }
+      try {
+        oldVid.removeAttribute('src');
+        oldVid.load();
+      } catch (_) {}
+    }, 250);
+  };
+
+  const checkReady = () => {
+    if (nextVid.currentTime > 0) {
+      performHandoff();
+    }
+  };
+  checkReadyHandler = checkReady;
+  nextVid.addEventListener('timeupdate', checkReady);
+  nextVid.addEventListener('playing', () => setTimeout(checkReady, 50));
+
   if (window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
-    player = mpegts.createPlayer({
+    const nextPlayer = mpegts.createPlayer({
       type: 'mpegts',
       isLive: true,
       url: window.location.origin + streamUrl,
@@ -4380,50 +4561,78 @@ function switchStreamTracks(channel) {
       liveSync: false,
     });
 
-    player.attachMediaElement(video);
-    player.load();
+    window._nextPlayer = nextPlayer;
+    nextPlayer.attachMediaElement(nextVid);
+    nextPlayer.load();
 
-    player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-      console.warn('[Player] Track switch error:', errorType, errorDetail, errorInfo);
+    nextPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+      if (switchId !== currentSwitchSessionId || handoffDone) return;
+      console.warn('[Player] Candidate track switch error:', errorType, errorDetail, errorInfo);
+      cleanupCandidate();
       cleanupSwitchUI();
-      if (errorType === mpegts.ErrorTypes.MEDIA_ERROR || errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
-        if (currentSubTrack >= 0) {
-          showToast('⚠️ Subtitles not available in this broadcast; turning off subtitles', 'warning');
-          currentSubTrack = -1;
-          renderTrackMenus();
-          switchStreamTracks(channel);
-        } else {
-          handleStreamStopped('Stream interrupted during track switch.', true);
-        }
+
+      try {
+        nextPlayer.pause();
+        nextPlayer.unload();
+        nextPlayer.detachMediaElement();
+        nextPlayer.destroy();
+      } catch (_) {}
+      if (window._nextPlayer === nextPlayer) window._nextPlayer = null;
+
+      if (currentSubTrack >= 0) {
+        showToast('⚠️ Subtitles not available in this broadcast; keeping current stream', 'warning');
+        currentSubTrack = -1;
+        renderTrackMenus();
       }
     });
 
-    player.on(mpegts.Events.MEDIA_INFO, () => {
-      cleanupSwitchUI();
-      video.muted = false;
-      video.play().catch(e => console.log('[Player] Autoplay error:', e));
+    nextPlayer.on(mpegts.Events.MEDIA_INFO, () => {
+      if (switchId !== currentSwitchSessionId || handoffDone) return;
+      nextVid.play().catch(e => console.log('[Player] Candidate play error:', e));
     });
 
-    player.play().catch(e => {
-      console.log('[Player] Play error:', e);
+    nextPlayer.play().catch(e => {
+      console.log('[Player] Candidate play error:', e);
     });
 
-    setTimeout(() => {
-      if (isSwitchingTracks) {
-        cleanupSwitchUI();
-        if (currentSubTrack >= 0) {
-          showToast('⚠️ Subtitle stream timed out; reverting to standard stream', 'warning');
-          currentSubTrack = -1;
-          renderTrackMenus();
-          switchStreamTracks(channel);
-        }
+    fallbackTimer = setTimeout(() => {
+      if (!handoffDone && switchId === currentSwitchSessionId && nextVid.readyState >= 2) {
+        performHandoff();
       }
-    }, 8000);
+    }, 3500);
+
+    timeoutTimer = setTimeout(() => {
+      if (switchId !== currentSwitchSessionId || handoffDone) return;
+      cleanupCandidate();
+      cleanupSwitchUI();
+
+      try {
+        nextPlayer.pause();
+        nextPlayer.unload();
+        nextPlayer.detachMediaElement();
+        nextPlayer.destroy();
+      } catch (_) {}
+      if (window._nextPlayer === nextPlayer) window._nextPlayer = null;
+
+      if (currentSubTrack >= 0) {
+        showToast('⚠️ Subtitle stream timed out; keeping current stream', 'warning');
+        currentSubTrack = -1;
+        renderTrackMenus();
+      }
+    }, 9000);
   } else {
-    video.src = streamUrl;
-    video.muted = false;
-    video.play().catch(e => console.log('[Player] Fallback play error:', e));
-    cleanupSwitchUI();
+    nextVid.src = streamUrl;
+    nextVid.play().catch(e => console.log('[Player] Fallback play error:', e));
+    fallbackTimer = setTimeout(() => {
+      if (!handoffDone && switchId === currentSwitchSessionId && nextVid.readyState >= 2) {
+        performHandoff();
+      }
+    }, 3500);
+    timeoutTimer = setTimeout(() => {
+      if (switchId !== currentSwitchSessionId || handoffDone) return;
+      cleanupCandidate();
+      cleanupSwitchUI();
+    }, 9000);
   }
 }
 

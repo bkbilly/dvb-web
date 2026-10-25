@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DVB-Web — Live TV & EPG</title>
-  <link rel="stylesheet" href="style.css?v=10">
+  <link rel="stylesheet" href="style.css?v=11">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220%22 fill=%22%233b82f6%22><text y=%2226%22 font-size=%2228%22>📺</text></svg>">
 </head>
 <body>
@@ -74,7 +74,8 @@
 
           <!-- Video Screen Stage (Houses the actual video surface and in-video HUD overlays) -->
           <div class="video-screen" id="video-screen">
-            <video id="tv-video" autoplay playsinline></video>
+            <video id="tv-video" class="tv-video-stage active-stage ar-auto" autoplay playsinline></video>
+            <video id="tv-video-next" class="tv-video-stage video-stage-next ar-auto" autoplay playsinline muted></video>
             
             <!-- Idle / Standby Overlay -->
             <div id="standby-overlay" class="standby-overlay">
@@ -872,6 +873,6 @@
   </div>
 
   <script src="mpegts.min.js"></script>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

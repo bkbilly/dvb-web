@@ -210,20 +210,41 @@ body {
   cursor: none !important;
 }
 
-#tv-video {
+.tv-video-stage,
+#tv-video,
+#tv-video-next {
+  position: absolute;
+  inset: 0;
+  margin: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  transition: all 0.15s ease;
+  transition: opacity 0.22s ease-in-out;
 }
 
-#tv-video.ar-auto {
+.tv-video-stage.active-stage {
+  opacity: 1;
+  pointer-events: auto;
+  z-index: 2;
+}
+
+.tv-video-stage.video-stage-next {
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.tv-video-stage.ar-auto,
+#tv-video.ar-auto,
+#tv-video-next.ar-auto {
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
 
-#tv-video.ar-16-9 {
+.tv-video-stage.ar-16-9,
+#tv-video.ar-16-9,
+#tv-video-next.ar-16-9 {
   aspect-ratio: 16 / 9;
   width: min(100cqw, calc(100cqh * 16 / 9)) !important;
   height: min(100cqh, calc(100cqw * 9 / 16)) !important;
@@ -232,7 +253,9 @@ body {
   object-fit: fill;
 }
 
-#tv-video.ar-4-3 {
+.tv-video-stage.ar-4-3,
+#tv-video.ar-4-3,
+#tv-video-next.ar-4-3 {
   aspect-ratio: 4 / 3;
   width: min(100cqw, calc(100cqh * 4 / 3)) !important;
   height: min(100cqh, calc(100cqw * 3 / 4)) !important;
@@ -241,13 +264,17 @@ body {
   object-fit: fill;
 }
 
-#tv-video.ar-fill {
+.tv-video-stage.ar-fill,
+#tv-video.ar-fill,
+#tv-video-next.ar-fill {
   width: 100% !important;
   height: 100% !important;
   object-fit: fill;
 }
 
-#tv-video.ar-cover {
+.tv-video-stage.ar-cover,
+#tv-video.ar-cover,
+#tv-video-next.ar-cover {
   width: 100% !important;
   height: 100% !important;
   object-fit: cover;
@@ -2939,7 +2966,7 @@ input:checked + .slider:before {
     overflow: hidden;
   }
 
-  .video-container:has(#tv-video.ar-4-3) {
+  .video-container:has(.active-stage.ar-4-3) {
     height: var(--mobile-video-height, min(75vw, 75vh));
   }
 
@@ -3390,7 +3417,7 @@ input:checked + .slider:before {
     order: 3;
   }
 
-  .video-container:not(:fullscreen):has(#tv-video.ar-4-3) .video-screen {
+  .video-container:not(:fullscreen):has(.active-stage.ar-4-3) .video-screen {
     height: var(--mobile-video-height, min(75vw, 55vh));
   }
 
