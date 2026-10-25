@@ -612,22 +612,22 @@ func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 	i := 0
 
 	for i+188 <= limit {
-		// Verify 0x47 sync byte
 		if input[i] != 0x47 {
-			// Lost synchronization. Search forward byte-by-byte for next valid 0x47 boundary.
-			syncFound := false
+			// Lost synchronization. Seek forward for a confirmed 0x47 packet boundary.
+			found := false
 			for j := i + 1; j+188 <= limit; j++ {
 				if input[j] == 0x47 {
-					// Verify next boundary if available
+					// If another packet boundary is within this buffer, verify it also has 0x47
 					if j+376 <= limit && input[j+188] != 0x47 {
 						continue
 					}
 					i = j
-					syncFound = true
+					found = true
 					break
 				}
 			}
-			if !syncFound {
+			if !found {
+				// No valid sync byte found in remainder of input.
 				rem := limit - i
 				if rem > 187 {
 					rem = 187
@@ -636,13 +636,6 @@ func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 				copy(newLeftover, input[limit-rem:])
 				return output, newLeftover
 			}
-		}
-
-		// Double-check: if a second packet is available, verify it also starts with 0x47
-		if i+376 <= limit && input[i+188] != 0x47 {
-			// False 0x47 sync byte in payload, scan forward
-			i++
-			continue
 		}
 
 		packet := input[i : i+188]

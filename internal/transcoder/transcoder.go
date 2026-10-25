@@ -169,7 +169,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			"-probesize", "2500000",
 			"-fpsprobesize", "0",
 			"-err_detect", "crccheck",
-			"-fflags", "+genpts+nobuffer+discardcorrupt",
+			"-fflags", "+genpts+nobuffer",
 			"-ec", "favor_inter+deblock",
 			"-flags", "low_delay",
 		)
@@ -215,15 +215,16 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		}
 	} else if cfg.IsRadio {
 		// Radio station (audio-only): synthesize a lightweight static video background
-		// so browser <video> engines maintain flawless timing and synchronized playback
+		// and normalize audio timestamps with aresample so browser <video> engines maintain flawless timing
 		audioMap := fmt.Sprintf("0:a:%d?", audioIdx)
 		if cfg.ServiceID > 0 {
 			audioMap = fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
 		}
+		filter := fmt.Sprintf("color=c=0x0f172a:s=1280x720:r=10[v];[%s]asetpts=PTS-STARTPTS,aresample=async=1000[a]", audioMap)
 		args = append(args,
-			"-filter_complex", "color=c=0x0f172a:s=1280x720:r=10[v]",
+			"-filter_complex", filter,
 			"-map", "[v]",
-			"-map", audioMap,
+			"-map", "[a]",
 		)
 	} else if cfg.ServiceID > 0 {
 		audioMap := fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)

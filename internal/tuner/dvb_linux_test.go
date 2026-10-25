@@ -310,4 +310,22 @@ func TestSanitizeAndSyncTS(t *testing.T) {
 	if out2[0] != 0x47 || out2[188] != 0x47 {
 		t.Errorf("sync bytes missing after reassembly")
 	}
+
+	// 5. Corrupted sync byte in middle packet (packet 2 has 0x46 instead of 0x47)
+	pkt3 := makeTestTSPacket(300, false, []byte("third"))
+	badSyncPkt := append([]byte(nil), pkt2...)
+	badSyncPkt[0] = 0x46 // bit flip in sync byte
+
+	streamWithBadSync := append(append(append([]byte(nil), pkt1...), badSyncPkt...), pkt3...)
+
+	out3, leftover3 := SanitizeAndSyncTS(streamWithBadSync, nil)
+	if len(leftover3) != 0 {
+		t.Fatalf("expected 0 leftover, got %d", len(leftover3))
+	}
+	if len(out3) != 188*2 {
+		t.Fatalf("expected 376 bytes output (pkt1 and pkt3), got %d", len(out3))
+	}
+	if out3[0] != 0x47 || out3[188] != 0x47 {
+		t.Errorf("sync bytes missing in output after bad sync byte")
+	}
 }
