@@ -302,8 +302,8 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	discovered, err := s.tunerPool.ScanFrequencies(req.AdapterID, func(freq int64, progressPct int, foundCount int) {
-		s.BroadcastScanProgress(freq, progressPct, foundCount)
+	discovered, err := s.tunerPool.ScanFrequencies(req.AdapterID, func(freq int64, progressPct int, foundCount int, recent []string) {
+		s.BroadcastScanProgress(freq, progressPct, foundCount, recent)
 	})
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
@@ -1234,12 +1234,13 @@ func (s *Server) BroadcastEPGUpdate(events []db.EPGEvent) {
 }
 
 // BroadcastScanProgress notifies web clients of frequency scan progress
-func (s *Server) BroadcastScanProgress(freq int64, progressPct int, foundCount int) {
+func (s *Server) BroadcastScanProgress(freq int64, progressPct int, foundCount int, recent []string) {
 	msg, err := json.Marshal(map[string]interface{}{
-		"event":       "scan_progress",
-		"frequency":   freq,
-		"progress":    progressPct,
-		"found_count": foundCount,
+		"event":           "scan_progress",
+		"frequency":       freq,
+		"progress":        progressPct,
+		"found_count":     foundCount,
+		"recent_channels": recent,
 	})
 	if err != nil {
 		return

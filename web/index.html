@@ -348,28 +348,109 @@
           </div>
 
           <!-- Channel Scanner Card -->
-          <div class="settings-card">
+          <div class="settings-card scanner-card">
             <div class="card-header">
-              <h3>🔍 Channel Scanner</h3>
+              <div class="card-title-group">
+                <h3>🔍 Channel Scanner</h3>
+                <span class="badge badge-system">DVB-T / DVB-T2</span>
+              </div>
             </div>
-            <p class="card-desc">Sweep broadcast frequencies with your active tuner to discover new channels.</p>
-            <div class="scanner-controls">
-              <button id="btn-start-scan" class="btn btn-primary">Start Channel Scan</button>
-              <span id="scan-status" class="scan-status"></span>
+            <p class="card-desc">Sweep UHF (474–786 MHz) and VHF (177.5–226.5 MHz) broadcast frequencies using your hardware tuner to discover all available digital TV and radio services.</p>
+            
+            <div class="scanner-controls-bar">
+              <button id="btn-start-scan" class="btn btn-primary btn-scan">
+                <span class="scan-btn-icon">⚡</span>
+                <span id="scan-btn-text" class="scan-btn-text">Start Channel Scan</span>
+                <span id="scan-spinner" class="scan-spinner hidden"></span>
+              </button>
+              <div id="scan-status-pill" class="scan-status-pill hidden">
+                <span class="scan-pulse-dot"></span>
+                <span id="scan-status" class="scan-status-text">Ready</span>
+              </div>
             </div>
 
-            <!-- Scan Results Diff Modal / Panel -->
-            <div id="scan-results-box" class="scan-results-box hidden">
-              <h4>Scan Results</h4>
-              <div class="scan-stats">
-                <span id="stat-discovered" class="stat-pill stat-new">0 Discovered</span>
-                <span id="stat-missing" class="stat-pill stat-missing">0 Missing</span>
+            <!-- Active Scan Progress Panel -->
+            <div id="scan-progress-box" class="scan-progress-box hidden">
+              <div class="scan-progress-header">
+                <div class="scan-info-left">
+                  <span class="scan-info-icon">📡</span>
+                  <span id="scan-freq-label" class="scan-freq-label">Initializing frequency sweep...</span>
+                </div>
+                <div class="scan-info-right">
+                  <span id="scan-found-count" class="scan-found-pill">0 found</span>
+                  <span id="scan-pct-label" class="scan-pct-label">0%</span>
+                </div>
               </div>
-              
-              <div id="missing-channels-section" class="missing-section hidden">
-                <h5>The following channels were not found during the scan:</h5>
-                <div id="missing-channels-list" class="tag-list"></div>
-                <button id="btn-prune-missing" class="btn btn-danger">Delete Missing Channels</button>
+
+              <div class="scan-progress-track">
+                <div id="scan-progress-fill" class="scan-progress-fill" style="width: 0%;"></div>
+              </div>
+
+              <!-- Real-time Live Discovery Feed -->
+              <div class="scan-live-ticker-wrap">
+                <div class="scan-ticker-label">
+                  <span>Multiplex Discovery Stream:</span>
+                  <span id="scan-active-lock-pill" class="lock-pill hidden">LOCKED</span>
+                </div>
+                <div id="scan-live-ticker" class="scan-live-ticker">
+                  <div class="ticker-placeholder">Listening for multiplex transport streams...</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Scan Results Container -->
+            <div id="scan-results-box" class="scan-results-box hidden">
+              <div class="scan-results-header">
+                <div class="scan-results-title">
+                  <h4>Scan Summary</h4>
+                  <span id="scan-summary-subtitle" class="scan-summary-subtitle">Channel discovery complete</span>
+                </div>
+                <div class="scan-stats-pills">
+                  <button type="button" id="stat-pill-all" class="stat-pill stat-discovered active" data-filter="all">
+                    <span class="stat-val" id="stat-discovered">0 Discovered</span>
+                  </button>
+                  <button type="button" id="stat-pill-new" class="stat-pill stat-new" data-filter="new">
+                    <span class="stat-val" id="stat-new">0 New</span>
+                  </button>
+                  <button type="button" id="stat-pill-existing" class="stat-pill stat-updated" data-filter="existing">
+                    <span class="stat-val" id="stat-updated">0 Existing</span>
+                  </button>
+                  <button type="button" id="stat-pill-missing" class="stat-pill stat-missing" data-filter="missing">
+                    <span class="stat-val" id="stat-missing">0 Missing</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Filter tabs bar for results -->
+              <div class="scan-filter-bar">
+                <div class="scan-filter-btns">
+                  <button type="button" class="scan-filter-btn active" data-filter="all">All Discovered (<span id="filter-cnt-all">0</span>)</button>
+                  <button type="button" class="scan-filter-btn" data-filter="new">✨ New Only (<span id="filter-cnt-new">0</span>)</button>
+                  <button type="button" class="scan-filter-btn" data-filter="missing">⚠️ Missing (<span id="filter-cnt-missing">0</span>)</button>
+                </div>
+                <div class="scan-search-wrap">
+                  <input type="text" id="scan-results-search" class="form-input scan-search-input" placeholder="Search discovered channels..." />
+                </div>
+              </div>
+
+              <!-- Channel Cards Grid -->
+              <div id="scan-channels-grid" class="scan-channels-grid"></div>
+
+              <!-- Missing Channels Alert Section -->
+              <div id="missing-channels-section" class="missing-channels-alert hidden">
+                <div class="missing-alert-header">
+                  <div class="missing-alert-title">
+                    <span class="missing-icon">⚠️</span>
+                    <div>
+                      <strong>Missing Channels Detected</strong>
+                      <p>These channels were previously saved in your database but were not detected during this sweep. They may have moved frequency or are currently off-air.</p>
+                    </div>
+                  </div>
+                  <button id="btn-prune-missing" class="btn btn-danger btn-sm">
+                    <span>🗑️</span> Delete Missing Channels
+                  </button>
+                </div>
+                <div id="missing-channels-list" class="missing-cards-list"></div>
               </div>
             </div>
           </div>

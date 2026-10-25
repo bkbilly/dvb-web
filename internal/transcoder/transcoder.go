@@ -165,8 +165,9 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	// Live MPEG-TS input options to ensure PAT/PMT program maps are properly discovered
 	if !cfg.IsMock {
 		args = append(args,
-			"-analyzeduration", "6000000",
-			"-probesize", "12000000",
+			"-analyzeduration", "1500000",
+			"-probesize", "2500000",
+			"-fpsprobesize", "0",
 			"-err_detect", "ignore_err",
 			"-fflags", "+genpts+nobuffer",
 			"-flags", "low_delay",
@@ -300,7 +301,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				"-tune", "ull",
 				"-zerolatency", "1",
 				"-b:v", bitrate,
-				"-g", "25",
+				"-g", "15",
 				"-bf", "0",
 				"-pix_fmt", "yuv420p",
 			)
@@ -308,14 +309,14 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			args = append(args,
 				"-c:v", "h264_vaapi",
 				"-b:v", bitrate,
-				"-g", "25",
+				"-g", "15",
 				"-bf", "0",
 			)
 		case HW_V4L2M2M:
 			args = append(args,
 				"-c:v", "h264_v4l2m2m",
 				"-b:v", bitrate,
-				"-g", "25",
+				"-g", "15",
 			)
 		default:
 			// Universal CPU fallback
@@ -324,7 +325,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				"-preset", "ultrafast",
 				"-tune", "zerolatency",
 				"-b:v", bitrate,
-				"-g", "25",
+				"-g", "15",
 				"-bf", "0",
 				"-pix_fmt", "yuv420p",
 			)
@@ -343,6 +344,8 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		"-ar", "48000",
 		"-ac", "2",
 		"-f", "mpegts",
+		"-muxdelay", "0",
+		"-muxpreload", "0",
 		"-pes_payload_size", "0",
 		"pipe:1",
 	)

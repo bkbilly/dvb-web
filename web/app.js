@@ -14,6 +14,16 @@ let pc = null;
 let conflictData = null;
 let scanDiff = null;
 
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // ==========================================================
 // TOAST NOTIFICATIONS (Non-intrusive popups)
 // ==========================================================
@@ -713,12 +723,52 @@ function handleWSMessage(msg) {
       }, 60000);
       break;
 
-    case 'scan_progress':
-      const scanStatus = document.getElementById('scan-status');
-      if (scanStatus) {
-        scanStatus.textContent = `Scanning ${(msg.frequency / 1e6).toFixed(1)} MHz (${msg.progress}%)... Discovered: ${msg.found_count} channels`;
+    case 'scan_progress': {
+      const status = document.getElementById('scan-status');
+      const statusPill = document.getElementById('scan-status-pill');
+      if (statusPill) statusPill.classList.remove('hidden');
+      if (status) {
+        status.textContent = `Scanning ${(msg.frequency / 1e6).toFixed(1)} MHz (${msg.progress}%)`;
+      }
+
+      const freqLabel = document.getElementById('scan-freq-label');
+      if (freqLabel) {
+        freqLabel.textContent = `Scanning ${(msg.frequency / 1e6).toFixed(1)} MHz...`;
+      }
+      const pctLabel = document.getElementById('scan-pct-label');
+      if (pctLabel) {
+        pctLabel.textContent = `${msg.progress}%`;
+      }
+      const progressFill = document.getElementById('scan-progress-fill');
+      if (progressFill) {
+        progressFill.style.width = `${msg.progress}%`;
+      }
+      const foundCount = document.getElementById('scan-found-count');
+      if (foundCount) {
+        foundCount.textContent = `${msg.found_count} discovered`;
+      }
+
+      if (msg.recent_channels && msg.recent_channels.length > 0) {
+        const lockPill = document.getElementById('scan-active-lock-pill');
+        if (lockPill) {
+          lockPill.classList.remove('hidden');
+          setTimeout(() => { lockPill.classList.add('hidden'); }, 4000);
+        }
+        const ticker = document.getElementById('scan-live-ticker');
+        if (ticker) {
+          const ph = ticker.querySelector('.ticker-placeholder');
+          if (ph) ph.remove();
+          msg.recent_channels.forEach(name => {
+            const badge = document.createElement('div');
+            badge.className = 'ticker-badge';
+            badge.innerHTML = `<span class="t-dot"></span><span>${escapeHtml(name)}</span><small style="color:var(--text-muted); margin-left:2px;">(${(msg.frequency / 1e6).toFixed(1)} MHz)</small>`;
+            ticker.appendChild(badge);
+          });
+          ticker.scrollTop = ticker.scrollHeight;
+        }
       }
       break;
+    }
 
     case 'tuner_released':
       if (conflictData && conflictData.target_channel) {
@@ -863,6 +913,8 @@ function startStream(channel) {
   if (player && currentStreamingChannelId === channel.id) {
     return;
   }
+  isUserTimeshifted = false;
+  if (video) video.playbackRate = 1.0;
   stopStream();
   currentStreamingChannelId = channel.id;
   resetStandbyCard();
@@ -891,9 +943,10 @@ function startStream(channel) {
     }, {
       enableWorker: false,
       lazyLoad: false,
+      stashInitialSize: 64 * 1024,
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 1800,
-      autoCleanupMinBackwardDuration: 900,
+      autoCleanupMaxBackwardDuration: 120,
+      autoCleanupMinBackwardDuration: 60,
       liveBufferLatencyChasing: false,
       liveSync: false,
     });
@@ -1627,6 +1680,7 @@ function cycleAspectRatio() {
 // TIMESHIFT (PAUSE & REWIND LIVE BROADCAST)
 // ==========================================================
 let isScrubbingTimeshift = false;
+let isUserTimeshifted = false;
 
 function getTimeshiftBufferRange() {
   if (!video || !video.buffered || video.buffered.length === 0) {
@@ -1673,7 +1727,25 @@ function updateTimeshiftUI() {
   slider.value = video.currentTime;
 
   const offset = Math.max(0, range.end - video.currentTime);
-  const isLive = offset < 3.0;
+  const isLive = offset < 2.5;
+
+  // Auto Live-Chasing: keep viewers synchronized at true live edge if they have not paused or rewound
+  if (!isUserTimeshifted && !video.paused && !isScrubbingTimeshift) {
+    if (offset > 1.8 && offset < 5.0) {
+      // Gentle, pitch-corrected speedup (+5%) to smoothly glide back to live edge
+      if (video.playbackRate !== 1.05) {
+        video.playbackRate = 1.05;
+      }
+    } else if (offset >= 5.0) {
+      // Fell far behind (e.g. background tab or long network stall): seek forward to live edge
+      video.currentTime = Math.max(range.start, range.end - 0.5);
+      video.playbackRate = 1.0;
+    } else if (offset <= 0.8 && video.playbackRate !== 1.0) {
+      video.playbackRate = 1.0;
+    }
+  } else if (isUserTimeshifted && video.playbackRate !== 1.0) {
+    video.playbackRate = 1.0;
+  }
 
   btnLive.classList.toggle('is-live', isLive);
   offsetText.textContent = isLive ? 'LIVE' : formatTimeshiftOffset(offset);
@@ -1685,6 +1757,7 @@ function toggleTimeshiftPlayPause() {
   if (video.paused) {
     video.play().catch(e => console.log('[Timeshift] Resume error:', e));
   } else {
+    isUserTimeshifted = true;
     video.pause();
   }
   updateTimeshiftUI();
@@ -1698,8 +1771,12 @@ function seekTimeshift(deltaSeconds) {
   let target = video.currentTime + deltaSeconds;
   if (target > range.end - 0.5) {
     target = Math.max(range.start, range.end - 0.5);
+    isUserTimeshifted = false;
   } else if (target < range.start) {
     target = range.start;
+    isUserTimeshifted = true;
+  } else {
+    isUserTimeshifted = (range.end - target) >= 2.0;
   }
   video.currentTime = target;
   updateTimeshiftUI();
@@ -1708,6 +1785,8 @@ function seekTimeshift(deltaSeconds) {
 
 function jumpToLive() {
   if (!video) return;
+  isUserTimeshifted = false;
+  video.playbackRate = 1.0;
   const range = getTimeshiftBufferRange();
   if (range && range.end > 0) {
     video.currentTime = Math.max(range.start, range.end - 0.5);
@@ -1740,7 +1819,7 @@ function initTimeshift() {
       const max = range ? range.end : parseFloat(slider.max);
       const offset = Math.max(0, max - val);
       if (offsetText) {
-        offsetText.textContent = offset < 3.0 ? 'LIVE' : formatTimeshiftOffset(offset);
+        offsetText.textContent = offset < 2.5 ? 'LIVE' : formatTimeshiftOffset(offset);
       }
     });
 
@@ -1756,6 +1835,8 @@ function initTimeshift() {
       }
       video.currentTime = val;
       isScrubbingTimeshift = false;
+      const offset = range ? Math.max(0, range.end - val) : 0;
+      isUserTimeshifted = offset >= 2.0;
       updateTimeshiftUI();
     });
   }
@@ -2945,10 +3026,143 @@ window.kickTuner = async function(tunerId) {
 };
 
 // Channel Scanner
+let activeScanData = {
+  allFound: [],
+  newChannels: [],
+  updatedChannels: [],
+  missingChannels: [],
+  filter: 'all',
+  search: ''
+};
+
+function renderScanResultsCards() {
+  const grid = document.getElementById('scan-channels-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+
+  const { allFound, newChannels, missingChannels, filter, search } = activeScanData;
+  let targetList = [];
+
+  if (filter === 'new') {
+    targetList = newChannels;
+  } else if (filter === 'existing') {
+    targetList = activeScanData.updatedChannels;
+  } else if (filter === 'missing') {
+    targetList = missingChannels;
+  } else {
+    targetList = allFound;
+  }
+
+  if (search.trim()) {
+    const q = search.trim().toLowerCase();
+    targetList = targetList.filter(c => 
+      (c.name && c.name.toLowerCase().includes(q)) || 
+      String(c.number).includes(q)
+    );
+  }
+
+  if (targetList.length === 0) {
+    grid.innerHTML = `<div style="grid-column: 1/-1; padding: 2rem; text-align: center; color: var(--text-muted); font-size: 0.95rem;">
+      ${filter === 'new' ? '✨ No new channels were discovered in this sweep (all found channels already exist in your channel list).' : 
+        filter === 'missing' ? '🎉 Great news! No existing channels are missing.' :
+        'No channels match your current filter or search query.'}
+    </div>`;
+    return;
+  }
+
+  targetList.forEach(c => {
+    const isNew = newChannels.some(nc => nc.id === c.id || (nc.service_id === c.service_id && nc.frequency === c.frequency));
+    const card = document.createElement('div');
+    card.className = 'scan-channel-card' + (isNew ? ' is-new' : '');
+    card.innerHTML = `
+      <div class="scan-ch-left">
+        <div class="scan-ch-num">${c.number}</div>
+        <div class="scan-ch-details">
+          <div class="scan-ch-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</div>
+          <div class="scan-ch-meta">
+            <span>📡 ${(c.frequency / 1e6).toFixed(1)} MHz</span>
+            <span>•</span>
+            <span>${c.delivery_system || 'DVB-T'}</span>
+            <span>•</span>
+            <span>SID ${c.service_id}</span>
+          </div>
+        </div>
+      </div>
+      <div class="scan-ch-badges">
+        ${isNew ? '<span class="badge-new">✨ NEW</span>' : ''}
+        <span class="badge-tag">${c.is_radio ? '📻 Radio' : '📺 TV'}</span>
+        ${(c.name && c.name.toUpperCase().includes('HD')) ? '<span class="badge-tag" style="color:#60a5fa;border-color:rgba(59,130,246,0.3);">HD</span>' : ''}
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function setupScanFilterHandlers() {
+  const filterBtns = document.querySelectorAll('.scan-filter-btn');
+  filterBtns.forEach(btn => {
+    btn.onclick = () => {
+      filterBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeScanData.filter = btn.dataset.filter || 'all';
+      renderScanResultsCards();
+    };
+  });
+
+  const statPills = document.querySelectorAll('.scan-stats-pills .stat-pill');
+  statPills.forEach(pill => {
+    pill.onclick = () => {
+      statPills.forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      const targetFilter = pill.dataset.filter || 'all';
+      activeScanData.filter = targetFilter;
+      filterBtns.forEach(b => {
+        b.classList.toggle('active', b.dataset.filter === targetFilter);
+      });
+      renderScanResultsCards();
+    };
+  });
+
+  const searchInput = document.getElementById('scan-results-search');
+  if (searchInput) {
+    searchInput.oninput = (e) => {
+      activeScanData.search = e.target.value;
+      renderScanResultsCards();
+    };
+  }
+}
+
+setupScanFilterHandlers();
+
 document.getElementById('btn-start-scan').onclick = async () => {
+  const btn = document.getElementById('btn-start-scan');
+  const btnText = document.getElementById('scan-btn-text');
+  const spinner = document.getElementById('scan-spinner');
+  const statusPill = document.getElementById('scan-status-pill');
   const status = document.getElementById('scan-status');
-  status.textContent = 'Scanning frequencies... please wait...';
-  
+  const progressBox = document.getElementById('scan-progress-box');
+  const progressFill = document.getElementById('scan-progress-fill');
+  const pctLabel = document.getElementById('scan-pct-label');
+  const foundCount = document.getElementById('scan-found-count');
+  const freqLabel = document.getElementById('scan-freq-label');
+  const liveTicker = document.getElementById('scan-live-ticker');
+  const resultsBox = document.getElementById('scan-results-box');
+
+  // Disable button and show active scanner state
+  btn.disabled = true;
+  if (btnText) btnText.textContent = 'Scanning frequencies...';
+  if (spinner) spinner.classList.remove('hidden');
+  if (statusPill) statusPill.classList.remove('hidden');
+  if (status) status.textContent = 'Scanning frequencies...';
+
+  if (progressBox) progressBox.classList.remove('hidden');
+  if (progressFill) progressFill.style.width = '0%';
+  if (pctLabel) pctLabel.textContent = '0%';
+  if (foundCount) foundCount.textContent = '0 found';
+  if (freqLabel) freqLabel.textContent = 'Starting frequency sweep...';
+  if (liveTicker) liveTicker.innerHTML = '<div class="ticker-placeholder">Listening for multiplex transport streams...</div>';
+  if (resultsBox) resultsBox.classList.add('hidden');
+
   try {
     const res = await fetch('/api/scan', {
       method: 'POST',
@@ -2957,55 +3171,125 @@ document.getElementById('btn-start-scan').onclick = async () => {
     });
     scanDiff = await res.json();
     if (!res.ok) {
-      status.textContent = 'Scan failed: ' + (scanDiff.error || 'Server error');
+      if (status) status.textContent = 'Scan failed: ' + (scanDiff.error || 'Server error');
+      showToast('⚠️ Scan failed: ' + (scanDiff.error || 'Server error'), 'error');
       return;
     }
-    status.textContent = 'Scan complete!';
 
-    const resultsBox = document.getElementById('scan-results-box');
-    resultsBox.classList.remove('hidden');
+    if (status) status.textContent = 'Scan complete!';
+    if (progressFill) progressFill.style.width = '100%';
+    if (pctLabel) pctLabel.textContent = '100%';
 
-    const discovered = scanDiff.discovered_count || 0;
-    const missing = (scanDiff.missing_channels && scanDiff.missing_channels.length) || 0;
-    document.getElementById('stat-discovered').textContent = `${discovered} Discovered`;
-    document.getElementById('stat-missing').textContent = `${missing} Missing`;
+    const newChannels = scanDiff.new_channels || [];
+    const updatedChannels = scanDiff.updated_channels || [];
+    const missingChannels = scanDiff.missing_channels || [];
+    const allFound = [...newChannels, ...updatedChannels];
+    allFound.sort((a, b) => a.number - b.number);
+    const discovered = scanDiff.discovered_count || allFound.length;
 
+    activeScanData.allFound = allFound;
+    activeScanData.newChannels = newChannels;
+    activeScanData.updatedChannels = updatedChannels;
+    activeScanData.missingChannels = missingChannels;
+    activeScanData.filter = 'all';
+    activeScanData.search = '';
+
+    // Instant toast notification with full summary
+    showToast(`✅ Channel scan complete! Found ${discovered} channels (${newChannels.length} new)`, 'success');
+
+    // Update pill counters
+    const statDisc = document.getElementById('stat-discovered');
+    if (statDisc) statDisc.textContent = `${discovered} Discovered`;
+    const statNew = document.getElementById('stat-new');
+    if (statNew) statNew.textContent = `${newChannels.length} New`;
+    const statUp = document.getElementById('stat-updated');
+    if (statUp) statUp.textContent = `${updatedChannels.length} Existing`;
+    const statMiss = document.getElementById('stat-missing');
+    if (statMiss) statMiss.textContent = `${missingChannels.length} Missing`;
+
+    // Update filter button labels
+    const fCntAll = document.getElementById('filter-cnt-all');
+    if (fCntAll) fCntAll.textContent = allFound.length;
+    const fCntNew = document.getElementById('filter-cnt-new');
+    if (fCntNew) fCntNew.textContent = newChannels.length;
+    const fCntMiss = document.getElementById('filter-cnt-missing');
+    if (fCntMiss) fCntMiss.textContent = missingChannels.length;
+
+    // Subtitle
+    const subTitle = document.getElementById('scan-summary-subtitle');
+    if (subTitle) {
+      subTitle.textContent = `Sweep finished: ${discovered} broadcast channels discovered (${newChannels.length} new), ${missingChannels.length} missing.`;
+    }
+
+    // Reset search input
+    const sInput = document.getElementById('scan-results-search');
+    if (sInput) sInput.value = '';
+
+    // Reset filter buttons state to 'all'
+    const filterBtns = document.querySelectorAll('.scan-filter-btn');
+    filterBtns.forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+
+    renderScanResultsCards();
+
+    // Render Missing Channels
     const missingSection = document.getElementById('missing-channels-section');
     const missingList = document.getElementById('missing-channels-list');
-    missingList.innerHTML = '';
-
-    if (scanDiff.missing_channels && scanDiff.missing_channels.length > 0) {
-      missingSection.classList.remove('hidden');
-      scanDiff.missing_channels.forEach(c => {
-        missingList.innerHTML += `<span class="badge" style="background-color:var(--danger);">${c.number}: ${c.name}</span>`;
-      });
-    } else {
-      missingSection.classList.add('hidden');
+    if (missingSection && missingList) {
+      missingList.innerHTML = '';
+      if (missingChannels.length > 0) {
+        missingSection.classList.remove('hidden');
+        missingChannels.forEach(c => {
+          const tag = document.createElement('div');
+          tag.className = 'missing-ch-tag';
+          tag.innerHTML = `<strong>${c.number}:</strong> ${escapeHtml(c.name)}`;
+          missingList.appendChild(tag);
+        });
+      } else {
+        missingSection.classList.add('hidden');
+      }
     }
+
+    if (resultsBox) resultsBox.classList.remove('hidden');
 
     await loadChannels();
   } catch (err) {
-    status.textContent = 'Scan failed: ' + err.message;
+    if (status) status.textContent = 'Scan failed: ' + err.message;
+    showToast('⚠️ Scan failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    if (btnText) btnText.textContent = 'Start Channel Scan';
+    if (spinner) spinner.classList.add('hidden');
   }
 };
 
 // Prune Missing Channels
 document.getElementById('btn-prune-missing').onclick = async () => {
-  if (!scanDiff || !scanDiff.missing_channels.length) return;
+  if (!scanDiff || !scanDiff.missing_channels || !scanDiff.missing_channels.length) return;
   const ids = scanDiff.missing_channels.map(c => c.id);
 
   const confirmed = await showConfirm(`Are you sure you want to delete ${ids.length} missing channels?`, 'Delete Missing Channels', 'Delete Channels', true);
   if (!confirmed) return;
 
-  await fetch('/api/scan/prune', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channel_ids: ids })
-  });
+  try {
+    await fetch('/api/scan/prune', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_ids: ids })
+    });
 
-  document.getElementById('missing-channels-section').classList.add('hidden');
-  document.getElementById('stat-missing').textContent = '0 Missing';
-  await loadChannels();
+    scanDiff.missing_channels = [];
+    activeScanData.missingChannels = [];
+    document.getElementById('missing-channels-section').classList.add('hidden');
+    const statMiss = document.getElementById('stat-missing');
+    if (statMiss) statMiss.textContent = '0 Missing';
+    const fCntMiss = document.getElementById('filter-cnt-missing');
+    if (fCntMiss) fCntMiss.textContent = '0';
+    renderScanResultsCards();
+    showToast(`🗑️ Successfully deleted ${ids.length} missing channels`, 'info');
+    await loadChannels();
+  } catch (err) {
+    showToast('⚠️ Failed to delete missing channels: ' + err.message, 'error');
+  }
 };
 
 // Channel Manager & Drag-and-Drop Reordering
@@ -3520,9 +3804,10 @@ function switchStreamTracks(channel) {
     }, {
       enableWorker: false,
       lazyLoad: false,
+      stashInitialSize: 64 * 1024,
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 1800,
-      autoCleanupMinBackwardDuration: 900,
+      autoCleanupMaxBackwardDuration: 120,
+      autoCleanupMinBackwardDuration: 60,
       liveBufferLatencyChasing: false,
       liveSync: false,
     });

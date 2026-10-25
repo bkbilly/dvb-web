@@ -1718,7 +1718,7 @@ func (t *Tuner) GetSignal() *SignalInfo {
 }
 
 // ScanFrequencies performs a channel scan on the specified adapter
-func (p *Pool) ScanFrequencies(adapterID int, onProgress func(freq int64, progressPct int, foundCount int)) ([]db.Channel, error) {
+func (p *Pool) ScanFrequencies(adapterID int, onProgress func(freq int64, progressPct int, foundCount int, recentChannels []string)) ([]db.Channel, error) {
 	p.mu.Lock()
 	var target *Tuner
 	for _, t := range p.tuners {
@@ -1751,8 +1751,8 @@ func (p *Pool) ScanFrequencies(adapterID int, onProgress func(freq int64, progre
 
 	// If mock mode, return standard simulated digital broadcast channels
 	if target.IsMock {
-		time.Sleep(1500 * time.Millisecond) // simulate scan duration
-		return []db.Channel{
+		time.Sleep(500 * time.Millisecond) // simulate scan duration
+		mockChs := []db.Channel{
 			{Name: "BBC One HD", Number: 1, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 101, VideoPID: 1011, AudioPID: 1012, Enabled: true},
 			{Name: "BBC Two HD", Number: 2, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 102, VideoPID: 1021, AudioPID: 1022, Enabled: true},
 			{Name: "ITV1 HD", Number: 3, Frequency: 538000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 201, VideoPID: 2011, AudioPID: 2012, Enabled: true},
@@ -1761,7 +1761,15 @@ func (p *Pool) ScanFrequencies(adapterID int, onProgress func(freq int64, progre
 			{Name: "Sky News", Number: 11, Frequency: 570000000, Bandwidth: 8000000, DeliverySystem: "DVBT", ServiceID: 302, VideoPID: 3021, AudioPID: 3022, Enabled: true},
 			{Name: "BBC Radio 1", Number: 701, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 701, VideoPID: 0, AudioPID: 7012, Enabled: true, IsRadio: true},
 			{Name: "BBC Radio 4", Number: 704, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 704, VideoPID: 0, AudioPID: 7042, Enabled: true, IsRadio: true},
-		}, nil
+		}
+		if onProgress != nil {
+			var names []string
+			for _, ch := range mockChs {
+				names = append(names, ch.Name)
+			}
+			onProgress(506000000, 100, len(mockChs), names)
+		}
+		return mockChs, nil
 	}
 
 	// Real hardware scan using native Linux DVB API ioctl

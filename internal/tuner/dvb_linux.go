@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -158,10 +159,10 @@ func TuneFrontendFD(feFD int, freqHz uint32, bwHz uint32, deliverySystem string)
 		return fmt.Errorf("FE_SET_PROPERTY ioctl failed: %v", errno)
 	}
 
-	// Wait up to 1.5s for signal lock
+	// Wait up to 1.5s for signal lock (poll every 25ms for instantaneous lock acquisition)
 	timeout := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(timeout) {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 		var status uint32
 		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(feFD), ioctlFEReadStatus, uintptr(unsafe.Pointer(&status)))
 		if errno == 0 && (status&feHasLock) != 0 {
@@ -257,20 +258,26 @@ func ReadFrontendSignalInfo(feFD int) SignalInfo {
 }
 
 // ScanFrequenciesNative sweeps UHF & VHF TV channels to discover active broadcasts
-func ScanFrequenciesNative(frontendPath, dvrPath, demuxPath string, onProgress func(freq int64, progressPct int, foundCount int)) ([]db.Channel, error) {
+func ScanFrequenciesNative(frontendPath, dvrPath, demuxPath string, onProgress func(freq int64, progressPct int, foundCount int, recentChannels []string)) ([]db.Channel, error) {
 	feFD, err := syscall.Open(frontendPath, syscall.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s: %w", frontendPath, err)
 	}
 	defer syscall.Close(feFD)
 
-	// Keep demuxer running with wildcard TS filter during scan
+	// Keep wildcard demux filter open across the scan so USB/DMA streaming remains warm and stable
 	dmxFD, err := StartDemuxWildcard(demuxPath)
 	if err != nil {
 		log.Printf("[DVB Scanner] Warning: failed to start demux wildcard: %v", err)
 	} else {
 		defer StopDemuxWildcard(dmxFD)
 	}
+
+	dvrFD, err := syscall.Open(dvrPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", dvrPath, err)
+	}
+	defer syscall.Close(dvrFD)
 
 	// Standard UHF DVB-T/T2 channels 21 to 60 (474 MHz to 786 MHz in 8 MHz steps)
 	var frequencies []uint32
@@ -290,16 +297,28 @@ func ScanFrequenciesNative(frontendPath, dvrPath, demuxPath string, onProgress f
 	for idx, freq := range frequencies {
 		progressPct := int(float64(idx+1) / float64(len(frequencies)) * 100)
 		if onProgress != nil {
-			onProgress(int64(freq), progressPct, len(discovered))
+			onProgress(int64(freq), progressPct, len(discovered), nil)
 		}
 
-		locked, delivSys := tuneAndCheck(feFD, freq, 8000000)
+		bw := uint32(8000000)
+		if freq < 300000000 {
+			bw = 7000000
+		}
+
+		locked, delivSys := tuneAndCheck(feFD, freq, bw)
 		if locked {
 			log.Printf("[DVB Scanner] *** Signal locked at %.2f MHz (%s)! Reading multiplex...", float64(freq)/1e6, delivSys)
-			channels := readChannelsFromTS(dvrPath, int64(freq), delivSys, &channelNum)
+			channels := readChannelsFromTS(dvrFD, int64(freq), delivSys, &channelNum)
 			if len(channels) > 0 {
 				log.Printf("[DVB Scanner] Found %d channels on %.2f MHz", len(channels), float64(freq)/1e6)
 				discovered = append(discovered, channels...)
+				if onProgress != nil {
+					var recent []string
+					for _, ch := range channels {
+						recent = append(recent, ch.Name)
+					}
+					onProgress(int64(freq), progressPct, len(discovered), recent)
+				}
 			}
 		}
 	}
@@ -343,76 +362,399 @@ func tryTune(feFD int, freq uint32, bw uint32, sys uint32) bool {
 		return false
 	}
 
-	// Poll signal status
-	for i := 0; i < 5; i++ {
-		time.Sleep(80 * time.Millisecond)
+	// Poll signal status up to 800ms
+	// Demodulators take 400-750ms to acquire lock
+	deadline := time.Now().Add(800 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		time.Sleep(30 * time.Millisecond)
 		var status uint32
 		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(feFD), ioctlFEReadStatus, uintptr(unsafe.Pointer(&status)))
-		if errno == 0 {
-			if (status & feHasLock) != 0 {
-				return true
-			}
-			if (status & (feHasCarrier | feHasSync | feHasSignal)) != 0 {
-				time.Sleep(200 * time.Millisecond)
-				syscall.Syscall(syscall.SYS_IOCTL, uintptr(feFD), ioctlFEReadStatus, uintptr(unsafe.Pointer(&status)))
-				if (status & feHasLock) != 0 {
-					return true
-				}
-			}
+		if errno == 0 && (status&feHasLock) != 0 {
+			return true
 		}
 	}
 	return false
 }
 
-// getSectionPayload checks for PUSI and extracts the payload offset for PSI/SI sections
-func getSectionPayload(pkt []byte) (int, bool) {
-	if len(pkt) < 188 || pkt[0] != 0x47 {
-		return 0, false
+type scanDemuxer struct {
+	patServices     map[int]int
+	pmtPIDs         map[int]int
+	aitPIDs         map[int]int
+	serviceNames    map[int]string
+	serviceTypes    map[int]int
+	servicePIDs     map[int]struct{ vPID, aPID int }
+	serviceHbbTV    map[int]string
+	serviceTeletext map[int]bool
+
+	pendingSec  map[int][]byte
+	expectedLen map[int]int
+
+	leftover []byte
+	synced   bool
+}
+
+func newScanDemuxer() *scanDemuxer {
+	return &scanDemuxer{
+		patServices:     make(map[int]int),
+		pmtPIDs:         make(map[int]int),
+		aitPIDs:         make(map[int]int),
+		serviceNames:    make(map[int]string),
+		serviceTypes:    make(map[int]int),
+		servicePIDs:     make(map[int]struct{ vPID, aPID int }),
+		serviceHbbTV:    make(map[int]string),
+		serviceTeletext: make(map[int]bool),
+		pendingSec:      make(map[int][]byte),
+		expectedLen:     make(map[int]int),
 	}
-	pusi := (pkt[1] & 0x40) != 0
-	if !pusi {
-		return 0, false
+}
+
+func (d *scanDemuxer) feedChunk(chunk []byte) {
+	data := chunk
+	if len(d.leftover) > 0 {
+		data = append(d.leftover, data...)
+		d.leftover = nil
 	}
-	offset := 4
-	adapt := (pkt[3] >> 4) & 0x03
-	if adapt == 2 {
-		return 0, false
+
+	// Synchronize to 188-byte MPEG-TS packet boundary starting with 0x47
+	if !d.synced {
+		syncIdx := -1
+		for i := 0; i+188 < len(data); i++ {
+			if data[i] == 0x47 && data[i+188] == 0x47 {
+				if i+188*2 < len(data) && data[i+188*2] != 0x47 {
+					continue
+				}
+				syncIdx = i
+				break
+			}
+		}
+		if syncIdx < 0 {
+			if len(data) > 188 {
+				d.leftover = append(d.leftover, data[len(data)-188:]...)
+			} else {
+				d.leftover = append(d.leftover, data...)
+			}
+			return
+		}
+		data = data[syncIdx:]
+		d.synced = true
 	}
-	if adapt == 3 {
-		offset += 1 + int(pkt[4])
+
+	if len(data) > 0 && data[0] != 0x47 {
+		d.synced = false
+		d.leftover = append(d.leftover, data...)
+		if len(d.leftover) > 64*1024 {
+			d.leftover = d.leftover[len(d.leftover)-188:]
+		}
+		return
 	}
-	if offset >= 188 {
-		return 0, false
+
+	// Preserve trailing incomplete TS packet for the next read
+	rem := len(data) % 188
+	if rem > 0 {
+		d.leftover = append(d.leftover, data[len(data)-rem:]...)
+		data = data[:len(data)-rem]
 	}
-	ptr := int(pkt[offset])
-	secOffset := offset + 1 + ptr
-	if secOffset >= 188 {
-		return 0, false
+
+	for i := 0; i+188 <= len(data); i += 188 {
+		pkt := data[i : i+188]
+		if pkt[0] != 0x47 {
+			d.synced = false
+			break
+		}
+
+		// Skip packets with Transport Error Indicator (TEI) set
+		if (pkt[1] & 0x80) != 0 {
+			continue
+		}
+
+		pid := (int(pkt[1]&0x1F) << 8) | int(pkt[2])
+		pusi := (pkt[1] & 0x40) != 0
+
+		_, isPMT := d.pmtPIDs[pid]
+		_, isAIT := d.aitPIDs[pid]
+		if pid != 0x0000 && pid != 0x0011 && !isPMT && !isAIT {
+			continue
+		}
+
+		adapt := (pkt[3] >> 4) & 0x03
+		if adapt == 2 {
+			continue // adaptation field only
+		}
+		offset := 4
+		if adapt == 3 {
+			adaptLen := int(pkt[4])
+			offset += 1 + adaptLen
+		}
+		if offset >= 188 {
+			continue
+		}
+
+		payload := pkt[offset:]
+		if len(payload) == 0 {
+			continue
+		}
+
+		var sectionsToProcess [][]byte
+
+		if pusi {
+			pointerField := int(payload[0])
+			if len(d.pendingSec[pid]) > 0 {
+				if pointerField > 0 {
+					avail := pointerField
+					if avail > len(payload)-1 {
+						avail = len(payload) - 1
+					}
+					d.pendingSec[pid] = append(d.pendingSec[pid], payload[1:1+avail]...)
+				}
+				if len(d.pendingSec[pid]) >= d.expectedLen[pid] {
+					sectionsToProcess = append(sectionsToProcess, d.pendingSec[pid][:d.expectedLen[pid]])
+				}
+			}
+			d.pendingSec[pid] = nil
+			d.expectedLen[pid] = 0
+
+			secStart := 1 + pointerField
+			if secStart < len(payload) {
+				curr := payload[secStart:]
+				for len(curr) >= 3 {
+					if curr[0] == 0xFF {
+						break // stuffing
+					}
+					secLen := (int(curr[1]&0x0F) << 8) | int(curr[2])
+					totalLen := secLen + 3
+					if secLen < 1 || totalLen > 4096 {
+						break
+					}
+					if len(curr) >= totalLen {
+						sectionsToProcess = append(sectionsToProcess, curr[:totalLen])
+						curr = curr[totalLen:]
+					} else {
+						d.pendingSec[pid] = append([]byte(nil), curr...)
+						d.expectedLen[pid] = totalLen
+						break
+					}
+				}
+			}
+		} else {
+			if len(d.pendingSec[pid]) > 0 {
+				d.pendingSec[pid] = append(d.pendingSec[pid], payload...)
+				if len(d.pendingSec[pid]) >= d.expectedLen[pid] {
+					sectionsToProcess = append(sectionsToProcess, d.pendingSec[pid][:d.expectedLen[pid]])
+					d.pendingSec[pid] = nil
+					d.expectedLen[pid] = 0
+				}
+			}
+		}
+
+		for _, sec := range sectionsToProcess {
+			d.processSection(pid, sec)
+		}
 	}
-	return secOffset, true
+}
+
+func (d *scanDemuxer) processSection(pid int, sec []byte) {
+	if len(sec) < 3 {
+		return
+	}
+	tableID := sec[0]
+
+	// 1. PAT (PID 0x0000, Table ID 0x00)
+	if pid == 0x0000 && tableID == 0x00 {
+		secLen := (int(sec[1]&0x0F) << 8) | int(sec[2])
+		end := 3 + secLen - 4 // minus CRC
+		if end > len(sec) {
+			end = len(sec)
+		}
+		for p := 8; p+4 <= end; p += 4 {
+			sid := (int(sec[p]) << 8) | int(sec[p+1])
+			pmtPID := (int(sec[p+2]&0x1F) << 8) | int(sec[p+3])
+			if sid != 0 {
+				d.patServices[sid] = pmtPID
+				d.pmtPIDs[pmtPID] = sid
+			}
+		}
+		return
+	}
+
+	// 2. SDT: Actual transport stream ONLY (PID 0x0011, Table ID 0x42)
+	// ETSI EN 300 468: 0x42 is actual TS; 0x46 is other TS.
+	// SDT other (0x46) MUST be ignored so channels from other multiplexes are not wrongly assigned.
+	if pid == 0x0011 && tableID == 0x42 {
+		parseSDT(sec, d.serviceNames, d.serviceTypes)
+		return
+	}
+
+	// 3. PMT (PID in pmtPIDs, Table ID 0x02)
+	if sid, isPMT := d.pmtPIDs[pid]; isPMT && tableID == 0x02 && len(sec) >= 12 {
+		progInfoLen := (int(sec[10]&0x0F) << 8) | int(sec[11])
+		esOffset := 12 + progInfoLen
+		end := len(sec) - 4
+		if end > len(sec) {
+			end = len(sec)
+		}
+
+		pids := d.servicePIDs[sid]
+		for p := esOffset; p+5 <= end; {
+			stype := sec[p]
+			elemPID := (int(sec[p+1]&0x1F) << 8) | int(sec[p+2])
+			esInfoLen := (int(sec[p+3]&0x0F) << 8) | int(sec[p+4])
+			descEnd := p + 5 + esInfoLen
+			if descEnd > end {
+				descEnd = end
+			}
+
+			// Video Stream Types (MPEG1/2, H.264, HEVC, AVS)
+			if pids.vPID == 0 && (stype == 0x01 || stype == 0x02 || stype == 0x1B || stype == 0x24 || stype == 0x42) {
+				pids.vPID = elemPID
+			}
+			// Audio Stream Types (MPEG audio, AAC ADTS, AAC LATM, AC-3)
+			if pids.aPID == 0 && (stype == 0x03 || stype == 0x04 || stype == 0x0F || stype == 0x11 || stype == 0x81) {
+				pids.aPID = elemPID
+			}
+			if stype == 0x05 || stype == 0x0B {
+				d.aitPIDs[elemPID] = sid
+			}
+
+			for dPos := p + 5; dPos+2 <= descEnd; {
+				dtag := sec[dPos]
+				dlen := int(sec[dPos+1])
+				if dtag == 0x6F { // application_signalling_descriptor
+					d.aitPIDs[elemPID] = sid
+				}
+				if dtag == 0x56 { // teletext_descriptor
+					d.serviceTeletext[sid] = true
+				}
+				if pids.aPID == 0 && (dtag == 0x6A || dtag == 0x7A || dtag == 0x7B) {
+					pids.aPID = elemPID
+				}
+				dPos += 2 + dlen
+			}
+			p = descEnd
+		}
+		d.servicePIDs[sid] = pids
+		return
+	}
+
+	// 4. AIT (Table ID 0x74)
+	if tableID == 0x74 {
+		url := ParseAITSection(sec)
+		if url != "" {
+			sid := d.aitPIDs[pid]
+			if sid != 0 {
+				d.serviceHbbTV[sid] = url
+			} else {
+				for s, name := range d.serviceNames {
+					if d.serviceHbbTV[s] == "" && strings.Contains(strings.ToUpper(string(sec)), strings.ToUpper(name)) {
+						d.serviceHbbTV[s] = url
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
+func (d *scanDemuxer) isComplete() bool {
+	if len(d.patServices) == 0 {
+		return false
+	}
+	for sid := range d.patServices {
+		if _, ok := d.serviceNames[sid]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *scanDemuxer) channels(freq int64, deliverySys string, nextNum *int) []db.Channel {
+	bw := 8000000
+	if freq < 300000000 {
+		bw = 7000000
+	}
+
+	var results []db.Channel
+	if len(d.patServices) > 0 {
+		var sids []int
+		for sid := range d.patServices {
+			sids = append(sids, sid)
+		}
+		sort.Ints(sids)
+
+		for _, sid := range sids {
+			name := d.serviceNames[sid]
+			if name == "" {
+				name = fmt.Sprintf("Service %d", sid)
+			}
+			pids := d.servicePIDs[sid]
+			sType := d.serviceTypes[sid]
+			isRadio := (sType == 0x02 || sType == 0x07 || sType == 0x0A)
+			results = append(results, db.Channel{
+				Name:           name,
+				Number:         *nextNum,
+				Frequency:      freq,
+				Bandwidth:      bw,
+				DeliverySystem: deliverySys,
+				ServiceID:      sid,
+				VideoPID:       pids.vPID,
+				AudioPID:       pids.aPID,
+				Enabled:        true,
+				IsRadio:        isRadio,
+				HasTeletext:    d.serviceTeletext[sid],
+				HbbtvURL:       d.serviceHbbTV[sid],
+			})
+			*nextNum++
+		}
+	} else if len(d.serviceNames) > 0 {
+		var sids []int
+		for sid := range d.serviceNames {
+			sids = append(sids, sid)
+		}
+		sort.Ints(sids)
+
+		for _, sid := range sids {
+			name := d.serviceNames[sid]
+			pids := d.servicePIDs[sid]
+			sType := d.serviceTypes[sid]
+			isRadio := (sType == 0x02 || sType == 0x07 || sType == 0x0A)
+			results = append(results, db.Channel{
+				Name:           name,
+				Number:         *nextNum,
+				Frequency:      freq,
+				Bandwidth:      bw,
+				DeliverySystem: deliverySys,
+				ServiceID:      sid,
+				VideoPID:       pids.vPID,
+				AudioPID:       pids.aPID,
+				Enabled:        true,
+				IsRadio:        isRadio,
+				HasTeletext:    d.serviceTeletext[sid],
+				HbbtvURL:       d.serviceHbbTV[sid],
+			})
+			*nextNum++
+		}
+	}
+
+	return results
 }
 
 // readChannelsFromTS reads MPEG-TS from dvr0 to extract SDT (Names), PAT/PMT (PIDs) & AIT (HbbTV URLs)
-func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum *int) []db.Channel {
-	fd, err := syscall.Open(dvrPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil
+func readChannelsFromTS(dvrFD int, freq int64, deliverySys string, nextNum *int) []db.Channel {
+	// Drain any residual stale packets from kernel buffer before scanning this frequency
+	drainBuf := make([]byte, 64*1024)
+	for {
+		n, _ := syscall.Read(dvrFD, drainBuf)
+		if n <= 0 {
+			break
+		}
 	}
-	defer syscall.Close(fd)
 
-	serviceNames := make(map[int]string)
-	serviceTypes := make(map[int]int)
-	servicePIDs := make(map[int]struct{ vPID, aPID int })
-	serviceHbbTV := make(map[int]string)
-	serviceTeletext := make(map[int]bool)
-	pmtPIDs := make(map[int]int) // pmtPID -> serviceID
-	aitPIDs := make(map[int]int) // aitPID -> serviceID
-
-	buf := make([]byte, 188*50)
-	deadline := time.Now().Add(2500 * time.Millisecond)
+	demuxer := newScanDemuxer()
+	buf := make([]byte, 32*1024)
+	deadline := time.Now().Add(3000 * time.Millisecond)
+	startTime := time.Now()
 
 	for time.Now().Before(deadline) {
-		n, err := syscall.Read(fd, buf)
+		n, err := syscall.Read(dvrFD, buf)
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
 				time.Sleep(20 * time.Millisecond)
@@ -420,125 +762,19 @@ func readChannelsFromTS(dvrPath string, freq int64, deliverySys string, nextNum 
 			}
 			break
 		}
-		if n < 188 {
+		if n <= 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
-		for i := 0; i+188 <= n; i += 188 {
-			pkt := buf[i : i+188]
-			pid := (int(pkt[1]&0x1F) << 8) | int(pkt[2])
+		demuxer.feedChunk(buf[:n])
 
-			secOffset, ok := getSectionPayload(pkt)
-			if !ok {
-				continue
-			}
-
-			// SDT (Service Description Table) has PID 0x0011 (17)
-			if pid == 0x0011 {
-				parseSDT(pkt[secOffset:], serviceNames, serviceTypes)
-			}
-
-			// PAT (Program Association Table): PID 0x0000, table_id 0x00
-			if pid == 0x0000 && pkt[secOffset] == 0x00 {
-				secLen := (int(pkt[secOffset+1]&0x0F) << 8) | int(pkt[secOffset+2])
-				end := secOffset + 3 + secLen - 4
-				if end > 188 {
-					end = 188
-				}
-				for p := secOffset + 8; p+4 <= end; p += 4 {
-					sid := (int(pkt[p]) << 8) | int(pkt[p+1])
-					pmtPID := (int(pkt[p+2]&0x1F) << 8) | int(pkt[p+3])
-					if sid != 0 {
-						pmtPIDs[pmtPID] = sid
-					}
-				}
-			}
-
-			// PMT (Program Map Table): PID in pmtPIDs, table_id 0x02
-			if sid, isPMT := pmtPIDs[pid]; isPMT && pkt[secOffset] == 0x02 {
-				progInfoLen := (int(pkt[secOffset+8]&0x0F) << 8) | int(pkt[secOffset+9])
-				esOffset := secOffset + 12 + progInfoLen
-				secLen := (int(pkt[secOffset+1]&0x0F) << 8) | int(pkt[secOffset+2])
-				end := secOffset + 3 + secLen - 4
-				if end > 188 {
-					end = 188
-				}
-				for p := esOffset; p+5 <= end; {
-					stype := pkt[p]
-					elemPID := (int(pkt[p+1]&0x1F) << 8) | int(pkt[p+2])
-					esInfoLen := (int(pkt[p+3]&0x0F) << 8) | int(pkt[p+4])
-					if stype == 0x05 || stype == 0x0B {
-						aitPIDs[elemPID] = sid
-					}
-					descEnd := p + 5 + esInfoLen
-					if descEnd > end {
-						descEnd = end
-					}
-					for d := p + 5; d+2 <= descEnd; {
-						dtag := pkt[d]
-						dlen := int(pkt[d+1])
-						if dtag == 0x6F { // application_signalling_descriptor
-							aitPIDs[elemPID] = sid
-						}
-						if dtag == 0x56 { // teletext_descriptor
-							serviceTeletext[sid] = true
-						}
-						d += 2 + dlen
-					}
-					p = descEnd
-				}
-			}
-
-			// AIT (Application Information Table): table_id 0x74
-			if pkt[secOffset] == 0x74 {
-				url := ParseAITSection(pkt[secOffset:])
-				if url != "" {
-					sid := aitPIDs[pid]
-					if sid != 0 {
-						serviceHbbTV[sid] = url
-					} else {
-						// Fallback: match by service name in section bytes
-						for s, name := range serviceNames {
-							if serviceHbbTV[s] == "" && strings.Contains(strings.ToUpper(string(pkt[secOffset:])), strings.ToUpper(name)) {
-								serviceHbbTV[s] = url
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if len(serviceNames) > 0 {
-			time.Sleep(150 * time.Millisecond)
+		if time.Since(startTime) > 1000*time.Millisecond && demuxer.isComplete() {
+			break
 		}
 	}
 
-	var results []db.Channel
-	for sid, name := range serviceNames {
-		pids := servicePIDs[sid]
-		sType := serviceTypes[sid]
-		// ETSI EN 300 468: 0x02 = digital radio sound service, 0x07 = FM radio, 0x0A = advanced codec radio
-		isRadio := (sType == 0x02 || sType == 0x07 || sType == 0x0A)
-		results = append(results, db.Channel{
-			Name:           name,
-			Number:         *nextNum,
-			Frequency:      freq,
-			Bandwidth:      8000000,
-			DeliverySystem: deliverySys,
-			ServiceID:      sid,
-			VideoPID:       pids.vPID,
-			AudioPID:       pids.aPID,
-			Enabled:        true,
-			IsRadio:        isRadio,
-			HasTeletext:    serviceTeletext[sid],
-			HbbtvURL:       serviceHbbTV[sid],
-		})
-		*nextNum++
-	}
-
-	return results
+	return demuxer.channels(freq, deliverySys, nextNum)
 }
 
 // parseSDT parses Service Names and Types from DVB SDT section
@@ -547,7 +783,9 @@ func parseSDT(sec []byte, serviceNames map[int]string, serviceTypes map[int]int)
 		return
 	}
 	tableID := sec[0]
-	if tableID != 0x42 && tableID != 0x46 {
+	// ETSI EN 300 468: Only table_id 0x42 represents the actual transport stream.
+	// 0x46 is "other transport stream" which must not be parsed into the current multiplex.
+	if tableID != 0x42 {
 		return
 	}
 
@@ -558,6 +796,9 @@ func parseSDT(sec []byte, serviceNames map[int]string, serviceTypes map[int]int)
 
 	offset := 11
 	endOffset := sectionLength + 3 - 4 // minus CRC
+	if endOffset > len(sec) {
+		endOffset = len(sec)
+	}
 
 	for offset+5 <= endOffset {
 		serviceID := int(binary.BigEndian.Uint16(sec[offset : offset+2]))
@@ -569,18 +810,18 @@ func parseSDT(sec []byte, serviceNames map[int]string, serviceTypes map[int]int)
 			break
 		}
 
-		for offset+2 <= descEnd {
-			tag := sec[offset]
-			length := int(sec[offset+1])
-			offset += 2
+		for d := offset; d+2 <= descEnd; {
+			tag := sec[d]
+			length := int(sec[d+1])
+			d += 2
 
-			if offset+length > descEnd {
+			if d+length > descEnd {
 				break
 			}
 
 			// Service Descriptor Tag 0x48
 			if tag == 0x48 && length >= 3 {
-				data := sec[offset : offset+length]
+				data := sec[d : d+length]
 				serviceTypes[serviceID] = int(data[0])
 				providerLen := int(data[1])
 				nameOffset := 2 + providerLen
@@ -595,7 +836,8 @@ func parseSDT(sec []byte, serviceNames map[int]string, serviceTypes map[int]int)
 				}
 			}
 
-			offset += length
+			d += length
 		}
+		offset = descEnd
 	}
 }
