@@ -215,16 +215,15 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		}
 	} else if cfg.IsRadio {
 		// Radio station (audio-only): synthesize a lightweight static video background
-		// and normalize audio timestamps with aresample so browser <video> engines maintain flawless timing
+		// so browser <video> engines maintain flawless timing and synchronized playback
 		audioMap := fmt.Sprintf("0:a:%d?", audioIdx)
 		if cfg.ServiceID > 0 {
 			audioMap = fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
 		}
-		filter := fmt.Sprintf("color=c=0x0f172a:s=1280x720:r=10[v];[%s]asetpts=PTS-STARTPTS,aresample=async=1000[a]", audioMap)
 		args = append(args,
-			"-filter_complex", filter,
+			"-filter_complex", "color=c=0x0f172a:s=1280x720:r=10[v]",
 			"-map", "[v]",
-			"-map", "[a]",
+			"-map", audioMap,
 		)
 	} else if cfg.ServiceID > 0 {
 		audioMap := fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
@@ -235,7 +234,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
 			}
 			filter := fmt.Sprintf(
-				"[0:p:%d:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];"+
+				"[0:p:%d:v:0]bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1[main];"+
 					"[0:p:%d:s:%d]%sformat=yuva420p[sub];"+
 					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
 				cfg.ServiceID, cfg.ServiceID, subIdx, subPtsChain,
@@ -247,7 +246,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			)
 		} else {
 			if hw != HW_VAAPI {
-				args = append(args, "-vf", "yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1")
+				args = append(args, "-vf", "bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1")
 			}
 			args = append(args,
 				"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
@@ -262,7 +261,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
 			}
 			filter := fmt.Sprintf(
-				"[0:v:0]yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1[main];"+
+				"[0:v:0]bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1[main];"+
 					"[0:s:%d]%sformat=yuva420p[sub];"+
 					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
 				subIdx, subPtsChain,
@@ -274,7 +273,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			)
 		} else {
 			if hw != HW_VAAPI {
-				args = append(args, "-vf", "yadif=mode=0:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih,setsar=1")
+				args = append(args, "-vf", "bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1")
 			}
 			args = append(args,
 				"-map", "0:v:0?",
@@ -324,9 +323,11 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			// Universal CPU fallback
 			args = append(args,
 				"-c:v", "libx264",
-				"-preset", "ultrafast",
+				"-preset", "veryfast",
 				"-tune", "zerolatency",
 				"-b:v", bitrate,
+				"-maxrate", bitrate,
+				"-bufsize", bitrate,
 				"-g", "15",
 				"-bf", "0",
 				"-pix_fmt", "yuv420p",
@@ -345,6 +346,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		"-b:a", audioBitrate,
 		"-ar", "48000",
 		"-ac", "2",
+		"-af", "aresample=async=1000",
 		"-f", "mpegts",
 		"-muxdelay", "0",
 		"-muxpreload", "0",

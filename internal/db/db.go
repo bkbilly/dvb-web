@@ -231,8 +231,8 @@ func (d *Database) migrate() error {
 	defaults := map[string]string{
 		"preferred_language": "eng",
 		"transcoder_mode":    "auto", // auto, vaapi, nvenc, v4l2m2m, cpu
-		"video_bitrate":      "2500k",
-		"video_preset":       "ultrafast",
+		"video_bitrate":      "4500k",
+		"video_preset":       "veryfast",
 		"idle_timeout_sec":   "15",
 	}
 
