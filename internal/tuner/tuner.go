@@ -316,10 +316,14 @@ func (p *Pool) GetStatus() []TunerStatus {
 				sig = &SignalInfo{
 					HasLock:        true,
 					HasSignal:      true,
+					HasCarrier:     true,
+					HasViterbi:     true,
+					HasSync:        true,
 					SignalStrength: 95,
 					SignalQuality:  98,
 					SNR:            26.5,
 					BER:            0,
+					UNC:            0,
 				}
 			} else if t.frontendFD > 0 {
 				s := ReadFrontendSignalInfo(t.frontendFD)
@@ -1769,10 +1773,14 @@ func (t *Tuner) GetSignal() *SignalInfo {
 		return &SignalInfo{
 			HasLock:        true,
 			HasSignal:      true,
+			HasCarrier:     true,
+			HasViterbi:     true,
+			HasSync:        true,
 			SignalStrength: 95,
 			SignalQuality:  98,
 			SNR:            26.5,
 			BER:            0,
+			UNC:            0,
 		}
 	}
 	if t.frontendFD > 0 {

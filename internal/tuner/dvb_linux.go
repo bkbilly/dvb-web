@@ -19,9 +19,10 @@ const (
 	ioctlFEGetInfo            = 0x80a86f3d
 	ioctlFEReadStatus         = 0x80046f45
 	ioctlFEReadBER            = 0x80046f46
-	ioctlFEReadSignalStrength = 0x80026f47
-	ioctlFEReadSNR            = 0x80026f48
-	ioctlFESetProperty        = 0x40106f52
+	ioctlFEReadSignalStrength   = 0x80026f47
+	ioctlFEReadSNR              = 0x80026f48
+	ioctlFEReadUncorrectedBlocks = 0x80046f49
+	ioctlFESetProperty          = 0x40106f52
 
 	ioctlDMXStart         = 0x00006f29
 	ioctlDMXStop          = 0x00006f2a
@@ -192,10 +193,14 @@ func TuneFrontend(frontendPath string, freqHz uint32, bwHz uint32, deliverySyste
 type SignalInfo struct {
 	HasLock        bool    `json:"has_lock"`
 	HasSignal      bool    `json:"has_signal"`
+	HasCarrier     bool    `json:"has_carrier"`
+	HasViterbi     bool    `json:"has_viterbi"`
+	HasSync        bool    `json:"has_sync"`
 	SignalStrength int     `json:"signal_strength"` // 0-100%
 	SignalQuality  int     `json:"signal_quality"`  // 0-100%
 	SNR            float64 `json:"snr_db"`          // SNR in dB
 	BER            uint32  `json:"ber"`
+	UNC            uint32  `json:"unc"`
 }
 
 // ReadFrontendSignalInfo queries hardware signal metrics from an open frontend FD
@@ -211,8 +216,11 @@ func ReadFrontendSignalInfo(feFD int) SignalInfo {
 	}
 
 	info := SignalInfo{
-		HasLock:   (status & feHasLock) != 0,
-		HasSignal: (status & feHasSignal) != 0,
+		HasLock:    (status & feHasLock) != 0,
+		HasSignal:  (status & feHasSignal) != 0,
+		HasCarrier: (status & feHasCarrier) != 0,
+		HasViterbi: (status & feHasViterbi) != 0,
+		HasSync:    (status & feHasSync) != 0,
 	}
 
 	// Read Signal Strength (0..65535)
@@ -256,6 +264,13 @@ func ReadFrontendSignalInfo(feFD int) SignalInfo {
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(feFD), ioctlFEReadBER, uintptr(unsafe.Pointer(&rawBER)))
 	if errno == 0 {
 		info.BER = rawBER
+	}
+
+	// Read Uncorrected Blocks (UNC)
+	var rawUNC uint32
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(feFD), ioctlFEReadUncorrectedBlocks, uintptr(unsafe.Pointer(&rawUNC)))
+	if errno == 0 {
+		info.UNC = rawUNC
 	}
 
 	return info
