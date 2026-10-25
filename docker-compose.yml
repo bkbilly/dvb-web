@@ -8,9 +8,21 @@ services:
     devices:
       # Pass through all DVB TV tuners
       - /dev/dvb:/dev/dvb
-      # Pass through GPU for VA-API hardware acceleration (Intel/AMD)
-      - /dev/dri:/dev/dri
+      # Pass through Intel/AMD GPU for VA-API (uncomment if using Intel/AMD)
+      # - /dev/dri:/dev/dri
     volumes:
       - ./data:/app/data
     environment:
       - TZ=UTC
+      # NVIDIA GPU environment flags
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    # NVIDIA GPU Hardware Acceleration (NVENC)
+    # (Comment out the deploy block below if your system does not have an NVIDIA GPU)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
