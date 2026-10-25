@@ -19,6 +19,8 @@ import (
 	"dvb-web/internal/db"
 	"dvb-web/internal/epg"
 	"dvb-web/internal/transcoder"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -613,10 +615,11 @@ func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 	i := 0
 
 	for i+188 <= limit {
+		// Normal case: on the 188-byte grid with 0x47 sync byte
 		if input[i] == 0x47 {
 			pkt := input[i : i+188]
 			// Check Transport Error Indicator (TEI bit 0x80 in byte 1).
-			// Tuner demodulators set TEI when uncorrectable bit errors occur (high BER).
+			// Demodulator hardware sets TEI when bit errors cannot be corrected.
 			if (pkt[1] & 0x80) != 0 {
 				output = append(output, tsNullPacket[:]...)
 			} else {
@@ -626,10 +629,8 @@ func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 			continue
 		}
 
-		// input[i] != 0x47.
-		// Check if this is an isolated corrupted sync byte in an already aligned stream
-		// (e.g. single bit error flipping 0x47 in RF noise).
-		// If the next packet boundary has 0x47, our 188-byte cadence is intact!
+		// input[i] != 0x47: isolated sync byte bitflip on an aligned packet.
+		// If the next packet boundary (i+188) has 0x47, our 188-byte cadence is intact!
 		if i+188 < limit && input[i+188] == 0x47 {
 			output = append(output, tsNullPacket[:]...)
 			i += 188
@@ -642,16 +643,12 @@ func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 			continue
 		}
 
-		// If neither boundary matches, we have genuine framing loss (or unaligned stream start).
-		// Seek forward for a confirmed MPEG-TS sync sequence (at least 2 consecutive 0x47 bytes spaced by 188).
+		// Lock lost or unaligned stream start: search forward for a verified MPEG-TS packet boundary.
+		// To prevent false sync on 0x47 bytes in video/audio payload, require AT LEAST 2 consecutive
+		// 0x47 sync bytes separated by 188 bytes, and verify the 3rd if within buffer.
 		found := false
-		for j := i + 1; j+188 <= limit; j++ {
-			if input[j] == 0x47 {
-				// Require the next 188-byte boundary to also have 0x47 (if within buffer)
-				if j+188*2 <= limit && input[j+188] != 0x47 {
-					continue
-				}
-				// And require the 3rd boundary if available
+		for j := i + 1; j+188*2 <= limit; j++ {
+			if input[j] == 0x47 && input[j+188] == 0x47 {
 				if j+188*3 <= limit && input[j+376] != 0x47 {
 					continue
 				}
@@ -662,11 +659,12 @@ func SanitizeAndSyncTS(input []byte, leftover []byte) ([]byte, []byte) {
 		}
 
 		if !found {
-			// No confirmed sync sequence in remainder of buffer.
-			// Preserve up to 3 packets of unaligned tail in leftover so next read can sync.
+			// Cannot verify genuine 188-byte packet sequence in remaining bytes.
+			// Preserve remaining unaligned tail (up to 188*3 bytes) in leftover so the
+			// next read can complete and verify the sync sequence.
 			rem := limit - i
-			if rem > 187*3 {
-				rem = 187 * 3
+			if rem > 188*3 {
+				rem = 188 * 3
 			}
 			newLeftover := make([]byte, rem)
 			copy(newLeftover, input[limit-rem:])
@@ -726,8 +724,10 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 	go func() {
 		defer close(tsQueue)
 		defer close(parseQueue)
-		readBuf := make([]byte, 188*128) // 24KB chunk
+		readBuf := make([]byte, 188*256) // 48KB chunk
 		var leftover []byte
+
+		pfd := []unix.PollFd{{Fd: int32(dvrFD), Events: unix.POLLIN}}
 
 		for {
 			select {
@@ -736,10 +736,22 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 			default:
 			}
 
+			// Sub-millisecond reactive wakeup as soon as packets arrive from the kernel demux ring buffer.
+			// Times out after 50ms so we can periodically re-check tsCtx.Done().
+			nReady, err := unix.Poll(pfd, 50)
+			if err != nil {
+				if err == unix.EINTR {
+					continue
+				}
+				return
+			}
+			if nReady == 0 {
+				continue
+			}
+
 			n, err := syscall.Read(dvrFD, readBuf)
 			if err != nil {
-				if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-					time.Sleep(10 * time.Millisecond)
+				if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || err == syscall.EINTR {
 					continue
 				}
 				return

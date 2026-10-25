@@ -93,6 +93,13 @@ func StartDemuxWildcard(demuxPath string) (int, error) {
 		return -1, fmt.Errorf("failed to open demux %s: %w", demuxPath, err)
 	}
 
+	// Expand kernel demux ring buffer to 8MB BEFORE setting the filter.
+	// In the Linux DVB driver (dmxdev.c), DMX_SET_BUFFER_SIZE returns -EBUSY if called after DMX_SET_PES_FILTER.
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlDMXSetBufferSize, uintptr(8*1024*1024))
+	if errno != 0 {
+		log.Printf("[DVB] Warning: DMX_SET_BUFFER_SIZE (8MB) failed: %v", errno)
+	}
+
 	p := dmxPesFilterParams{
 		pid:     0x2000, // Wildcard pass all PIDs
 		input:   0,      // DMX_IN_FRONTEND
@@ -101,14 +108,11 @@ func StartDemuxWildcard(demuxPath string) (int, error) {
 		flags:   0,
 	}
 
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlDMXSetPesFilter, uintptr(unsafe.Pointer(&p)))
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlDMXSetPesFilter, uintptr(unsafe.Pointer(&p)))
 	if errno != 0 {
 		syscall.Close(fd)
 		return -1, fmt.Errorf("DMX_SET_PES_FILTER failed: %v", errno)
 	}
-
-	// Expand kernel demux ring buffer to 4MB to prevent packet drops under load
-	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlDMXSetBufferSize, uintptr(4*1024*1024))
 
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlDMXStart, 0)
 	if errno != 0 {
