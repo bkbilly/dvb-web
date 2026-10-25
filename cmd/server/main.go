@@ -86,6 +86,12 @@ func main() {
 			seedInitialChannels(database)
 			channels, _ = database.ListChannels()
 			epg.SeedMockEPG(database, channels)
+		} else {
+			allEPG, _ := database.GetAllEPG(time.Now().Add(-2*time.Hour), time.Now().Add(48*time.Hour))
+			if len(allEPG) == 0 {
+				log.Println("[Init] Mock mode active: Seeding sample EPG programs...")
+				epg.SeedMockEPG(database, channels)
+			}
 		}
 	}
 

@@ -51,6 +51,14 @@ type EPGEvent struct {
 	Genres       []string          `json:"genres"`
 }
 
+type EPGSearchResult struct {
+	EPGEvent
+	ChannelName   string `json:"channel_name"`
+	ChannelNumber int    `json:"channel_number"`
+	ChannelLogo   string `json:"channel_logo,omitempty"`
+	IsRadio       bool   `json:"is_radio"`
+}
+
 type Recording struct {
 	ID           int64     `json:"id"`
 	ChannelID    int64     `json:"channel_id"`
@@ -612,6 +620,63 @@ func (d *Database) GetAllEPG(from, to time.Time) ([]EPGEvent, error) {
 	defer rows.Close()
 
 	return d.scanEPGEvents(rows)
+}
+
+func (d *Database) SearchEPG(query string, limit int) ([]EPGSearchResult, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	nowStr := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
+	maxFutureStr := time.Now().UTC().Add(8 * 24 * time.Hour).Format("2006-01-02 15:04:05")
+	searchPattern := "%" + query + "%"
+
+	rows, err := d.db.Query(`
+		SELECT e.id, e.channel_id, e.event_id, e.start_time, e.end_time,
+		       e.titles_json, e.descriptions_json, e.genres_json,
+		       c.name, c.number, c.logo_url, c.is_radio
+		FROM epg_events e
+		JOIN channels c ON e.channel_id = c.id
+		WHERE (e.titles_json LIKE ? OR e.descriptions_json LIKE ?)
+		  AND e.end_time >= ? AND e.start_time <= ?
+		ORDER BY e.start_time ASC
+		LIMIT ?
+	`, searchPattern, searchPattern, nowStr, maxFutureStr, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []EPGSearchResult
+	for rows.Next() {
+		var res EPGSearchResult
+		var startRaw, endRaw interface{}
+		var titlesJSON, descJSON, genresJSON string
+		var isRadioInt int
+
+		err := rows.Scan(
+			&res.ID, &res.ChannelID, &res.EventID, &startRaw, &endRaw,
+			&titlesJSON, &descJSON, &genresJSON,
+			&res.ChannelName, &res.ChannelNumber, &res.ChannelLogo, &isRadioInt,
+		)
+		if err != nil {
+			continue
+		}
+
+		res.StartTime = parseDBTime(startRaw)
+		res.EndTime = parseDBTime(endRaw)
+		res.IsRadio = isRadioInt == 1
+
+		_ = json.Unmarshal([]byte(titlesJSON), &res.Titles)
+		_ = json.Unmarshal([]byte(descJSON), &res.Descriptions)
+		_ = json.Unmarshal([]byte(genresJSON), &res.Genres)
+
+		results = append(results, res)
+	}
+
+	if results == nil {
+		results = []EPGSearchResult{}
+	}
+	return results, nil
 }
 
 func (d *Database) getEventAt(channelID int64, t time.Time) *EPGEvent {

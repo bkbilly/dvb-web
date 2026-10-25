@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DVB-Web — Live TV & EPG</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=8">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220%22 fill=%22%233b82f6%22><text y=%2226%22 font-size=%2228%22>📺</text></svg>">
 </head>
 <body>
@@ -196,63 +196,66 @@
             </div>
           </div>
 
-          <!-- Timeshift Scrubber & Live Controls -->
-          <div id="timeshift-bar" class="timeshift-bar">
-            <button id="btn-timeshift-playpause" class="timeshift-btn" title="Pause / Resume Live TV (Space)">⏸</button>
-            <button id="btn-timeshift-rewind" class="timeshift-btn" title="Rewind 10 seconds (←)">⏪ <span class="ts-btn-label">10s</span></button>
-            <button id="btn-timeshift-forward" class="timeshift-btn" title="Forward 10 seconds (→)"><span class="ts-btn-label">10s</span> ⏩</button>
-            <div class="timeshift-track-wrap">
-              <input type="range" id="timeshift-slider" min="0" max="100" value="100" class="timeshift-slider" title="Seek in live broadcast buffer">
-              <div class="timeshift-time-labels">
-                <span id="timeshift-buffer-start">-00:00</span>
-                <span id="timeshift-current-offset" class="timeshift-offset-text">LIVE</span>
+          <!-- Player Bottom Bar (Timeshift + Controls Group) -->
+          <div id="player-bottom-bar" class="player-bottom-bar">
+            <!-- Timeshift Scrubber & Live Controls -->
+            <div id="timeshift-bar" class="timeshift-bar hidden">
+              <button id="btn-timeshift-playpause" class="timeshift-btn" title="Pause / Resume Live TV (Space)">⏸</button>
+              <button id="btn-timeshift-rewind" class="timeshift-btn" title="Rewind 10 seconds (←)">⏪ <span class="ts-btn-label">10s</span></button>
+              <button id="btn-timeshift-forward" class="timeshift-btn" title="Forward 10 seconds (→)"><span class="ts-btn-label">10s</span> ⏩</button>
+              <div class="timeshift-track-wrap">
+                <input type="range" id="timeshift-slider" min="0" max="100" value="100" class="timeshift-slider" title="Seek in live broadcast buffer">
+                <div class="timeshift-time-labels">
+                  <span id="timeshift-buffer-start">-00:00</span>
+                  <span id="timeshift-current-offset" class="timeshift-offset-text">LIVE</span>
+                </div>
               </div>
-            </div>
-            <button id="btn-timeshift-live" class="timeshift-live-pill is-live" title="Jump to Live Stream (L)">
-              <span class="live-dot">●</span> LIVE
-            </button>
-          </div>
-
-          <!-- Player Controls Bar -->
-          <div class="player-controls">
-            <button id="btn-prev-ch" class="ctrl-btn" title="Previous Channel">⏮</button>
-            <button id="btn-next-ch" class="ctrl-btn" title="Next Channel">⏭</button>
-            <div class="vol-group">
-              <button id="btn-mute" class="ctrl-btn" title="Mute/Unmute">🔊</button>
-              <input type="range" id="vol-slider" min="0" max="1" step="0.05" value="1" class="vol-slider">
-            </div>
-            <div class="player-spacer"></div>
-
-            <!-- Instant Record Button -->
-            <button id="btn-record-instant" class="ctrl-btn rec-btn" title="Instant Record Active Channel">
-              <span class="rec-dot">⏺</span> <span class="rec-text">Record</span>
-            </button>
-
-            <!-- Audio Track Dropdown -->
-            <div class="track-dropdown-wrap hidden" id="audio-dropdown-wrap">
-              <button id="btn-audio-select" class="ctrl-btn track-select-btn" title="Select Audio Track">🎧 Audio</button>
-              <div id="audio-tracks-menu" class="track-menu hidden"></div>
+              <button id="btn-timeshift-live" class="timeshift-live-pill is-live" title="Jump to Live Stream (L)">
+                <span class="live-dot">●</span> LIVE
+              </button>
             </div>
 
-            <!-- Subtitles Track Dropdown -->
-            <div class="track-dropdown-wrap hidden" id="sub-dropdown-wrap">
-              <button id="btn-sub-select" class="ctrl-btn track-select-btn" title="Select Subtitles (Burned In-Sync)">💬 Subs</button>
-              <div id="sub-tracks-menu" class="track-menu hidden"></div>
+            <!-- Player Controls Bar -->
+            <div class="player-controls">
+              <button id="btn-prev-ch" class="ctrl-btn" title="Previous Channel">⏮</button>
+              <button id="btn-next-ch" class="ctrl-btn" title="Next Channel">⏭</button>
+              <div class="vol-group">
+                <button id="btn-mute" class="ctrl-btn" title="Mute/Unmute">🔊</button>
+                <input type="range" id="vol-slider" min="0" max="1" step="0.05" value="1" class="vol-slider">
+              </div>
+              <div class="player-spacer"></div>
+
+              <!-- Instant Record Button -->
+              <button id="btn-record-instant" class="ctrl-btn rec-btn hidden" title="Instant Record Active Channel">
+                <span class="rec-dot">⏺</span> <span class="rec-text">Record</span>
+              </button>
+
+              <!-- Audio Track Dropdown -->
+              <div class="track-dropdown-wrap hidden" id="audio-dropdown-wrap">
+                <button id="btn-audio-select" class="ctrl-btn track-select-btn" title="Select Audio Track">🎧 Audio</button>
+                <div id="audio-tracks-menu" class="track-menu hidden"></div>
+              </div>
+
+              <!-- Subtitles Track Dropdown -->
+              <div class="track-dropdown-wrap hidden" id="sub-dropdown-wrap">
+                <button id="btn-sub-select" class="ctrl-btn track-select-btn" title="Select Subtitles (Burned In-Sync)">💬 Subs</button>
+                <div id="sub-tracks-menu" class="track-menu hidden"></div>
+              </div>
+
+              <!-- Teletext Button (Shown when available) -->
+              <button id="btn-teletext-ctrl" class="ctrl-btn teletext-ctrl-btn hidden" title="Teletext Viewer (T)">📟 TXT</button>
+
+              <!-- HbbTV Button (Shown when available) -->
+              <button id="btn-hbbtv-ctrl" class="ctrl-btn hbbtv-ctrl-btn hidden" title="HbbTV Interactive Portal (H)"><span class="red-dot"></span> HbbTV</button>
+
+              <!-- Aspect Ratio Dropdown -->
+              <div class="track-dropdown-wrap" id="aspect-dropdown-wrap">
+                <button id="btn-aspect-ratio" class="ctrl-btn aspect-btn" title="Select Aspect Ratio">16:9</button>
+                <div id="aspect-ratio-menu" class="track-menu hidden"></div>
+              </div>
+
+              <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
             </div>
-
-            <!-- Teletext Button (Shown when available) -->
-            <button id="btn-teletext-ctrl" class="ctrl-btn teletext-ctrl-btn hidden" title="Teletext Viewer (T)">📟 TXT</button>
-
-            <!-- HbbTV Button (Shown when available) -->
-            <button id="btn-hbbtv-ctrl" class="ctrl-btn hbbtv-ctrl-btn hidden" title="HbbTV Interactive Portal (H)"><span class="red-dot"></span> HbbTV</button>
-
-            <!-- Aspect Ratio Dropdown -->
-            <div class="track-dropdown-wrap" id="aspect-dropdown-wrap">
-              <button id="btn-aspect-ratio" class="ctrl-btn aspect-btn" title="Select Aspect Ratio">16:9</button>
-              <div id="aspect-ratio-menu" class="track-menu hidden"></div>
-            </div>
-
-            <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
           </div>
         </div>
 
@@ -260,7 +263,7 @@
         <aside class="channel-sidebar">
           <div class="sidebar-header">
             <h3>Channels</h3>
-            <input type="text" id="channel-search" placeholder="Filter channels..." class="channel-search-input">
+            <input type="search" id="channel-search" placeholder="Filter channels..." class="channel-search-input">
             <div class="channel-type-filters hidden">
               <button class="ch-type-btn active" data-type="all">All</button>
               <button class="ch-type-btn" data-type="tv">📺 TV</button>
@@ -283,18 +286,23 @@
               <h2 class="epg-title">Live TV Guide</h2>
               <span id="epg-live-clock" class="epg-live-clock">--:--:--</span>
             </div>
+            <div class="epg-search-container">
+              <div class="epg-search-input-wrap">
+                <span class="epg-search-icon">🔍</span>
+                <input type="text" id="epg-search-input" class="epg-search-input" placeholder="Search programs or movies..." autocomplete="off">
+                <button type="button" id="btn-epg-search-clear" class="epg-search-clear hidden" title="Clear search">&times;</button>
+              </div>
+              <div id="epg-search-dropdown" class="epg-search-dropdown hidden"></div>
+            </div>
           </div>
           <div class="epg-day-selector" id="epg-day-selector">
             <!-- Dynamically populated day tabs: Today, Tomorrow, +2d... -->
           </div>
           <div class="toolbar-right">
             <button id="btn-epg-prev" class="btn btn-secondary epg-nav-btn" title="Scroll 2 hours back">◀ -2h</button>
-            <button id="btn-epg-now" class="btn btn-primary epg-nav-btn" title="Jump to Current Time">
-              <span class="btn-now-dot">🔴</span>
-              <span class="btn-now-text-full">Jump to Current Time</span>
-              <span class="btn-now-text-short">Now</span>
-            </button>
+            <button id="btn-epg-now" class="btn btn-primary epg-nav-btn" title="Jump to Current Time">🔴 Now</button>
             <button id="btn-epg-next" class="btn btn-secondary epg-nav-btn" title="Scroll 2 hours forward">+2h ▶</button>
+            <button id="btn-epg-refresh" class="btn btn-secondary epg-nav-btn" title="Refresh TV Guide">🔄</button>
           </div>
         </div>
 
@@ -870,6 +878,6 @@
   </div>
 
   <script src="mpegts.min.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

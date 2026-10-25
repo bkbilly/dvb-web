@@ -217,6 +217,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupSettingsUI();
   setupKeybindings();
   setupRouting();
+  setupEPGSearch();
+
+  updateInstantRecordButton();
+  updateTimeshiftUI();
 
   await loadInitialSettings();
   await loadChannels();
@@ -225,6 +229,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Video playback listener
   video.addEventListener('playing', () => {
     standbyOverlay.classList.add('hidden');
+    updateInstantRecordButton();
+    updateTimeshiftUI();
     const streamLoader = document.getElementById('stream-loader');
     if (streamLoader) {
       streamLoader.style.opacity = '0';
@@ -267,7 +273,24 @@ function handleRoute() {
   switchTab(hash);
 }
 
+let lastEPGLoadTime = 0;
+
+function clearChannelFilter() {
+  const searchInput = document.getElementById('channel-search');
+  if (searchInput && searchInput.value !== '') {
+    searchInput.value = '';
+  }
+  channelFilterType = 'all';
+  document.querySelectorAll('.ch-type-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.type === 'all');
+  });
+  renderChannelList('');
+}
+
 function switchTab(tabId) {
+  // Clear channel search filter whenever switching tabs so returning shows all channels fresh
+  clearChannelFilter();
+
   // Update nav buttons
   document.querySelectorAll('.nav-btn').forEach(btn => {
     btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
@@ -280,7 +303,12 @@ function switchTab(tabId) {
 
   // Trigger tab-specific loader
   if (tabId === 'epg') {
-    loadEPGTimeline(true);
+    if (!lastEPGLoadTime || (Date.now() - lastEPGLoadTime > 5 * 60 * 1000)) {
+      loadEPGTimeline(!lastEPGLoadTime);
+    } else {
+      updateEPGPlayingHighlight();
+      updateNowMarkerPosition();
+    }
   } else if (tabId === 'recordings') {
     loadRecordings();
   } else if (tabId === 'settings') {
@@ -578,6 +606,9 @@ if (searchInputEl) {
   searchInputEl.addEventListener('input', (e) => {
     renderChannelList(e.target.value);
   });
+  searchInputEl.addEventListener('search', (e) => {
+    renderChannelList(e.target.value);
+  });
 }
 
 document.querySelectorAll('.ch-type-btn').forEach(btn => {
@@ -668,6 +699,10 @@ function handleWSMessage(msg) {
       activeChannel.now_playing = msg.now_playing;
       activeChannel.next_playing = msg.next_playing;
       renderChannelList();
+      updateEPGPlayingHighlight();
+      updateInstantRecordButton();
+  updateTimeshiftUI();
+      updateTimeshiftUI();
       showOSD(activeChannel);
       if (msg.signal) {
         updateSignalDisplay(msg.signal);
@@ -687,6 +722,7 @@ function handleWSMessage(msg) {
         renderChannelList();
         updateHeaderTunerBadge();
         updateInstantRecordButton();
+  updateTimeshiftUI();
         const settingsTab = document.getElementById('tab-settings');
         if (settingsTab && settingsTab.classList.contains('active')) {
           refreshTunerStatus();
@@ -806,7 +842,13 @@ function updateRadioOverlay(channel) {
 
 function handleStreamStopped(reason = 'Stream was forced to stop', canRetry = true) {
   stopStream();
+  activeChannel = null;
   updateRadioOverlay(null);
+  updateEPGPlayingHighlight();
+  renderChannelList();
+  updateInstantRecordButton();
+  updateTimeshiftUI();
+  updateTimeshiftUI();
 
   // Reset tracks and hide track selector buttons when stream stops
   availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
@@ -917,6 +959,7 @@ function startStream(channel) {
   if (video) video.playbackRate = 1.0;
   stopStream();
   currentStreamingChannelId = channel.id;
+  updateEPGPlayingHighlight();
   resetStandbyCard();
   updateRadioOverlay(channel);
 
@@ -1029,8 +1072,11 @@ function zapToChannel(channel) {
     renderTrackMenus();
   }
   activeChannel = channel;
+  updateEPGPlayingHighlight();
+  renderChannelList();
   fetchAndRenderChannelTracks(channel.id);
   updateInstantRecordButton();
+  updateTimeshiftUI();
 
   // Unmute and ensure volume is up
   video.muted = false;
@@ -1108,6 +1154,10 @@ function showPlayerUI(channel) {
 
   const playerControls = document.querySelector('.player-controls');
   const timeshiftBar = document.getElementById('timeshift-bar');
+  const bottomBar = document.getElementById('player-bottom-bar');
+  if (bottomBar) {
+    bottomBar.classList.remove('controls-autohidden');
+  }
   if (playerControls) {
     playerControls.classList.remove('controls-autohidden');
   }
@@ -1144,12 +1194,15 @@ function schedulePlayerUIHide(delay = 3500) {
 
     const playerControls = document.querySelector('.player-controls');
     const timeshiftBar = document.getElementById('timeshift-bar');
+    const bottomBar = document.getElementById('player-bottom-bar');
     const wrapper = document.getElementById('video-wrapper');
     if (isControlsOverVideo()) {
+      if (bottomBar) bottomBar.classList.add('controls-autohidden');
       if (playerControls) playerControls.classList.add('controls-autohidden');
       if (timeshiftBar) timeshiftBar.classList.add('controls-autohidden');
       if (wrapper) wrapper.classList.add('cursor-hidden');
     } else {
+      if (bottomBar) bottomBar.classList.remove('controls-autohidden');
       if (playerControls) playerControls.classList.remove('controls-autohidden');
       if (timeshiftBar) timeshiftBar.classList.remove('controls-autohidden');
       if (wrapper) wrapper.classList.remove('cursor-hidden');
@@ -1460,13 +1513,15 @@ function applyAspectRatio(ar) {
 
 // Check if player controls bar intersects the actual rendered video content
 function isControlsOverVideo() {
+  const bottomBar = document.getElementById('player-bottom-bar');
   const playerControls = document.querySelector('.player-controls');
-  if (!video || !playerControls) return false;
+  const targetEl = bottomBar || playerControls;
+  if (!video || !targetEl) return false;
   const standby = document.getElementById('standby-overlay');
   if (standby && !standby.classList.contains('hidden')) return false;
 
   const videoRect = video.getBoundingClientRect();
-  const controlsRect = playerControls.getBoundingClientRect();
+  const controlsRect = targetEl.getBoundingClientRect();
 
   if (videoRect.width === 0 || videoRect.height === 0) return false;
 
@@ -1573,6 +1628,18 @@ function setupPlayerControls() {
   });
 
   // Hover & interaction listeners: do not hide OSD or controls while mouse is over them
+  const bottomBar = document.getElementById('player-bottom-bar');
+  if (bottomBar) {
+    bottomBar.addEventListener('mouseenter', () => {
+      isMouseOverControls = true;
+      showPlayerUI();
+    });
+    bottomBar.addEventListener('mouseleave', () => {
+      isMouseOverControls = false;
+      schedulePlayerUIHide(3500);
+    });
+  }
+
   const playerControls = document.querySelector('.player-controls');
   if (playerControls) {
     playerControls.addEventListener('mouseenter', () => {
@@ -1699,6 +1766,12 @@ function formatTimeshiftOffset(seconds) {
 }
 
 function updateTimeshiftUI() {
+  const bar = document.getElementById('timeshift-bar');
+  if (bar) {
+    bar.classList.toggle('hidden', !activeChannel);
+  }
+  if (!activeChannel) return;
+
   const slider = document.getElementById('timeshift-slider');
   const offsetText = document.getElementById('timeshift-current-offset');
   const bufStartText = document.getElementById('timeshift-buffer-start');
@@ -1847,6 +1920,8 @@ function initTimeshift() {
   video.addEventListener('pause', updateTimeshiftUI);
   video.addEventListener('seeking', updateTimeshiftUI);
   video.addEventListener('seeked', updateTimeshiftUI);
+
+  updateTimeshiftUI();
 }
 
 // ==========================================================
@@ -2443,6 +2518,14 @@ function updateLiveClock() {
   }
 }
 
+let epgTimeFormatter = null;
+function formatEPGTime(date) {
+  if (!epgTimeFormatter) {
+    epgTimeFormatter = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return epgTimeFormatter.format(date);
+}
+
 async function loadEPGTimeline(isInitial = false) {
   const hoursCount = 168; // 7 days of full TV guide
   if (!timelineStartTime || isInitial) {
@@ -2463,6 +2546,7 @@ async function loadEPGTimeline(isInitial = false) {
   await renderProgramRows(timelineStartTime, timelineEndTime);
   updateNowMarkerPosition();
   setupEPGScrolling();
+  lastEPGLoadTime = Date.now();
 
   if (isInitial) {
     setTimeout(jumpToNow, 100);
@@ -2489,6 +2573,7 @@ function renderDaySelector(startTime, hoursCount) {
 
   days.slice(0, 7).forEach((day, idx) => {
     const btn = document.createElement('button');
+    btn._dayDate = day;
     btn.className = `day-btn ${idx === 0 ? 'active' : ''}`;
     let label = '';
     const nowZero = new Date();
@@ -2522,28 +2607,31 @@ function setupEPGScrolling() {
   const rulerScroll = document.getElementById('epg-ruler-scroll');
   if (!gridScroll || !rulerScroll) return;
 
-  // Sync horizontal scrolling between timeline ruler and grid body
+  // 1. Sync horizontal scrolling between timeline ruler and grid body via requestAnimationFrame
+  let scrollRaf = null;
   gridScroll.onscroll = () => {
-    rulerScroll.scrollLeft = gridScroll.scrollLeft;
+    if (!scrollRaf) {
+      scrollRaf = requestAnimationFrame(() => {
+        rulerScroll.scrollLeft = gridScroll.scrollLeft;
+        scrollRaf = null;
+      });
+    }
   };
 
-  // 1. Mouse wheel scrolling
-  // Normal vertical wheel scrolls UP and DOWN through channel rows.
-  // Shift + Wheel (or dominant horizontal trackpad/wheel) scrolls horizontally across time.
+  // 2. Mouse wheel scrolling
+  // Normal vertical and horizontal scrolling are handled natively by the browser compositor.
+  // Shift + Wheel scrolls horizontally across time.
   if (!gridScroll._hasWheelListener) {
     gridScroll._hasWheelListener = true;
     gridScroll.addEventListener('wheel', (e) => {
-      if (e.shiftKey) {
+      if (e.shiftKey && e.deltaY !== 0) {
         e.preventDefault();
         gridScroll.scrollLeft += e.deltaY;
-      } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-        gridScroll.scrollLeft += e.deltaX;
       }
-      // Natural vertical wheel deltaY scrolls the container vertically (up/down channels)
     }, { passive: false });
   }
 
-  // 2. Click and Drag to pan freely in ALL directions (both horizontally across time and vertically across channels)
+  // 3. Click and Drag to pan freely in ALL directions
   if (!gridScroll._hasDragListener) {
     gridScroll._hasDragListener = true;
     let isDown = false;
@@ -2551,6 +2639,9 @@ function setupEPGScrolling() {
     let startY = 0;
     let scrollLeft = 0;
     let scrollTop = 0;
+    let dragRaf = null;
+    let targetLeft = 0;
+    let targetTop = 0;
     const DRAG_THRESHOLD = 5;
 
     gridScroll.addEventListener('mousedown', (e) => {
@@ -2584,13 +2675,20 @@ function setupEPGScrolling() {
       }
       if (window._epgIsDragging) {
         e.preventDefault();
-        gridScroll.scrollLeft = scrollLeft - dx;
-        gridScroll.scrollTop = scrollTop - dy;
+        targetLeft = scrollLeft - dx;
+        targetTop = scrollTop - dy;
+        if (!dragRaf) {
+          dragRaf = requestAnimationFrame(() => {
+            gridScroll.scrollLeft = targetLeft;
+            gridScroll.scrollTop = targetTop;
+            dragRaf = null;
+          });
+        }
       }
     });
   }
 
-  // 3. Navigation Buttons
+  // 4. Navigation Buttons
   const btnPrev = document.getElementById('btn-epg-prev');
   if (btnPrev) {
     btnPrev.onclick = () => {
@@ -2609,13 +2707,23 @@ function setupEPGScrolling() {
   if (btnNow) {
     btnNow.onclick = jumpToNow;
   }
+
+  const btnRefresh = document.getElementById('btn-epg-refresh');
+  if (btnRefresh) {
+    btnRefresh.onclick = () => {
+      loadEPGTimeline(false);
+    };
+  }
 }
 
 function renderTimeRuler(startTime, hoursCount) {
   const ruler = document.getElementById('epg-time-ruler');
+  if (!ruler) return;
   ruler.innerHTML = '';
   const totalMinutes = hoursCount * 60;
   ruler.style.width = `${totalMinutes * PIXELS_PER_MINUTE}px`;
+
+  const fragment = document.createDocumentFragment();
 
   for (let i = 0; i < hoursCount; i++) {
     const slotTime = new Date(startTime.getTime() + i * 60 * 60 * 1000);
@@ -2629,21 +2737,26 @@ function renderTimeRuler(startTime, hoursCount) {
       slot.appendChild(dateBadge);
     }
 
-    const timeText = document.createTextNode(slotTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    const timeText = document.createTextNode(formatEPGTime(slotTime));
     slot.appendChild(timeText);
-    ruler.appendChild(slot);
+    fragment.appendChild(slot);
   }
+  ruler.appendChild(fragment);
 }
 
 function renderChannelsColumn() {
   const col = document.getElementById('epg-channels-column');
+  if (!col) return;
   col.innerHTML = '';
+  const fragment = document.createDocumentFragment();
 
   channels.forEach(c => {
     const cell = document.createElement('div');
+    cell.dataset.channelId = c.id;
     const conflict = getChannelConflict(c);
-    cell.className = `epg-channel-cell ${conflict ? 'has-conflict' : ''}`;
-    cell.title = conflict ? `${c.name} — ${conflict.reason}` : c.name;
+    const isPlaying = activeChannel && activeChannel.id === c.id;
+    cell.className = `epg-channel-cell ${conflict ? 'has-conflict' : ''} ${isPlaying ? 'is-playing' : ''}`;
+    cell.title = conflict ? `${c.name} — ${conflict.reason}` : (isPlaying ? `${c.name} (Currently Watching)` : c.name);
     cell.onclick = () => {
       zapToChannel(c);
       if (!conflict) {
@@ -2654,115 +2767,191 @@ function renderChannelsColumn() {
     const conflictIndicator = conflict ? 
       `<span class="epg-conflict-icon" title="${conflict.reason}">⚠️</span>` : '';
     const radioTag = c.is_radio ? ' <span title="Radio Station" style="font-size:0.75rem;">📻</span>' : '';
+    const playingBadge = isPlaying ? ' <span class="epg-playing-badge" title="Currently Playing">▶ Live</span>' : '';
 
     cell.innerHTML = `
       <div class="epg-ch-cell-info">
-        <div class="epg-ch-cell-name" title="${c.number}. ${c.name}"><span class="badge" style="font-size:0.7rem; padding:0.12rem 0.35rem; margin-right:0.35rem;">${c.number}</span>${c.name}${radioTag} ${conflictIndicator}</div>
+        <div class="epg-ch-cell-name" title="${c.number}. ${c.name}"><span class="badge" style="font-size:0.7rem; padding:0.12rem 0.35rem; margin-right:0.25rem;">${c.number}</span><span class="epg-ch-name-text">${escapeHtml(c.name)}</span>${radioTag} ${conflictIndicator}${playingBadge}</div>
       </div>
     `;
-    col.appendChild(cell);
+    fragment.appendChild(cell);
+  });
+  col.appendChild(fragment);
+}
+
+function updateEPGPlayingHighlight() {
+  const activeId = activeChannel ? activeChannel.id : null;
+  document.querySelectorAll('.epg-channel-cell').forEach(cell => {
+    const chId = Number(cell.dataset.channelId);
+    const isPlaying = activeId !== null && chId === activeId;
+    cell.classList.toggle('is-playing', isPlaying);
+
+    const nameEl = cell.querySelector('.epg-ch-cell-name');
+    let badge = cell.querySelector('.epg-playing-badge');
+    if (isPlaying) {
+      if (!badge && nameEl) {
+        badge = document.createElement('span');
+        badge.className = 'epg-playing-badge';
+        badge.title = 'Currently Playing';
+        badge.innerHTML = '▶ Live';
+        nameEl.appendChild(badge);
+      }
+    } else if (badge) {
+      badge.remove();
+    }
+  });
+
+  document.querySelectorAll('.epg-channel-row-track').forEach(row => {
+    const chId = Number(row.dataset.channelId);
+    row.classList.toggle('is-playing', activeId !== null && chId === activeId);
   });
 }
 
 async function renderProgramRows(startTime, endTime) {
   const container = document.getElementById('epg-rows-container');
-  container.innerHTML = '';
+  if (!container) return;
 
   const totalMinutes = (endTime - startTime) / (60 * 1000);
   const totalWidthPx = totalMinutes * PIXELS_PER_MINUTE;
-  document.getElementById('epg-events-canvas').style.width = `${totalWidthPx}px`;
+  const canvas = document.getElementById('epg-events-canvas');
+  if (canvas) canvas.style.width = `${totalWidthPx}px`;
+
+  // Fetch ALL channels' EPG in a single batch HTTP request instead of N sequential fetches
+  let allEvents = [];
+  try {
+    const res = await fetch(`/api/epg?from=${startTime.toISOString()}&to=${endTime.toISOString()}`);
+    allEvents = await res.json() || [];
+  } catch (err) {
+    console.error('Failed to load EPG events:', err);
+  }
+
+  // Pre-index events by channel_id
+  const eventsByChannel = new Map();
+  for (let i = 0; i < allEvents.length; i++) {
+    const e = allEvents[i];
+    let list = eventsByChannel.get(e.channel_id);
+    if (!list) {
+      list = [];
+      eventsByChannel.set(e.channel_id, list);
+    }
+    list.push(e);
+  }
+
+  // Pre-index recordings by event_id and channel+time for O(1) matching
+  const recMap = new Map();
+  if (Array.isArray(currentRecordings)) {
+    for (const r of currentRecordings) {
+      if (r.event_id) recMap.set(`ev_${r.channel_id}_${r.event_id}`, r);
+      if (r.start_time) recMap.set(`time_${r.channel_id}_${new Date(r.start_time).getTime()}`, r);
+    }
+  }
+
+  const nowMs = Date.now();
+  const fragment = document.createDocumentFragment();
 
   for (const c of channels) {
     const row = document.createElement('div');
-    row.className = 'epg-channel-row-track';
+    row.dataset.channelId = c.id;
+    const isPlaying = activeChannel && activeChannel.id === c.id;
+    row.className = `epg-channel-row-track ${isPlaying ? 'is-playing' : ''}`;
     row.style.width = `${totalWidthPx}px`;
 
-    try {
-      const res = await fetch(`/api/epg?channel_id=${c.id}&from=${startTime.toISOString()}&to=${endTime.toISOString()}`);
-      const rawEvents = await res.json() || [];
+    const rawEvents = eventsByChannel.get(c.id) || [];
 
-      // Parse, filter valid ranges, and sort strictly chronologically by start_time
-      const validEvents = rawEvents
-        .map(e => ({
-          ...e,
-          _start: new Date(e.start_time),
-          _end: new Date(e.end_time)
-        }))
-        .filter(e => !isNaN(e._start) && !isNaN(e._end) && e._end > startTime && e._start < endTime && e._end > e._start)
-        .sort((a, b) => a._start - b._start);
+    // Parse, filter valid ranges, and sort strictly chronologically by start_time
+    const validEvents = [];
+    for (let i = 0; i < rawEvents.length; i++) {
+      const e = rawEvents[i];
+      const s = new Date(e.start_time);
+      const end = new Date(e.end_time);
+      if (!isNaN(s) && !isNaN(end) && end > startTime && s < endTime && end > s) {
+        e._start = s;
+        e._end = end;
+        validEvents.push(e);
+      }
+    }
+    validEvents.sort((a, b) => a._start - b._start);
 
-      // Track right boundary so events never render on top of each other
-      let lastEndPx = 0;
+    let lastEndPx = 0;
+    const rowFragment = document.createDocumentFragment();
 
-      validEvents.forEach(e => {
-        const effectiveStart = e._start < startTime ? startTime : e._start;
-        const offsetMinutes = Math.max(0, (effectiveStart - startTime) / (60 * 1000));
-        const durationMinutes = Math.max(10, (e._end - effectiveStart) / (60 * 1000));
+    for (let i = 0; i < validEvents.length; i++) {
+      const e = validEvents[i];
+      const effectiveStart = e._start < startTime ? startTime : e._start;
+      const offsetMinutes = Math.max(0, (effectiveStart - startTime) / 60000);
+      const durationMinutes = Math.max(10, (e._end - effectiveStart) / 60000);
 
-        let leftPx = offsetMinutes * PIXELS_PER_MINUTE;
-        const targetEndPx = (offsetMinutes + durationMinutes) * PIXELS_PER_MINUTE;
+      let leftPx = offsetMinutes * PIXELS_PER_MINUTE;
+      const targetEndPx = (offsetMinutes + durationMinutes) * PIXELS_PER_MINUTE;
 
-        // If this event starts before the previous event ends, push it forward to prevent stacking
-        if (leftPx < lastEndPx) {
-          leftPx = lastEndPx;
+      // Prevent block overlapping
+      if (leftPx < lastEndPx) {
+        leftPx = lastEndPx;
+      }
+
+      const widthPx = Math.max(14, targetEndPx - leftPx - 4);
+      lastEndPx = leftPx + widthPx + 4;
+
+      const block = document.createElement('div');
+      const isNow = nowMs >= e._start.getTime() && nowMs < e._end.getTime();
+
+      const matchedRec = recMap.get(`ev_${c.id}_${e.event_id || e.id}`) ||
+                         recMap.get(`time_${c.id}_${e._start.getTime()}`);
+
+      let recBadge = '';
+      let blockClass = 'epg-event-block';
+      if (isNow) blockClass += ' active-now';
+      if (matchedRec) {
+        if (matchedRec.status === 'recording') {
+          recBadge = '<span class="epg-block-rec-badge">🔴 REC</span>';
+          blockClass += ' epg-block-recording';
+        } else if (matchedRec.status === 'scheduled') {
+          recBadge = '<span class="epg-block-sched-badge">⏱️</span>';
+          blockClass += ' epg-block-scheduled';
         }
+      }
 
-        const widthPx = Math.max(14, targetEndPx - leftPx - 4); // 4px margin
-        lastEndPx = leftPx + widthPx + 4;
+      block.className = blockClass;
+      block.style.left = `${leftPx}px`;
+      block.style.width = `${widthPx}px`;
 
-        const block = document.createElement('div');
-        const isNow = Date.now() >= e._start.getTime() && Date.now() < e._end.getTime();
+      const title = getLocalized(e.titles, currentLanguage) || 'Broadcast';
+      const startStr = formatEPGTime(e._start);
+      const endStr = formatEPGTime(e._end);
 
-        // Check if event has a scheduled or active recording
-        const matchedRec = (currentRecordings || []).find(r => 
-          (r.event_id && r.event_id === e.event_id && r.channel_id === c.id) ||
-          (r.channel_id === c.id && new Date(r.start_time).getTime() === e._start.getTime())
-        );
+      block._eventData = e;
+      block.dataset.eventId = e.id || e.event_id;
+      block.dataset.title = title;
+      block.title = `${title} (${startStr} - ${endStr})${matchedRec ? ' [' + matchedRec.status.toUpperCase() + ']' : ''}`;
 
-        let recBadge = '';
-        const blockClasses = ['epg-event-block'];
-        if (isNow) blockClasses.push('active-now');
-        if (matchedRec) {
-          if (matchedRec.status === 'recording') {
-            recBadge = '<span class="epg-block-rec-badge">🔴 REC</span>';
-            blockClasses.push('epg-block-recording');
-          } else if (matchedRec.status === 'scheduled') {
-            recBadge = '<span class="epg-block-sched-badge">⏱️</span>';
-            blockClasses.push('epg-block-scheduled');
-          }
-        }
+      block.innerHTML = `
+        <div class="epg-block-title">${recBadge}${escapeHtml(title)}</div>
+        <div class="epg-block-time">${startStr} - ${endStr}</div>
+      `;
+      block.onclick = (ev) => {
+        ev.stopPropagation();
+        if (window._epgIsDragging) return;
+        showEPGModal(e, c.name);
+      };
 
-        block.className = blockClasses.join(' ');
-        block.style.left = `${leftPx}px`;
-        block.style.width = `${widthPx}px`;
-
-        const title = getLocalized(e.titles, currentLanguage) || 'Broadcast';
-        const startStr = e._start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const endStr = e._end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-        block.title = `${title} (${startStr} - ${endStr})${matchedRec ? ' [' + matchedRec.status.toUpperCase() + ']' : ''}`;
-
-        block.innerHTML = `
-          <div class="epg-block-title">${recBadge}${title}</div>
-          <div class="epg-block-time">${startStr} - ${endStr}</div>
-        `;
-        block.onclick = (ev) => {
-          ev.stopPropagation();
-          if (window._epgIsDragging) return;
-          showEPGModal(e, c.name);
-        };
-
-        row.appendChild(block);
-      });
-    } catch (err) {
-      console.error('Failed to load EPG for channel', c.id, err);
+      rowFragment.appendChild(block);
     }
 
-    container.appendChild(row);
+    row.appendChild(rowFragment);
+    fragment.appendChild(row);
   }
+
+  container.innerHTML = '';
+  container.appendChild(fragment);
 
   // Ensure NOW marker line height covers all channel rows
   updateNowMarkerPosition();
+
+  // Re-apply in-grid search highlights if search input is active
+  const searchInput = document.getElementById('epg-search-input');
+  if (searchInput && searchInput.value.trim().length >= 2) {
+    highlightInGridEvents(searchInput.value.trim());
+  }
 }
 
 // Live Red NOW Line Marker
@@ -2806,6 +2995,243 @@ function jumpToNow() {
       }
     });
   }
+}
+
+// ==========================================================
+// EPG PROGRAM SEARCH & TIMELINE HIGHLIGHTING
+// ==========================================================
+function setupEPGSearch() {
+  const input = document.getElementById('epg-search-input');
+  const clearBtn = document.getElementById('btn-epg-search-clear');
+  const dropdown = document.getElementById('epg-search-dropdown');
+  if (!input || !dropdown) return;
+
+  let debounceTimer = null;
+
+  const performSearch = async (query) => {
+    query = query.trim();
+    if (query.length < 2) {
+      dropdown.classList.add('hidden');
+      if (clearBtn) clearBtn.classList.add('hidden');
+      clearInGridSearchHighlights();
+      return;
+    }
+
+    if (clearBtn) clearBtn.classList.remove('hidden');
+
+    try {
+      const res = await fetch(`/api/epg/search?q=${encodeURIComponent(query)}`);
+      const results = await res.json() || [];
+      renderEPGSearchResults(results, query);
+      highlightInGridEvents(query);
+    } catch (err) {
+      console.error('[EPG Search] Error:', err);
+    }
+  };
+
+  input.addEventListener('input', (e) => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      performSearch(e.target.value);
+    }, 220);
+  });
+
+  input.addEventListener('focus', () => {
+    if (input.value.trim().length >= 2) {
+      performSearch(input.value);
+    }
+  });
+
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      input.value = '';
+      dropdown.classList.add('hidden');
+      clearBtn.classList.add('hidden');
+      clearInGridSearchHighlights();
+      input.focus();
+    });
+  }
+
+  // Close dropdown on Escape key or clicking outside
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !dropdown.classList.contains('hidden')) {
+      dropdown.classList.add('hidden');
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.epg-search-container')) {
+      dropdown.classList.add('hidden');
+    }
+  });
+}
+
+function renderEPGSearchResults(results, query) {
+  const dropdown = document.getElementById('epg-search-dropdown');
+  if (!dropdown) return;
+
+  if (results.length === 0) {
+    dropdown.innerHTML = `
+      <div class="epg-search-dropdown-header"><span>Search Results</span></div>
+      <div class="epg-search-dropdown-empty">No programs found matching "<strong>${escapeHtml(query)}</strong>"</div>
+    `;
+    dropdown.classList.remove('hidden');
+    return;
+  }
+
+  let html = `
+    <div class="epg-search-dropdown-header">
+      <span>Programs matching "${escapeHtml(query)}"</span>
+      <span>${results.length} found</span>
+    </div>
+  `;
+
+  const nowMs = Date.now();
+
+  results.forEach(item => {
+    const title = getLocalized(item.titles, currentLanguage) || 'Program';
+    const startDate = new Date(item.start_time);
+    const endDate = new Date(item.end_time);
+    const isLive = nowMs >= startDate.getTime() && nowMs < endDate.getTime();
+
+    const timeStr = formatSearchDate(startDate, endDate);
+
+    const logoHtml = item.channel_logo ? 
+      `<img src="${escapeHtml(item.channel_logo)}" alt="" style="width:20px; height:20px; object-fit:contain; border-radius:3px; margin-bottom:2px;">` : '';
+
+    html += `
+      <div class="epg-search-result-item" data-channel-id="${item.channel_id}" data-start-time="${item.start_time}" data-event-id="${item.id}">
+        <div class="epg-search-ch-badge">
+          ${logoHtml}
+          <span class="epg-search-ch-num">${item.channel_number}</span>
+          <span class="epg-search-ch-name" title="${escapeHtml(item.channel_name)}">${escapeHtml(item.channel_name)}</span>
+        </div>
+        <div class="epg-search-info">
+          <div class="epg-search-prog-title">
+            <span>${escapeHtml(title)}</span>
+            ${isLive ? '<span class="epg-search-live-tag">LIVE NOW</span>' : ''}
+          </div>
+          <div class="epg-search-prog-time">📅 ${timeStr}</div>
+        </div>
+        <div class="epg-search-actions">
+          ${isLive ? `<button type="button" class="btn btn-sm btn-primary epg-search-action-watch" title="Watch live in player">▶ Watch</button>` : ''}
+          <button type="button" class="btn btn-sm btn-secondary epg-search-action-jump" title="Show in TV Guide">📅 In Guide</button>
+        </div>
+      </div>
+    `;
+  });
+
+  dropdown.innerHTML = html;
+  dropdown.classList.remove('hidden');
+
+  // Attach interactive click handlers
+  dropdown.querySelectorAll('.epg-search-result-item').forEach(el => {
+    const chId = Number(el.dataset.channelId);
+    const startTime = el.dataset.startTime;
+    const eventId = Number(el.dataset.eventId);
+
+    const btnWatch = el.querySelector('.epg-search-action-watch');
+    if (btnWatch) {
+      btnWatch.onclick = (e) => {
+        e.stopPropagation();
+        dropdown.classList.add('hidden');
+        const ch = channels.find(c => c.id === chId);
+        if (ch) {
+          zapToChannel(ch);
+          window.location.hash = '#/tv';
+        }
+      };
+    }
+
+    const btnJump = el.querySelector('.epg-search-action-jump');
+    if (btnJump) {
+      btnJump.onclick = (e) => {
+        e.stopPropagation();
+        dropdown.classList.add('hidden');
+        jumpToEPGEvent(chId, startTime, eventId);
+      };
+    }
+
+    el.onclick = () => {
+      dropdown.classList.add('hidden');
+      jumpToEPGEvent(chId, startTime, eventId);
+    };
+  });
+}
+
+function formatSearchDate(start, end) {
+  const now = new Date();
+  const isToday = start.toDateString() === now.toDateString();
+  const tmrw = new Date(now.getTime() + 86400000);
+  const isTomorrow = start.toDateString() === tmrw.toDateString();
+
+  let dayLabel = start.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  if (isToday) dayLabel = 'Today';
+  else if (isTomorrow) dayLabel = 'Tomorrow';
+
+  const sTime = start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const eTime = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `${dayLabel}, ${sTime} – ${eTime}`;
+}
+
+async function jumpToEPGEvent(chId, startTimeIso, eventId) {
+  const startTime = new Date(startTimeIso);
+  const gridScroll = document.getElementById('epg-grid-scroll');
+  if (!gridScroll || !timelineStartTime) return;
+
+  // Sync active day button
+  const dayButtons = document.querySelectorAll('.day-btn');
+  const eventDateStr = startTime.toDateString();
+  dayButtons.forEach(btn => {
+    if (btn._dayDate && btn._dayDate.toDateString() === eventDateStr) {
+      document.querySelectorAll('.day-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    }
+  });
+
+  // Calculate horizontal offset
+  const minutesSinceStart = (startTime.getTime() - timelineStartTime.getTime()) / (60 * 1000);
+  const chColWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ch-col-width')) || 140;
+  const targetLeft = Math.max(0, minutesSinceStart * PIXELS_PER_MINUTE - chColWidth - 10);
+
+  // Vertical scroll to channel row
+  const row = document.querySelector(`.epg-channel-row-track[data-channel-id="${chId}"]`);
+  let targetTop = gridScroll.scrollTop;
+  if (row) {
+    targetTop = row.offsetTop - 70;
+  }
+
+  gridScroll.scrollTo({ left: targetLeft, top: targetTop, behavior: 'smooth' });
+
+  // Highlight block with pulse animation
+  setTimeout(() => {
+    const blocks = document.querySelectorAll(`.epg-channel-row-track[data-channel-id="${chId}"] .epg-event-block`);
+    blocks.forEach(b => {
+      const bStart = b._eventData ? new Date(b._eventData.start_time).getTime() : 0;
+      if (Math.abs(bStart - startTime.getTime()) < 60000 || (eventId && b.dataset.eventId == eventId)) {
+        b.classList.add('pulse-highlight');
+        setTimeout(() => b.classList.remove('pulse-highlight'), 4500);
+      }
+    });
+  }, 400);
+}
+
+function highlightInGridEvents(query) {
+  const q = query.toLowerCase();
+  document.querySelectorAll('.epg-event-block').forEach(b => {
+    const text = (b.textContent || '').toLowerCase();
+    const title = (b.dataset.title || b.title || '').toLowerCase();
+    const matches = text.includes(q) || title.includes(q);
+    b.classList.toggle('search-matched', matches);
+    b.classList.toggle('search-dimmed', !matches);
+  });
+}
+
+function clearInGridSearchHighlights() {
+  document.querySelectorAll('.epg-event-block').forEach(b => {
+    b.classList.remove('search-matched', 'search-dimmed');
+  });
 }
 
 // Show EPG Event Details Modal
@@ -2893,6 +3319,7 @@ async function refreshTunerStatus() {
       renderChannelList();
       updateHeaderTunerBadge();
       updateInstantRecordButton();
+  updateTimeshiftUI();
     }
 
     document.getElementById('cfg-detected-hw').value = data.hardware ? data.hardware.toUpperCase() : 'CPU';
@@ -3013,6 +3440,7 @@ window.stopRecordingFromTuner = async function(recId) {
     refreshTunerStatus();
     loadRecordings();
     updateInstantRecordButton();
+  updateTimeshiftUI();
     updateHeaderTunerBadge();
   } catch (err) {
     console.error('Failed to stop recording:', err);
@@ -3912,7 +4340,12 @@ document.addEventListener('click', () => {
 // ==========================================================
 function updateInstantRecordButton() {
   const btn = document.getElementById('btn-record-instant');
-  if (!btn || !activeChannel) return;
+  if (!btn) return;
+  if (!activeChannel) {
+    btn.classList.add('hidden');
+    return;
+  }
+  btn.classList.remove('hidden');
 
   const isRecordingThisChannel = currentTuners && currentTuners.some(t => 
     t.status === 'active' && 
@@ -3924,10 +4357,12 @@ function updateInstantRecordButton() {
 
   if (isRecordingThisChannel) {
     btn.classList.add('rec-active');
+    btn.classList.add('is-recording');
     btn.title = `Stop Recording "${activeChannel.name}"`;
     if (text) text.textContent = 'Recording';
   } else {
     btn.classList.remove('rec-active');
+    btn.classList.remove('is-recording');
     btn.title = `Instant Record "${activeChannel.name}"`;
     if (text) text.textContent = 'Record';
   }
@@ -3954,6 +4389,7 @@ if (btnRecordInstant) {
           showToast(`⏺ Stopped recording on ${activeChannel.name}`, 'success');
           loadRecordings();
           updateInstantRecordButton();
+  updateTimeshiftUI();
           updateHeaderTunerBadge();
           renderChannelList();
         } catch (e) {
@@ -3995,6 +4431,7 @@ if (btnRecordInstant) {
       const rec = await res.json();
       showToast(`🔴 Recording started for ${activeChannel.name}: "${rec.title}"`);
       updateInstantRecordButton();
+  updateTimeshiftUI();
       renderChannelList();
     } catch (e) {
       console.error('Failed to start instant recording:', e);
@@ -4262,6 +4699,7 @@ function renderRecordingsList() {
             showToast('⏺ Recording stopped', 'success');
             loadRecordings();
             updateInstantRecordButton();
+  updateTimeshiftUI();
             updateHeaderTunerBadge();
           }
         };
@@ -4655,6 +5093,7 @@ if (btnEPGRecord) {
         closeEPGModal();
         loadRecordings();
         updateInstantRecordButton();
+  updateTimeshiftUI();
         renderChannelList();
       }
       return;
@@ -4697,6 +5136,7 @@ if (btnEPGRecord) {
       }
       loadRecordings();
       updateInstantRecordButton();
+  updateTimeshiftUI();
       renderChannelList();
     } catch (e) {
       console.error('Error scheduling EPG recording:', e);

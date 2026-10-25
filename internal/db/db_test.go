@@ -100,3 +100,98 @@ func TestRecordingsCRUD(t *testing.T) {
 		t.Errorf("Expected 0 recordings after delete, got %d", len(afterDel))
 	}
 }
+
+func TestSearchEPG(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "dvb-db-search-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	database, err := db.Open(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	ch := &db.Channel{
+		Name:      "BBC News HD",
+		Number:    101,
+		Frequency: 506000000,
+		Enabled:   true,
+	}
+	if err := database.SaveChannel(ch); err != nil {
+		t.Fatalf("SaveChannel error: %v", err)
+	}
+
+	now := time.Now().UTC()
+	events := []db.EPGEvent{
+		{
+			ChannelID:    ch.ID,
+			EventID:      1001,
+			StartTime:    now.Add(1 * time.Hour),
+			EndTime:      now.Add(2 * time.Hour),
+			Titles:       map[string]string{"eng": "World News Today", "gre": "Παγκόσμια Νέα"},
+			Descriptions: map[string]string{"eng": "Global headlines and in-depth analysis"},
+			Genres:       []string{"News"},
+		},
+		{
+			ChannelID:    ch.ID,
+			EventID:      1002,
+			StartTime:    now.Add(3 * time.Hour),
+			EndTime:      now.Add(5 * time.Hour),
+			Titles:       map[string]string{"eng": "Blockbuster Movie Night", "gre": "Βραδιά Ταινίας"},
+			Descriptions: map[string]string{"eng": "An action-packed adventure thriller"},
+			Genres:       []string{"Movie"},
+		},
+	}
+
+	if err := database.SaveEPGEvents(events); err != nil {
+		t.Fatalf("SaveEPGEvents error: %v", err)
+	}
+
+	// 1. Search by English title
+	res, err := database.SearchEPG("World News", 10)
+	if err != nil {
+		t.Fatalf("SearchEPG error: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("Expected 1 result for 'World News', got %d", len(res))
+	}
+	if res[0].ChannelName != "BBC News HD" || res[0].ChannelNumber != 101 {
+		t.Errorf("Channel info mismatch: %+v", res[0])
+	}
+	if res[0].Titles["eng"] != "World News Today" {
+		t.Errorf("Expected title 'World News Today', got %s", res[0].Titles["eng"])
+	}
+
+	// 2. Search by Greek title
+	resGreek, err := database.SearchEPG("Ταινίας", 10)
+	if err != nil {
+		t.Fatalf("SearchEPG Greek error: %v", err)
+	}
+	if len(resGreek) != 1 {
+		t.Fatalf("Expected 1 result for 'Ταινίας', got %d", len(resGreek))
+	}
+	if resGreek[0].Titles["eng"] != "Blockbuster Movie Night" {
+		t.Errorf("Expected movie title, got %s", resGreek[0].Titles["eng"])
+	}
+
+	// 3. Search by description keyword
+	resDesc, err := database.SearchEPG("thriller", 10)
+	if err != nil {
+		t.Fatalf("SearchEPG description error: %v", err)
+	}
+	if len(resDesc) != 1 {
+		t.Fatalf("Expected 1 result for 'thriller', got %d", len(resDesc))
+	}
+
+	// 4. Search for non-existent keyword
+	resNone, err := database.SearchEPG("NonExistentShowXYZ", 10)
+	if err != nil {
+		t.Fatalf("SearchEPG non-existent error: %v", err)
+	}
+	if len(resNone) != 0 {
+		t.Fatalf("Expected 0 results, got %d", len(resNone))
+	}
+}

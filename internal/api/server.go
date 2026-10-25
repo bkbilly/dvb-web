@@ -91,6 +91,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/scan/prune", s.handleScanPrune)
 	mux.HandleFunc("/api/epg", s.handleEPG)
+	mux.HandleFunc("/api/epg/search", s.handleEPGSearch)
 	mux.HandleFunc("/api/epg/languages", s.handleEPGLanguages)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/tuners/", s.handleTunerAction)
@@ -362,13 +363,35 @@ func (s *Server) handleEPG(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	events, err := s.db.GetEPG(channelID, from, to)
+	var events []db.EPGEvent
+	var err error
+	if channelID > 0 {
+		events, err = s.db.GetEPG(channelID, from, to)
+	} else {
+		events, err = s.db.GetAllEPG(from, to)
+	}
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	jsonResponse(w, http.StatusOK, events)
+}
+
+func (s *Server) handleEPGSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		jsonResponse(w, http.StatusOK, []db.EPGSearchResult{})
+		return
+	}
+
+	results, err := s.db.SearchEPG(q, 50)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, results)
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {

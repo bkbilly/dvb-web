@@ -179,12 +179,12 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		if cfg.IsRadio {
 			args = append(args,
 				"-f", "lavfi", "-re", "-i", "color=c=0x0f172a:s=1280x720:r=10",
-				"-f", "lavfi", "-re", "-i", "sine=frequency=440:sample_rate=48000",
+				"-f", "lavfi", "-re", "-i", "aevalsrc=exprs='0.03*(0.75+0.25*sin(2*PI*0.25*t))*(sin(2*PI*220*t)+sin(2*PI*329.63*t)+0.5*sin(2*PI*110*t))|0.03*(0.75+0.25*sin(2*PI*0.25*t))*(sin(2*PI*277.18*t)+sin(2*PI*440*t)+0.5*sin(2*PI*110*t))':channel_layout=stereo:sample_rate=48000",
 			)
 		} else {
 			args = append(args,
 				"-f", "lavfi", "-re", "-i", "testsrc=size=1280x720:rate=25",
-				"-f", "lavfi", "-re", "-i", "sine=frequency=1000:sample_rate=48000",
+				"-f", "lavfi", "-re", "-i", "aevalsrc=exprs='0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*261.63*t)+sin(2*PI*392*t)+0.5*sin(2*PI*130.81*t))|0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*329.63*t)+sin(2*PI*523.25*t)+0.5*sin(2*PI*130.81*t))':channel_layout=stereo:sample_rate=48000",
 			)
 		}
 	} else if cfg.InputPipe != nil {
