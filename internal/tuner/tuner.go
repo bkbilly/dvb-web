@@ -13,14 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"dvb-web/internal/db"
 	"dvb-web/internal/epg"
 	"dvb-web/internal/transcoder"
-
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -405,7 +402,7 @@ func (t *Tuner) stopHardwareLocked() {
 		delete(t.channels, key)
 	}
 	if t.dvrFD > 0 {
-		_ = syscall.Close(t.dvrFD)
+		_ = closeDeviceFD(t.dvrFD)
 		t.dvrFD = 0
 	}
 	if t.demuxFD > 0 {
@@ -413,7 +410,7 @@ func (t *Tuner) stopHardwareLocked() {
 		t.demuxFD = 0
 	}
 	if t.frontendFD > 0 {
-		_ = syscall.Close(t.frontendFD)
+		_ = closeDeviceFD(t.frontendFD)
 		t.frontendFD = 0
 	}
 	t.status = "idle"
@@ -738,8 +735,6 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 		readBuf := make([]byte, 188*256) // 48KB chunk
 		var leftover []byte
 
-		pfd := []unix.PollFd{{Fd: int32(dvrFD), Events: unix.POLLIN}}
-
 		for {
 			select {
 			case <-tsCtx.Done():
@@ -747,24 +742,8 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 			default:
 			}
 
-			// Sub-millisecond reactive wakeup as soon as packets arrive from the kernel demux ring buffer.
-			// Times out after 50ms so we can periodically re-check tsCtx.Done().
-			nReady, err := unix.Poll(pfd, 50)
+			n, err := pollAndReadDVR(tsCtx, dvrFD, readBuf)
 			if err != nil {
-				if err == unix.EINTR {
-					continue
-				}
-				return
-			}
-			if nReady == 0 {
-				continue
-			}
-
-			n, err := syscall.Read(dvrFD, readBuf)
-			if err != nil {
-				if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || err == syscall.EINTR {
-					continue
-				}
 				return
 			}
 			if n <= 0 {
@@ -942,12 +921,12 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 					t.demuxFD = 0
 				}
 				if t.dvrFD > 0 {
-					_ = syscall.Close(t.dvrFD)
+					_ = closeDeviceFD(t.dvrFD)
 					t.dvrFD = 0
 				}
 
 				if t.frontendFD <= 0 {
-					feFD, err := syscall.Open(t.FrontendPath, syscall.O_RDWR, 0)
+					feFD, err := openFrontendDevice(t.FrontendPath)
 					if err != nil {
 						t.status = "idle"
 						delete(t.viewers, session.ID)
@@ -973,7 +952,7 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 					t.demuxFD = dmxFD
 				}
 
-				dvrFD, err := syscall.Open(t.DVRPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+				dvrFD, err := openDVRDevice(t.DVRPath)
 				if err != nil {
 					log.Printf("[TunerPool] Warning: open DVR non-blocking error: %v", err)
 				} else {
@@ -981,7 +960,7 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 					// Drain any residual stale packets from kernel buffer before piping to transcoder
 					drainBuf := make([]byte, 64*1024)
 					for {
-						n, _ := syscall.Read(dvrFD, drainBuf)
+						n, _ := drainDVRDevice(dvrFD, drainBuf)
 						if n <= 0 {
 							break
 						}
@@ -1117,11 +1096,11 @@ func (p *Pool) AllocateRecording(channel *db.Channel, recInfo *ActiveRecordingIn
 					t.demuxFD = 0
 				}
 				if t.dvrFD > 0 {
-					_ = syscall.Close(t.dvrFD)
+					_ = closeDeviceFD(t.dvrFD)
 					t.dvrFD = 0
 				}
 				if t.frontendFD <= 0 {
-					feFD, err := syscall.Open(t.FrontendPath, syscall.O_RDWR, 0)
+					feFD, err := openFrontendDevice(t.FrontendPath)
 					if err != nil {
 						t.status = "idle"
 						t.activeRecording = nil
@@ -1140,11 +1119,11 @@ func (p *Pool) AllocateRecording(channel *db.Channel, recInfo *ActiveRecordingIn
 				dmxFD, _ := StartDemuxWildcard(t.DemuxPath)
 				t.demuxFD = dmxFD
 
-				dvrFD, _ := syscall.Open(t.DVRPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+				dvrFD, _ := openDVRDevice(t.DVRPath)
 				t.dvrFD = dvrFD
 				drainBuf := make([]byte, 64*1024)
 				for {
-					n, _ := syscall.Read(dvrFD, drainBuf)
+					n, _ := drainDVRDevice(dvrFD, drainBuf)
 					if n <= 0 {
 						break
 					}

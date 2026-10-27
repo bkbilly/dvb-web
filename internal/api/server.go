@@ -18,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +30,7 @@ import (
 	"dvb-web/internal/transcoder"
 	"dvb-web/internal/tuner"
 	webRTCManager "dvb-web/internal/webrtc"
+	"dvb-web/web"
 )
 
 var upgrader = websocket.Upgrader{
@@ -120,8 +120,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	// WebSocket
 	mux.HandleFunc("/ws", s.handleWS)
 
-	// Static Web UI
-	fileServer := http.FileServer(http.Dir(webDir))
+	// Static Web UI (supports embedded binary assets with local directory override)
+	fileServer := http.FileServer(web.GetFileSystem(webDir))
 	mux.Handle("/", fileServer)
 }
 
@@ -1485,13 +1485,8 @@ func (s *Server) handleRecordingDetail(w http.ResponseWriter, r *http.Request) {
 			totalDuration += rec.Duration
 		}
 
-		var freeBytes, totalDiskBytes uint64
-		var stat syscall.Statfs_t
 		dataDir := s.recorder.GetDataDir()
-		if err := syscall.Statfs(dataDir, &stat); err == nil {
-			freeBytes = stat.Bavail * uint64(stat.Bsize)
-			totalDiskBytes = stat.Blocks * uint64(stat.Bsize)
-		}
+		freeBytes, totalDiskBytes := getDiskSpace(dataDir)
 
 		jsonResponse(w, http.StatusOK, map[string]interface{}{
 			"total_recordings": len(recs),

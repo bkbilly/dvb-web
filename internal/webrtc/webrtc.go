@@ -165,8 +165,7 @@ func (s *Session) forwardUDPToTrack(ctx context.Context, port int, track *webrtc
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
-				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, 15, 1) // SO_REUSEPORT
-				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				setReuseSocketOptions(fd)
 			})
 		},
 	}

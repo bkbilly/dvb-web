@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -371,16 +370,12 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	// For subtitle pipelines, quickly ensure filtergraph didn't exit immediately on missing/unsupported stream
 	if !cfg.IsMock && cfg.SubtitleTrack >= 0 {
 		time.Sleep(300 * time.Millisecond)
-		if cmd.Process != nil {
-			var ws syscall.WaitStatus
-			pid, err := syscall.Wait4(cmd.Process.Pid, &ws, syscall.WNOHANG, nil)
-			if err == nil && pid == cmd.Process.Pid {
-				// FFmpeg exited with error (e.g. subtitle stream missing/invalid)
-				log.Printf("[Transcoder] FFmpeg exited with subtitles enabled (status: %v). Retrying without subtitles...", ws)
-				cancel()
-				cfg.SubtitleTrack = -1
-				return d.StartPipeline(cfg)
-			}
+		if checkProcessExited(cmd) {
+			// FFmpeg exited with error (e.g. subtitle stream missing/invalid)
+			log.Printf("[Transcoder] FFmpeg exited with subtitles enabled. Retrying without subtitles...")
+			cancel()
+			cfg.SubtitleTrack = -1
+			return d.StartPipeline(cfg)
 		}
 	}
 

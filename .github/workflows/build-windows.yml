@@ -1,0 +1,73 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ "master", "main" ]
+    tags: [ "v*.*.*" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build Windows amd64 EXE
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Build Windows Standalone Executable
+        run: |
+          mkdir -p dist
+          # Build with GUI subsystem (-H=windowsgui) so no black CMD console pops up
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-H=windowsgui -s -w" -o dist/dvb-web.exe ./cmd/server
+
+      - name: Package Windows Release ZIP
+        run: |
+          cat << 'EOF' > dist/QUICKSTART-WINDOWS.txt
+          ==================================================
+                      DVB-Web for Windows
+          ==================================================
+
+          HOW TO RUN:
+          1. Double-click `dvb-web.exe`.
+          2. The TV broadcast icon will appear in your Windows taskbar / system tray (bottom-right near the clock).
+          3. Click the icon (or right-click -> "Open Web UI") to open DVB-Web in your browser (http://localhost:8080).
+          4. To close DVB-Web, right-click the taskbar icon and select "Exit".
+
+          REQUIREMENTS:
+          - FFmpeg: Place `ffmpeg.exe` in the same directory or install FFmpeg to your system PATH for video transcoding.
+
+          CLI FLAGS (Optional):
+          - `dvb-web.exe --port=8080` (custom port)
+          - `dvb-web.exe --no-tray` (run in headless mode)
+          - `dvb-web.exe --open` (automatically open browser on startup)
+          EOF
+
+          cd dist && zip -r ../dvb-web-windows-amd64.zip dvb-web.exe QUICKSTART-WINDOWS.txt
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dvb-web-windows-amd64
+          path: dvb-web-windows-amd64.zip
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dvb-web-windows-amd64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
