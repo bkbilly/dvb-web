@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/logo.png" alt="DVB-Web Logo" width="128" height="128">
+</p>
+
 # DVB-Web
 
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
