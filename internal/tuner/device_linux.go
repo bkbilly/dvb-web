@@ -4,10 +4,51 @@ package tuner
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"syscall"
+
+	"dvb-web/internal/epg"
 
 	"golang.org/x/sys/unix"
 )
+
+func discoverPlatformTuners(basePort int, ep *epg.Parser) []*Tuner {
+	matches, _ := filepath.Glob("/dev/dvb/adapter*")
+	re := regexp.MustCompile(`/dev/dvb/adapter(\d+)`)
+
+	var tuners []*Tuner
+	portCounter := basePort
+	for _, m := range matches {
+		sub := re.FindStringSubmatch(m)
+		if len(sub) == 2 {
+			id, _ := strconv.Atoi(sub[1])
+			t := &Tuner{
+				ID:             id,
+				Name:           fmt.Sprintf("DVB Adapter %d", id),
+				FrontendPath:   filepath.Join(m, "frontend0"),
+				DVRPath:        filepath.Join(m, "dvr0"),
+				DemuxPath:      filepath.Join(m, "demux0"),
+				status:         "idle",
+				viewers:        make(map[string]*ViewerSession),
+				channels:       make(map[string]*ChannelStream),
+				detectedTracks: make(map[int]ChannelTracks),
+				pmtPIDs:        make(map[int]int),
+				videoUDPPort:   portCounter,
+				audioUDPPort:   portCounter + 2,
+				epgParser:      ep,
+				Enabled:        true,
+			}
+			portCounter += 4
+			tuners = append(tuners, t)
+			log.Printf("[TunerPool] Discovered hardware tuner: %s (%s)", t.Name, m)
+		}
+	}
+	return tuners
+}
 
 func openFrontendDevice(path string) (int, error) {
 	return syscall.Open(path, syscall.O_RDWR, 0)
@@ -50,4 +91,8 @@ func pollAndReadDVR(ctx context.Context, dvrFD int, buf []byte) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+func startBDATSPump(ctx context.Context, t *Tuner, freqHz int64, bwHz int, tsQueue chan<- []byte, parseQueue chan<- []byte) error {
+	return fmt.Errorf("BDA is not supported on Linux")
 }

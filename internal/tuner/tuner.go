@@ -8,9 +8,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +69,7 @@ type TunerStatus struct {
 	Enabled          bool                 `json:"enabled"`
 	Viewers          []*ViewerSession     `json:"viewers"`
 	IsMock           bool                 `json:"is_mock"`
+	IsBDA            bool                 `json:"is_bda,omitempty"`
 	Signal           *SignalInfo          `json:"signal,omitempty"`
 	ActiveRecording  *ActiveRecordingInfo `json:"active_recording,omitempty"`
 }
@@ -193,6 +191,7 @@ type Tuner struct {
 	DVRPath          string
 	DemuxPath        string
 	IsMock           bool
+	IsBDA            bool
 	Enabled          bool
 	mu               sync.Mutex
 	status           string // "idle", "active", "scanning"
@@ -245,35 +244,7 @@ func (p *Pool) discover() {
 	p.tuners = nil
 
 	if !p.isMockMode {
-		matches, _ := filepath.Glob("/dev/dvb/adapter*")
-		re := regexp.MustCompile(`/dev/dvb/adapter(\d+)`)
-
-		portCounter := p.basePort
-		for _, m := range matches {
-			sub := re.FindStringSubmatch(m)
-			if len(sub) == 2 {
-				id, _ := strconv.Atoi(sub[1])
-				t := &Tuner{
-					ID:             id,
-					Name:           fmt.Sprintf("DVB Adapter %d", id),
-					FrontendPath:   filepath.Join(m, "frontend0"),
-					DVRPath:        filepath.Join(m, "dvr0"),
-					DemuxPath:      filepath.Join(m, "demux0"),
-					status:         "idle",
-					viewers:        make(map[string]*ViewerSession),
-					channels:       make(map[string]*ChannelStream),
-					detectedTracks: make(map[int]ChannelTracks),
-					pmtPIDs:        make(map[int]int),
-					videoUDPPort:   portCounter,
-					audioUDPPort:   portCounter + 2,
-					epgParser:      p.epgParser,
-					Enabled:        true,
-				}
-				portCounter += 4
-				p.tuners = append(p.tuners, t)
-				log.Printf("[TunerPool] Discovered hardware tuner: %s (%s)", t.Name, m)
-			}
-		}
+		p.tuners = discoverPlatformTuners(p.basePort, p.epgParser)
 	}
 
 	// If no hardware adapters exist or mock mode was requested, create a virtual tuner
@@ -316,7 +287,7 @@ func (p *Pool) GetStatus() []TunerStatus {
 		}
 		var sig *SignalInfo
 		if t.status == "active" {
-			if t.IsMock {
+			if t.IsMock || t.IsBDA {
 				sig = &SignalInfo{
 					HasLock:        true,
 					HasSignal:      true,
@@ -364,6 +335,7 @@ func (p *Pool) GetStatus() []TunerStatus {
 			Enabled:          t.Enabled,
 			Viewers:          viewersList,
 			IsMock:           t.IsMock,
+			IsBDA:            t.IsBDA,
 			Signal:           sig,
 			ActiveRecording:  recCopy,
 		})
@@ -728,46 +700,61 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 		}
 	}()
 
-	// Hardware DVR reader goroutine with 188-byte TS packet synchronization and TEI filtering
-	go func() {
-		defer close(tsQueue)
-		defer close(parseQueue)
-		readBuf := make([]byte, 188*256) // 48KB chunk
-		var leftover []byte
-
-		for {
-			select {
-			case <-tsCtx.Done():
-				return
-			default:
-			}
-
-			n, err := pollAndReadDVR(tsCtx, dvrFD, readBuf)
-			if err != nil {
-				return
-			}
-			if n <= 0 {
-				continue
-			}
-
-			cleanData, newLeftover := SanitizeAndSyncTS(readBuf[:n], leftover)
-			leftover = newLeftover
-
-			if len(cleanData) == 0 {
-				continue
-			}
-
-			select {
-			case tsQueue <- cleanData:
-			default:
-			}
-
-			select {
-			case parseQueue <- cleanData:
-			default:
+	if t.IsBDA {
+		bw := 8000000
+		channels, _ := p.db.ListChannels()
+		for _, c := range channels {
+			if c.Frequency == t.currentFrequency && c.Bandwidth > 0 {
+				bw = c.Bandwidth
+				break
 			}
 		}
-	}()
+		if err := startBDATSPump(tsCtx, t, t.currentFrequency, bw, tsQueue, parseQueue); err != nil {
+			log.Printf("[TunerPool] Failed to start BDA TS pump: %v", err)
+			return
+		}
+	} else {
+		// Hardware DVR reader goroutine with 188-byte TS packet synchronization and TEI filtering
+		go func() {
+			defer close(tsQueue)
+			defer close(parseQueue)
+			readBuf := make([]byte, 188*256) // 48KB chunk
+			var leftover []byte
+
+			for {
+				select {
+				case <-tsCtx.Done():
+					return
+				default:
+				}
+
+				n, err := pollAndReadDVR(tsCtx, dvrFD, readBuf)
+				if err != nil {
+					return
+				}
+				if n <= 0 {
+					continue
+				}
+
+				cleanData, newLeftover := SanitizeAndSyncTS(readBuf[:n], leftover)
+				leftover = newLeftover
+
+				if len(cleanData) == 0 {
+					continue
+				}
+
+				select {
+				case tsQueue <- cleanData:
+				default:
+				}
+
+				select {
+				case parseQueue <- cleanData:
+				default:
+				}
+			}
+		}()
+	}
 
 	// Multiplex TS distributor: fans out raw TS chunks to all active channel streams
 	go func() {
@@ -914,7 +901,7 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 			}
 
 			// Tune physical frontend if this is real DVB hardware
-			if !t.IsMock {
+			if !t.IsMock && !t.IsBDA {
 				// Stop demux and close dvr before retuning to prevent corrupt packet bleeding from old frequency
 				if t.demuxFD > 0 {
 					StopDemuxWildcard(t.demuxFD)
@@ -1090,7 +1077,7 @@ func (p *Pool) AllocateRecording(channel *db.Channel, recInfo *ActiveRecordingIn
 				t.idleTimer = nil
 			}
 
-			if !t.IsMock {
+			if !t.IsMock && !t.IsBDA {
 				if t.demuxFD > 0 {
 					StopDemuxWildcard(t.demuxFD)
 					t.demuxFD = 0

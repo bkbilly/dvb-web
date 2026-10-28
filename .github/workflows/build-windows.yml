@@ -12,8 +12,8 @@ on:
 
 jobs:
   build-windows:
-    name: Build Windows amd64 EXE
-    runs-on: ubuntu-latest
+    name: Build Windows amd64 EXE & BDA Runner
+    runs-on: windows-latest
     permissions:
       contents: write
 
@@ -27,15 +27,24 @@ jobs:
           go-version-file: 'go.mod'
           check-latest: true
 
-      - name: Build Windows Standalone Executable
-        run: |
-          mkdir -p dist
-          # Build with GUI subsystem (-H=windowsgui) so no black CMD console pops up
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-H=windowsgui -s -w" -o dist/dvb-web.exe ./cmd/server
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Package Windows Release ZIP
+      - name: Build BDA Runner Helper
+        shell: cmd
         run: |
-          cat << 'EOF' > dist/QUICKSTART-WINDOWS.txt
+          mkdir dist
+          cl.exe /O2 /EHsc /Fe:dist\bda-runner.exe cmd\bda-runner\main.cpp ole32.lib oleaut32.lib strmiids.lib uuid.lib
+
+      - name: Build Windows Standalone Executable
+        shell: cmd
+        run: |
+          go build -ldflags="-H=windowsgui -s -w" -o dist\dvb-web.exe .\cmd\server
+
+      - name: Create Quickstart Guide
+        shell: pwsh
+        run: |
+          @"
           ==================================================
                       DVB-Web for Windows
           ==================================================
@@ -46,6 +55,10 @@ jobs:
           3. Click the icon (or right-click -> "Open Web UI") to open DVB-Web in your browser (http://localhost:8080).
           4. To close DVB-Web, right-click the taskbar icon and select "Exit".
 
+          TUNER SUPPORT:
+          - USB / PCIe BDA tuners (e.g. Crypto ReDi PC 50 A, Realtek, Hauppauge, TBS) are automatically detected!
+          - The included `bda-runner.exe` manages BDA hardware tuning and transport stream capture.
+
           REQUIREMENTS:
           - FFmpeg: Place `ffmpeg.exe` in the same directory or install FFmpeg to your system PATH for video transcoding.
 
@@ -53,9 +66,12 @@ jobs:
           - `dvb-web.exe --port=8080` (custom port)
           - `dvb-web.exe --no-tray` (run in headless mode)
           - `dvb-web.exe --open` (automatically open browser on startup)
-          EOF
+          "@ | Out-File -FilePath dist\QUICKSTART-WINDOWS.txt -Encoding utf8
 
-          cd dist && zip -r ../dvb-web-windows-amd64.zip dvb-web.exe QUICKSTART-WINDOWS.txt
+      - name: Package Windows Release ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath dvb-web-windows-amd64.zip -Force
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
