@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <dshow.h>
 #include <initguid.h>
+#include <ks.h>
+#include <ksmedia.h>
 #include <bdaiface.h>
 #include <bdamedia.h>
 #include <tuner.h>
