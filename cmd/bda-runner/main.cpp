@@ -459,15 +459,15 @@ int main(int argc, char* argv[]) {
 
     // 5. Submit Tune Request
     ITuner* pTuner = NULL;
-    if (SUCCEEDED(pNetworkProvider->QueryInterface(IID_ITuner, (void**)&pTuner))) {
+    if (SUCCEEDED(pNetworkProvider->QueryInterface(__uuidof(ITuner), (void**)&pTuner))) {
         IDVBTuningSpace2* pTuningSpace = NULL;
         if (SUCCEEDED(CoCreateInstance(CLSID_DVBTuningSpace, NULL, CLSCTX_INPROC_SERVER,
-                                      IID_IDVBTuningSpace2, (void**)&pTuningSpace))) {
+                                      __uuidof(IDVBTuningSpace2), (void**)&pTuningSpace))) {
             ITuneRequest* pTuneReq = NULL;
             if (SUCCEEDED(pTuningSpace->CreateTuneRequest(&pTuneReq))) {
                 IDVBTLocator* pLocator = NULL;
                 if (SUCCEEDED(CoCreateInstance(CLSID_DVBTLocator, NULL, CLSCTX_INPROC_SERVER,
-                                              IID_IDVBTLocator, (void**)&pLocator))) {
+                                              __uuidof(IDVBTLocator), (void**)&pLocator))) {
                     long freqKHz = (long)(freqHz / 1000);
                     long bwMHz = (long)(bwHz / 1000000);
                     if (bwMHz == 0) bwMHz = 8;
