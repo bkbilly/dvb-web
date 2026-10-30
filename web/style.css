@@ -4735,9 +4735,10 @@ input:checked + .slider:before {
 
 /* HbbTV Modal */
 .hbbtv-modal-card {
-  width: min(96vw, 1320px);
-  height: min(92vh, calc(96vw * 9 / 16 + 56px));
-  max-height: 840px;
+  max-width: min(96vw, 1480px);
+  width: min(96vw, 1480px);
+  height: min(94vh, calc(96vw * 9 / 16 + 64px));
+  max-height: 920px;
   display: flex;
   flex-direction: column;
 }

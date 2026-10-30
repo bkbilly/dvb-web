@@ -97,6 +97,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/tuners/", s.handleTunerAction)
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
 	mux.HandleFunc("/api/logos/", s.handleLogoStatic)
+	mux.HandleFunc("/api/hbbtv/", s.handleHbbtvProxy)
 	mux.HandleFunc("/api/hbbtv/proxy", s.handleHbbtvProxy)
 	mux.HandleFunc("/api/stream", s.handleStream)
 	mux.HandleFunc("/api/recordings", s.handleRecordings)
@@ -1659,16 +1660,30 @@ func (s *Server) handleRecordingDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" {
+		// Relative asset requested directly by the browser under /api/hbbtv/ (e.g. /api/hbbtv/ram/keycodes-min.js)
+		ref := r.Referer()
+		if ref != "" {
+			if refURL, err := url.Parse(ref); err == nil {
+				if parentTarget := refURL.Query().Get("url"); parentTarget != "" {
+					if pURL, err := url.Parse(parentTarget); err == nil {
+						baseURL := pURL.Scheme + "://" + pURL.Host + "/"
+						if idx := strings.LastIndex(pURL.Path, "/"); idx != -1 {
+							baseURL = pURL.Scheme + "://" + pURL.Host + pURL.Path[:idx+1]
+						}
+						baseParsed, _ := url.Parse(baseURL)
+						subPath := strings.TrimPrefix(r.URL.Path, "/api/hbbtv/")
+						if baseParsed != nil {
+							relURL := &url.URL{Path: subPath, RawQuery: r.URL.RawQuery}
+							rawURL = baseParsed.ResolveReference(relURL).String()
+						}
+					}
+				}
+			}
+		}
+	}
+	if rawURL == "" {
 		http.Error(w, "missing url parameter", http.StatusBadRequest)
 		return
-	}
-
-	// In DVB broadcast, AIT Autostart URLs often specify /home/index.php (an invisible 1x1 background notifier)
-	// whereas the interactive HbbTV portal app is located at /index.php. Target the interactive portal directly.
-	if strings.Contains(rawURL, "/home/index.php") {
-		rawURL = strings.Replace(rawURL, "/home/index.php", "/index.php", 1)
-	} else if strings.HasSuffix(rawURL, "/home/") {
-		rawURL = strings.TrimSuffix(rawURL, "home/")
 	}
 
 	targetURL, err := url.Parse(rawURL)
@@ -1684,7 +1699,7 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (SmartTV; HbbTV/1.4.1 (+PVR; DVB-T/T2;)) AppleWebkit/537.36")
-	req.Header.Set("Accept", "application/vnd.hbbtv.xhtml+xml, application/xhtml+xml, text/html, application/xml;q=0.9, */*;q=0.8")
+	req.Header.Set("Accept", "*/*")
 
 	client := &http.Client{
 		Timeout: 15 * time.Second,
@@ -1698,6 +1713,37 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	ct := resp.Header.Get("Content-Type")
+
+	// 1. JavaScript Resources: rewrite navigations and ensure valid executable JS MIME type
+	isJS := strings.Contains(strings.ToLower(ct), "javascript") || strings.HasSuffix(strings.ToLower(targetURL.Path), ".js")
+	if isJS {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsStr := string(bodyBytes)
+		reNav := regexp.MustCompile(`(?i)(?:document\.)?location\.(?:href|assign|replace)\s*=\s*([^;,\n\r]+)(;|\n|$)`)
+		jsStr = reNav.ReplaceAllString(jsStr, "window.__proxyNav($1)$2")
+
+		w.Header().Set("Content-Type", "application/javascript; charset=UTF-8")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write([]byte(jsStr))
+		return
+	}
+
+	// 2. CSS Stylesheets: ensure valid text/css MIME type
+	isCSS := strings.Contains(strings.ToLower(ct), "css") || strings.HasSuffix(strings.ToLower(targetURL.Path), ".css")
+	if isCSS {
+		w.Header().Set("Content-Type", "text/css; charset=UTF-8")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+
+	// 3. HTML / XHTML / HbbTV Document
 	isHbbtv := strings.Contains(strings.ToLower(ct), "hbbtv") || strings.Contains(strings.ToLower(ct), "xhtml+xml")
 	if isHbbtv || strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "xml") {
 		bodyBytes, err := io.ReadAll(resp.Body)
@@ -1708,8 +1754,7 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 
 		bodyStr := string(bodyBytes)
 
-		// 1. Replace plugin-triggering <object> and <embed> tags with <div> to prevent desktop browsers
-		// from displaying "This plugin is not supported" banners
+		// Replace plugin-triggering <object> and <embed> tags with <div> to prevent browser plugin alerts
 		bodyStr = regexp.MustCompile(`(?i)<object\b`).ReplaceAllString(bodyStr, "<div")
 		bodyStr = regexp.MustCompile(`(?i)</object>`).ReplaceAllString(bodyStr, "</div>")
 		bodyStr = regexp.MustCompile(`(?i)<embed\b`).ReplaceAllString(bodyStr, "<div")
@@ -1719,15 +1764,64 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 		if idx := strings.LastIndex(targetURL.Path, "/"); idx != -1 {
 			baseURL = targetURL.Scheme + "://" + targetURL.Host + targetURL.Path[:idx+1]
 		}
+		baseParsed, _ := url.Parse(baseURL)
 
-		// Rewrite relative location navigations
-		proxyBase := "/api/hbbtv/proxy?url=" + url.QueryEscape(targetURL.Scheme+"://"+targetURL.Host+"/")
-		bodyStr = regexp.MustCompile(`(?i)location\.(href|assign|replace)\s*=\s*(['"])/`).ReplaceAllString(bodyStr, "location.$1 = $2"+proxyBase)
+		resolveToProxy := func(raw string) string {
+			raw = strings.TrimSpace(raw)
+			if raw == "" || strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "javascript:") || strings.HasPrefix(raw, "#") || strings.HasPrefix(raw, "/api/hbbtv/") {
+				return raw
+			}
+			var fullURL string
+			if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+				fullURL = raw
+			} else if baseParsed != nil {
+				if u, err := url.Parse(raw); err == nil {
+					fullURL = baseParsed.ResolveReference(u).String()
+				} else {
+					return raw
+				}
+			} else {
+				return raw
+			}
+			return "/api/hbbtv/proxy?url=" + url.QueryEscape(fullURL)
+		}
+
+		// Rewrite static assets in HTML to route through our proxy
+		reScript := regexp.MustCompile(`(?i)(<script\b[^>]*?\bsrc\s*=\s*["'])([^"']+)(["'])`)
+		bodyStr = reScript.ReplaceAllStringFunc(bodyStr, func(m string) string {
+			parts := reScript.FindStringSubmatch(m)
+			if len(parts) == 4 {
+				return parts[1] + resolveToProxy(parts[2]) + parts[3]
+			}
+			return m
+		})
+
+		reLink := regexp.MustCompile(`(?i)(<link\b[^>]*?\bhref\s*=\s*["'])([^"']+)(["'])`)
+		bodyStr = reLink.ReplaceAllStringFunc(bodyStr, func(m string) string {
+			parts := reLink.FindStringSubmatch(m)
+			if len(parts) == 4 {
+				return parts[1] + resolveToProxy(parts[2]) + parts[3]
+			}
+			return m
+		})
+
+		reImg := regexp.MustCompile(`(?i)(<img\b[^>]*?\bsrc\s*=\s*["'])([^"']+)(["'])`)
+		bodyStr = reImg.ReplaceAllStringFunc(bodyStr, func(m string) string {
+			parts := reImg.FindStringSubmatch(m)
+			if len(parts) == 4 {
+				return parts[1] + resolveToProxy(parts[2]) + parts[3]
+			}
+			return m
+		})
+
+		// Rewrite inline navigations in HTML
+		reNav := regexp.MustCompile(`(?i)(?:document\.)?location\.(?:href|assign|replace)\s*=\s*([^;,\n\r]+)(;|\n|$)`)
+		bodyStr = reNav.ReplaceAllString(bodyStr, "window.__proxyNav($1)$2")
 
 		baseTag := fmt.Sprintf(`<base href="%s" />`, baseURL)
 		polyfill := fmt.Sprintf(`
 <style>
-html {
+html, body {
   margin: 0 !important;
   padding: 0 !important;
   width: 100%% !important;
@@ -1735,17 +1829,21 @@ html {
   overflow: hidden !important;
   background-color: transparent !important;
 }
-body {
-  margin: 0 !important;
-  padding: 0 !important;
-  overflow: hidden !important;
-  background-color: transparent !important;
-}
-div#tvbild, div[data-type="video/broadcast"], div[type="video/broadcast"] {
+div#tvbild, div[data-type="video/broadcast"], div[type="video/broadcast"], div#playerHolder {
   background: transparent !important;
 }
 </style>
 <script>
+window.__hbbtvBase = %q;
+window.__proxyNav = function(u) {
+  if (!u) return;
+  var resolved = u;
+  try {
+    resolved = new URL(u, window.__hbbtvBase).href;
+  } catch(e) {}
+  window.location.href = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+};
+
 window.VK_RED = 403;
 window.VK_GREEN = 404;
 window.VK_YELLOW = 405;
@@ -1765,15 +1863,13 @@ if (!window.KeyEvent) {
   };
 }
 
-// Intercept XMLHttpRequest and fetch to resolve relative URLs against baseURL and bypass CORS
-var __hbbtvBase = %q;
 (function() {
   var origOpen = window.XMLHttpRequest.prototype.open;
   window.XMLHttpRequest.prototype.open = function(method, u, async, user, password) {
     if (u && typeof u === 'string') {
       if (!u.match(/^https?:\/\//i)) {
         try {
-          var resolved = new URL(u, __hbbtvBase).href;
+          var resolved = new URL(u, window.__hbbtvBase).href;
           u = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
         } catch(e) {}
       } else if (!u.startsWith(window.location.origin)) {
@@ -1789,7 +1885,7 @@ var __hbbtvBase = %q;
       if (typeof input === 'string') {
         if (!input.match(/^https?:\/\//i)) {
           try {
-            var resolved = new URL(input, __hbbtvBase).href;
+            var resolved = new URL(input, window.__hbbtvBase).href;
             input = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
           } catch(e) {}
         } else if (!input.startsWith(window.location.origin)) {
@@ -1800,21 +1896,20 @@ var __hbbtvBase = %q;
     };
   }
 
-  // Intercept getElementsByTagName('object') so HbbTV scripts find our div mock objects
   var origGetElementsByTagName = document.getElementsByTagName.bind(document);
   document.getElementsByTagName = function(tag) {
     if (tag && tag.toLowerCase() === 'object') {
       var real = Array.prototype.slice.call(origGetElementsByTagName('object'));
-      var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #oipfcfg, #mybroadcast, #oipfAppMan, #oipfConfig'));
+      var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #appMan, #oipfcfg, #appConf, #mybroadcast, #oipfAppMan, #oipfConfig'));
       return real.concat(mocks);
     }
     return origGetElementsByTagName(tag);
   };
 })();
 
-// Complete OIPF & Broadcast Object Polyfill
 var mockKeyset = {
   setValue: function() {},
+  value: 255,
   RED: 1,
   GREEN: 2,
   YELLOW: 4,
@@ -1828,7 +1923,12 @@ var mockApp = {
   hide: function() {},
   activate: function() {},
   activateInput: function() {},
-  createApplication: function() {},
+  createApplication: function(uri, createChild) {
+    if (uri) {
+      window.__proxyNav(uri);
+    }
+    return mockApp;
+  },
   destroyApplication: function() {},
   privateData: {
     keyset: mockKeyset
@@ -1852,7 +1952,7 @@ var mockBc = {
   release: function() {},
   stop: function() {},
   play: function() { return 0; },
-  currentChannel: { name: 'DVB Broadcast', sid: 3500 },
+  currentChannel: { name: 'DVB Broadcast', sid: 101 },
   getChannelConfig: function() {
     return {
       channelList: {
@@ -1866,23 +1966,25 @@ window.oipfApplicationManager = function() { return mockAppMan; };
 window.oipfConfiguration = function() { return mockConfig; };
 
 function initHbbtvMocks() {
-  document.querySelectorAll('#appmgr, #oipfAppMan, [type*="ApplicationManager"], [data-type*="ApplicationManager"]').forEach(function(el) {
+  document.querySelectorAll('#appmgr, #appMan, #oipfAppMan, [type*="ApplicationManager"], [data-type*="ApplicationManager"]').forEach(function(el) {
     Object.assign(el, mockAppMan);
+    el.getOwnerApplication = function() { return mockApp; };
   });
-  document.querySelectorAll('#oipfcfg, #oipfConfig, [type*="Configuration"], [data-type*="Configuration"]').forEach(function(el) {
+  document.querySelectorAll('#oipfcfg, #appConf, #oipfConfig, [type*="Configuration"], [data-type*="Configuration"]').forEach(function(el) {
     Object.assign(el, mockConfig);
   });
   document.querySelectorAll('#mybroadcast, #tvbild, [type*="broadcast"], [data-type*="broadcast"]').forEach(function(el) {
     Object.assign(el, mockBc);
   });
-  var rb = document.getElementById('redbutton');
-  if (rb) {
-    rb.style.cursor = 'pointer';
-    rb.onclick = function() { window.sendHbbtvKey(403); };
-  }
+  document.querySelectorAll('#redbutton, #RedButton, [id*="redbutton" i], [class*="redbutton" i], [id*="RedButton"]').forEach(function(el) {
+    el.style.cursor = 'pointer';
+    el.onclick = function(e) {
+      if (e) e.stopPropagation();
+      window.sendHbbtvKey(403);
+    };
+  });
 }
 
-// Auto-scale 1280x720 HbbTV canvas to perfectly fit any iframe/modal size
 function fitHbbTV() {
   var w = window.innerWidth || document.documentElement.clientWidth || 1280;
   var h = window.innerHeight || document.documentElement.clientHeight || 720;
@@ -1901,30 +2003,55 @@ function fitHbbTV() {
 }
 
 window.sendHbbtvKey = function(code) {
-  var keys = [code];
-  if (code === 403) keys.push(116);
-  if (code === 404) keys.push(117);
-  if (code === 405) keys.push(118);
-  if (code === 406) keys.push(119);
-  keys.forEach(function(k) {
-    var evt = document.createEvent('Events');
-    evt.initEvent('keydown', true, true);
-    evt.keyCode = k;
-    evt.which = k;
-    document.dispatchEvent(evt);
-    window.dispatchEvent(evt);
+  var codes = [code];
+  if (code === 403) codes.push(116);
+  if (code === 404) codes.push(117);
+  if (code === 405) codes.push(118);
+  if (code === 406) codes.push(119);
+
+  codes.forEach(function(k) {
+    ['keydown', 'keyup'].forEach(function(evtType) {
+      try {
+        var evt = new KeyboardEvent(evtType, {
+          bubbles: true,
+          cancelable: true,
+          keyCode: k,
+          which: k,
+          view: window
+        });
+        Object.defineProperty(evt, 'keyCode', { get: function() { return k; } });
+        Object.defineProperty(evt, 'which', { get: function() { return k; } });
+        document.dispatchEvent(evt);
+        window.dispatchEvent(evt);
+        if (document.body) document.body.dispatchEvent(evt);
+        if (document.activeElement && document.activeElement !== document.body) {
+          document.activeElement.dispatchEvent(evt);
+        }
+      } catch(e) {}
+
+      try {
+        var legacyEvt = document.createEvent('Events');
+        legacyEvt.initEvent(evtType, true, true);
+        legacyEvt.keyCode = k;
+        legacyEvt.which = k;
+        Object.defineProperty(legacyEvt, 'keyCode', { get: function() { return k; } });
+        Object.defineProperty(legacyEvt, 'which', { get: function() { return k; } });
+        document.dispatchEvent(legacyEvt);
+        window.dispatchEvent(legacyEvt);
+      } catch(e) {}
+    });
   });
 };
 
 window.addEventListener('keydown', function(e) {
   var code = e.keyCode || e.which;
-  if (code === 82 || code === 49) { // R or 1 -> VK_RED
+  if (code === 82 || code === 49) {
     window.sendHbbtvKey(403);
-  } else if (code === 71 || code === 50) { // G or 2 -> VK_GREEN
+  } else if (code === 71 || code === 50) {
     window.sendHbbtvKey(404);
-  } else if (code === 89 || code === 51) { // Y or 3 -> VK_YELLOW
+  } else if (code === 89 || code === 51) {
     window.sendHbbtvKey(405);
-  } else if (code === 66 || code === 52) { // B or 4 -> VK_BLUE
+  } else if (code === 66 || code === 52) {
     window.sendHbbtvKey(406);
   }
 });
@@ -1942,16 +2069,21 @@ setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 80);
 setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 400);
 </script>`, baseURL)
 
-		if idx := strings.Index(strings.ToLower(bodyStr), "</head>"); idx != -1 {
-			bodyStr = bodyStr[:idx] + baseTag + polyfill + bodyStr[idx:]
-		} else if idx := strings.Index(strings.ToLower(bodyStr), "<head>"); idx != -1 {
-			bodyStr = bodyStr[:idx+6] + baseTag + polyfill + bodyStr[idx+6:]
-		} else if idx := strings.Index(strings.ToLower(bodyStr), "<head "); idx != -1 {
-			endHead := strings.Index(bodyStr[idx:], ">")
-			if endHead != -1 {
-				insertAt := idx + endHead + 1
-				bodyStr = bodyStr[:insertAt] + baseTag + polyfill + bodyStr[insertAt:]
+		// Inject <base> tag and polyfill at the very top of <head> so it takes effect before any external scripts/links
+		headIdx := -1
+		lowerBody := strings.ToLower(bodyStr)
+		if idx := strings.Index(lowerBody, "<head>"); idx != -1 {
+			headIdx = idx + 6
+		} else if idx := strings.Index(lowerBody, "<head "); idx != -1 {
+			if endHead := strings.Index(lowerBody[idx:], ">"); endHead != -1 {
+				headIdx = idx + endHead + 1
 			}
+		}
+
+		if headIdx != -1 {
+			bodyStr = bodyStr[:headIdx] + baseTag + polyfill + bodyStr[headIdx:]
+		} else if idx := strings.Index(lowerBody, "</head>"); idx != -1 {
+			bodyStr = bodyStr[:idx] + baseTag + polyfill + bodyStr[idx:]
 		} else {
 			bodyStr = baseTag + polyfill + bodyStr
 		}

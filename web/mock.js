@@ -713,6 +713,54 @@
       });
     }
 
+    // HbbTV Proxy Simulator
+    if (pathname.startsWith('/api/hbbtv/')) {
+      const mockHbbtvHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>HbbTV Interactive Portal (Simulated)</title>
+  <style>
+    body {
+      margin: 0; padding: 2rem; background: radial-gradient(circle at center, #1e293b, #0f172a);
+      color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; box-sizing: border-box; text-align: center;
+    }
+    .badge { background: #ef4444; color: #fff; padding: 4px 10px; border-radius: 999px; font-weight: bold; font-size: 0.85rem; margin-bottom: 1rem; }
+    h1 { margin: 0 0 0.5rem 0; font-size: 2.2rem; }
+    p { color: #94a3b8; max-width: 600px; line-height: 1.5; font-size: 1.05rem; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-top: 2rem; width: 100%; max-width: 700px; }
+    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 1.2rem; cursor: pointer; transition: transform 0.2s, background 0.2s; }
+    .card:hover { transform: translateY(-3px); background: rgba(255,255,255,0.12); }
+    .btn-row { display: flex; gap: 12px; margin-top: 2rem; }
+    .btn-key { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 600; padding: 6px 12px; border-radius: 6px; background: rgba(255,255,255,0.1); }
+    .dot-red { color: #ef4444; } .dot-green { color: #22c55e; } .dot-yellow { color: #eab308; } .dot-blue { color: #3b82f6; }
+  </style>
+</head>
+<body>
+  <div class="badge">● HbbTV 2.0.3 APPLICATION</div>
+  <h1>Interactive Catch-up &amp; On-Demand</h1>
+  <p>Welcome to the digital broadcast interactive TV portal. Use your remote color buttons or keyboard keys [R, G, Y, B] to navigate.</p>
+  <div class="grid">
+    <div class="card" onclick="alert('Catch-up TV Selected')"><h3>📺 Catch-Up</h3><p style="font-size:0.85rem;">Watch past 7 days</p></div>
+    <div class="card" onclick="alert('Live Radio Selected')"><h3>📻 Live Radio</h3><p style="font-size:0.85rem;">Broadcast audio streams</p></div>
+    <div class="card" onclick="alert('News & Weather Selected')"><h3>📰 News</h3><p style="font-size:0.85rem;">Top headlines &amp; forecast</p></div>
+    <div class="card" onclick="alert('Media Player Selected')"><h3>🎬 On-Demand</h3><p style="font-size:0.85rem;">Special series &amp; movies</p></div>
+  </div>
+  <div class="btn-row">
+    <div class="btn-key"><span class="dot-red">●</span> Red: Home / Exit</div>
+    <div class="btn-key"><span class="dot-green">●</span> Green: Catch-up</div>
+    <div class="btn-key"><span class="dot-yellow">●</span> Yellow: Search</div>
+    <div class="btn-key"><span class="dot-blue">●</span> Blue: Teletext</div>
+  </div>
+</body>
+</html>`;
+      return new Response(mockHbbtvHtml, {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=UTF-8' }
+      });
+    }
+
     // Fallback to original fetch
     try {
       return await origFetch(url, options);

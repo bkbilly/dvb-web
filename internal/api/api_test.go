@@ -252,3 +252,109 @@ func TestAPIScheduleFutureRecording(t *testing.T) {
 		t.Errorf("Expected status 'scheduled', got '%s'", scheduledRec.Status)
 	}
 }
+
+func TestHbbTVProxy(t *testing.T) {
+	// 1. Mock Broadcaster HbbTV Server
+	mockBroadcaster := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start.php":
+			w.Header().Set("Content-Type", "application/vnd.hbbtv.xhtml+xml; charset=UTF-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html>
+<head>
+<title>HbbTV Test</title>
+<link rel="stylesheet" type="text/css" href="ram/start.css" />
+<script type="text/javascript" src="ram/keycodes-min.js"></script>
+<script type="text/javascript">
+function goRed(url) {
+	location.href = url;
+}
+</script>
+</head>
+<body>
+<div id="redbutton"><img src="img/red.png" /></div>
+</body>
+</html>`))
+		case "/ram/start.css":
+			w.Header().Set("Content-Type", "text/css")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`body { background: transparent; }`))
+		case "/ram/keycodes-min.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`var VK_RED = 403; document.location.href = "http://example.com/portal";`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockBroadcaster.Close()
+
+	server, database, pool, rec, tmpDir := setupTestServer(t)
+	defer os.RemoveAll(tmpDir)
+	defer database.Close()
+	defer pool.StopAll()
+	defer rec.Stop()
+
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux, "./web")
+
+	// 2. Fetch main HbbTV page via proxy
+	mainURL := "/api/hbbtv/proxy?url=" + mockBroadcaster.URL + "/start.php"
+	req := httptest.NewRequest(http.MethodGet, mainURL, nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from HbbTV proxy, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !bytes.Contains([]byte(body), []byte("window.__proxyNav")) {
+		t.Errorf("Expected body to contain polyfill 'window.__proxyNav'")
+	}
+	if !bytes.Contains([]byte(body), []byte("window.sendHbbtvKey")) {
+		t.Errorf("Expected body to contain 'window.sendHbbtvKey'")
+	}
+	if !bytes.Contains([]byte(body), []byte("<base href=")) {
+		t.Errorf("Expected body to contain '<base href='")
+	}
+	// Check that relative script/css were rewritten to proxy URLs
+	if !bytes.Contains([]byte(body), []byte("/api/hbbtv/proxy?url=")) {
+		t.Errorf("Expected static assets to be rewritten to /api/hbbtv/proxy?url=")
+	}
+	// Check that location.href was rewritten
+	if bytes.Contains([]byte(body), []byte("location.href = url")) {
+		t.Errorf("Expected location.href to be rewritten to window.__proxyNav")
+	}
+
+	// 3. Test subpath relative asset resolution using Referer (e.g. /api/hbbtv/ram/keycodes-min.js)
+	subReq := httptest.NewRequest(http.MethodGet, "/api/hbbtv/ram/keycodes-min.js", nil)
+	subReq.Header.Set("Referer", "http://127.0.0.1:8080"+mainURL)
+	subW := httptest.NewRecorder()
+	mux.ServeHTTP(subW, subReq)
+
+	if subW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for sub-resource via referer, got %d: %s", subW.Code, subW.Body.String())
+	}
+	if subW.Header().Get("Content-Type") != "application/javascript; charset=UTF-8" {
+		t.Errorf("Expected Content-Type 'application/javascript; charset=UTF-8', got '%s'", subW.Header().Get("Content-Type"))
+	}
+	subBody := subW.Body.String()
+	if !bytes.Contains([]byte(subBody), []byte("window.__proxyNav(\"http://example.com/portal\")")) {
+		t.Errorf("Expected JS location navigation to be rewritten to window.__proxyNav, got: %s", subBody)
+	}
+
+	// 4. Test CSS sub-resource
+	cssReq := httptest.NewRequest(http.MethodGet, "/api/hbbtv/ram/start.css", nil)
+	cssReq.Header.Set("Referer", "http://127.0.0.1:8080"+mainURL)
+	cssW := httptest.NewRecorder()
+	mux.ServeHTTP(cssW, cssReq)
+
+	if cssW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for CSS sub-resource, got %d: %s", cssW.Code, cssW.Body.String())
+	}
+	if cssW.Header().Get("Content-Type") != "text/css; charset=UTF-8" {
+		t.Errorf("Expected Content-Type 'text/css; charset=UTF-8', got '%s'", cssW.Header().Get("Content-Type"))
+	}
+}
