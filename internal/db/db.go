@@ -1053,7 +1053,7 @@ func (d *Database) ListRecordings() ([]Recording, error) {
 	}
 	defer rows.Close()
 
-	var list []Recording
+	list := make([]Recording, 0)
 	for rows.Next() {
 		var rec Recording
 		var startRaw, endRaw, createdRaw interface{}
@@ -1089,7 +1089,7 @@ func (d *Database) ListDueScheduledRecordings(now time.Time) ([]Recording, error
 	}
 	defer rows.Close()
 
-	var list []Recording
+	list := make([]Recording, 0)
 	for rows.Next() {
 		var rec Recording
 		var startRaw, endRaw, createdRaw interface{}

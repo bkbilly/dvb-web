@@ -5095,7 +5095,10 @@ async function loadRecordings() {
     ]);
 
     if (resRecs && resRecs.ok) {
-      currentRecordings = await resRecs.json();
+      const data = await resRecs.json();
+      currentRecordings = Array.isArray(data) ? data : [];
+    } else {
+      currentRecordings = [];
     }
     if (resStorage && resStorage.ok) {
       recordingStorageStats = await resStorage.json();
@@ -5130,11 +5133,12 @@ function renderRecordingsStats() {
   const statTime = document.getElementById('stat-total-time');
   const statDisk = document.getElementById('stat-disk-free');
 
-  const totalCount = currentRecordings.length;
+  const list = Array.isArray(currentRecordings) ? currentRecordings : [];
+  const totalCount = list.length;
   let totalBytes = 0;
   let totalDuration = 0;
 
-  currentRecordings.forEach(r => {
+  list.forEach(r => {
     if (r.file_size) totalBytes += r.file_size;
     if (r.duration) totalDuration += r.duration;
   });
@@ -5228,8 +5232,9 @@ function updateRecordingsChannelFilterOptions() {
   const channelFilter = document.getElementById('rec-channel-filter');
   if (!channelFilter) return;
 
+  const list = Array.isArray(currentRecordings) ? currentRecordings : [];
   const channelNames = new Set();
-  currentRecordings.forEach(r => {
+  list.forEach(r => {
     const ch = getRecordingChannelName(r);
     if (ch) channelNames.add(ch);
   });
@@ -5273,9 +5278,10 @@ function renderRecordingsList() {
   const filterCountEl = document.getElementById('rec-filter-count');
   const clearFailedBtn = document.getElementById('btn-clear-failed');
 
-  const active = currentRecordings.filter(r => r.status === 'recording');
-  const scheduled = currentRecordings.filter(r => r.status === 'scheduled');
-  const completed = currentRecordings.filter(r => r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled');
+  const list = Array.isArray(currentRecordings) ? currentRecordings : [];
+  const active = list.filter(r => r.status === 'recording');
+  const scheduled = list.filter(r => r.status === 'scheduled');
+  const completed = list.filter(r => r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled');
 
   if (activeCount) activeCount.textContent = active.length;
   if (schedCount) schedCount.textContent = scheduled.length;

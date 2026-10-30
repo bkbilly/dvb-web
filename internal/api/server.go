@@ -1332,6 +1332,9 @@ func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
 				recs[i] = *active
 			}
 		}
+		if recs == nil {
+			recs = []db.Recording{}
+		}
 		jsonResponse(w, http.StatusOK, recs)
 
 	case http.MethodPost:
