@@ -226,13 +226,19 @@ func (d *Database) migrate() error {
 	_, _ = d.db.Exec("UPDATE channels SET service_id = 3600 WHERE frequency = 522000000 AND service_id = 1600;")
 	_, _ = d.db.Exec("UPDATE channels SET service_id = 3700 WHERE frequency = 522000000 AND service_id = 1700;")
 
-	// Clean up any corrupt dates or duplicate event_ids from older schema versions
+	// Clean up any corrupt dates, legacy time formats, or duplicate events
 	_, _ = d.db.Exec(`
+		UPDATE epg_events SET start_time = substr(start_time, 1, 19) WHERE start_time LIKE '% +0000 UTC';
+		UPDATE epg_events SET end_time = substr(end_time, 1, 19) WHERE end_time LIKE '% +0000 UTC';
 		DELETE FROM epg_events WHERE id NOT IN (
 			SELECT MAX(id) FROM epg_events GROUP BY channel_id, event_id
 		);
+		DELETE FROM epg_events WHERE id NOT IN (
+			SELECT MAX(id) FROM epg_events GROUP BY channel_id, start_time
+		);
 		DELETE FROM epg_events WHERE start_time < '2024-01-01' OR start_time > '2035-01-01';
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_epg_chan_event ON epg_events(channel_id, event_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_epg_chan_start ON epg_events(channel_id, start_time);
 	`)
 
 	// Clean up any legacy descriptions that were split across extended event descriptors with \n
@@ -554,35 +560,91 @@ func (d *Database) SaveEPGEvents(events []EPGEvent) error {
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`
-		INSERT INTO epg_events (channel_id, event_id, start_time, end_time, titles_json, descriptions_json, genres_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(channel_id, event_id) DO UPDATE SET
-			start_time=excluded.start_time,
-			end_time=excluded.end_time,
-			titles_json=CASE WHEN excluded.titles_json != '{}' THEN excluded.titles_json ELSE epg_events.titles_json END,
-			descriptions_json=CASE WHEN length(excluded.descriptions_json) > 4 THEN excluded.descriptions_json ELSE epg_events.descriptions_json END,
-			genres_json=CASE WHEN excluded.genres_json != '[]' THEN excluded.genres_json ELSE epg_events.genres_json END
+	findStmt, err := tx.Prepare(`
+		SELECT id, titles_json, descriptions_json, genres_json
+		FROM epg_events
+		WHERE channel_id = ? AND (event_id = ? OR start_time = ?)
+		ORDER BY CASE WHEN event_id = ? THEN 0 ELSE 1 END
+		LIMIT 1
 	`)
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer findStmt.Close()
+
+	updateStmt, err := tx.Prepare(`
+		UPDATE epg_events
+		SET event_id = ?, start_time = ?, end_time = ?, titles_json = ?, descriptions_json = ?, genres_json = ?
+		WHERE id = ?
+	`)
+	if err != nil {
+		return err
+	}
+	defer updateStmt.Close()
+
+	insertStmt, err := tx.Prepare(`
+		INSERT INTO epg_events (channel_id, event_id, start_time, end_time, titles_json, descriptions_json, genres_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer insertStmt.Close()
 
 	for _, e := range events {
 		if e.StartTime.IsZero() || e.EndTime.IsZero() || e.EndTime.Before(e.StartTime) {
 			continue
 		}
+		if e.EndTime.Sub(e.StartTime) > 24*time.Hour || e.EndTime.Sub(e.StartTime) < time.Minute {
+			continue
+		}
 		sTime := e.StartTime.UTC().Format("2006-01-02 15:04:05")
 		eTime := e.EndTime.UTC().Format("2006-01-02 15:04:05")
 
-		titlesBytes, _ := json.Marshal(e.Titles)
-		descBytes, _ := json.Marshal(e.Descriptions)
-		genreBytes, _ := json.Marshal(e.Genres)
-
-		_, err := stmt.Exec(e.ChannelID, e.EventID, sTime, eTime, string(titlesBytes), string(descBytes), string(genreBytes))
-		if err != nil {
-			return err
+		var existingID int64
+		var existingTitlesJSON, existingDescJSON, existingGenresJSON string
+		err := findStmt.QueryRow(e.ChannelID, e.EventID, sTime, e.EventID).Scan(&existingID, &existingTitlesJSON, &existingDescJSON, &existingGenresJSON)
+		if err == nil && existingID > 0 {
+			var mergedTitles map[string]string
+			var mergedDesc map[string]string
+			var mergedGenres []string
+			_ = json.Unmarshal([]byte(existingTitlesJSON), &mergedTitles)
+			_ = json.Unmarshal([]byte(existingDescJSON), &mergedDesc)
+			_ = json.Unmarshal([]byte(existingGenresJSON), &mergedGenres)
+			if mergedTitles == nil {
+				mergedTitles = make(map[string]string)
+			}
+			for k, v := range e.Titles {
+				if v != "" {
+					mergedTitles[k] = v
+				}
+			}
+			if mergedDesc == nil {
+				mergedDesc = make(map[string]string)
+			}
+			for k, v := range e.Descriptions {
+				if v != "" {
+					mergedDesc[k] = v
+				}
+			}
+			if len(e.Genres) > 0 {
+				mergedGenres = e.Genres
+			}
+			tBytes, _ := json.Marshal(mergedTitles)
+			dBytes, _ := json.Marshal(mergedDesc)
+			gBytes, _ := json.Marshal(mergedGenres)
+			_, err = updateStmt.Exec(e.EventID, sTime, eTime, string(tBytes), string(dBytes), string(gBytes), existingID)
+			if err != nil {
+				return err
+			}
+		} else {
+			titlesBytes, _ := json.Marshal(e.Titles)
+			descBytes, _ := json.Marshal(e.Descriptions)
+			genreBytes, _ := json.Marshal(e.Genres)
+			_, err = insertStmt.Exec(e.ChannelID, e.EventID, sTime, eTime, string(titlesBytes), string(descBytes), string(genreBytes))
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -798,6 +860,38 @@ func (d *Database) scanEPGEvents(rows *sql.Rows) ([]EPGEvent, error) {
 		_ = json.Unmarshal([]byte(titlesJSON), &e.Titles)
 		_ = json.Unmarshal([]byte(descJSON), &e.Descriptions)
 		_ = json.Unmarshal([]byte(genresJSON), &e.Genres)
+
+		if e.EndTime.Before(e.StartTime) || e.EndTime.Sub(e.StartTime) > 24*time.Hour {
+			continue
+		}
+
+		// Deduplicate consecutive events for the same channel with identical start time
+		if len(events) > 0 {
+			last := &events[len(events)-1]
+			if last.ChannelID == e.ChannelID && last.StartTime.Equal(e.StartTime) {
+				if last.Titles == nil {
+					last.Titles = make(map[string]string)
+				}
+				for k, v := range e.Titles {
+					if _, exists := last.Titles[k]; !exists && v != "" {
+						last.Titles[k] = v
+					}
+				}
+				if last.Descriptions == nil {
+					last.Descriptions = make(map[string]string)
+				}
+				for k, v := range e.Descriptions {
+					if _, exists := last.Descriptions[k]; !exists && v != "" {
+						last.Descriptions[k] = v
+					}
+				}
+				if e.EndTime.After(last.EndTime) {
+					last.EndTime = e.EndTime
+				}
+				continue
+			}
+		}
+
 		events = append(events, e)
 	}
 	return events, nil

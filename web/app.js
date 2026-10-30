@@ -366,7 +366,7 @@ function switchTab(tabId) {
 
   // Trigger tab-specific loader
   if (tabId === 'epg') {
-    if (!lastEPGLoadTime || (Date.now() - lastEPGLoadTime > 5 * 60 * 1000)) {
+    if (!lastEPGLoadTime || (Date.now() - lastEPGLoadTime > 60 * 1000)) {
       loadEPGTimeline(!lastEPGLoadTime);
     } else {
       updateEPGPlayingHighlight();
@@ -831,7 +831,7 @@ function handleWSMessage(msg) {
       break;
 
     case 'epg_update':
-      // Promptly update now/next metadata without wiping timeline grid
+      // Promptly update now/next metadata and refresh TV Guide timeline
       if (window._epgDebounceTimer) clearTimeout(window._epgDebounceTimer);
       window._epgDebounceTimer = setTimeout(async () => {
         try {
@@ -849,8 +849,17 @@ function handleWSMessage(msg) {
             }
             renderChannelList();
           }
+
+          // If TV Guide is currently active, update the timeline program rows seamlessly
+          const epgTab = document.getElementById('tab-epg');
+          if (epgTab && epgTab.classList.contains('active') && timelineStartTime && timelineEndTime) {
+            await renderProgramRows(timelineStartTime, timelineEndTime);
+          } else {
+            // Mark timeline stale so switching to TV Guide loads fresh events immediately
+            lastEPGLoadTime = 0;
+          }
         } catch (_) {}
-      }, 4000);
+      }, 1000);
       break;
 
     case 'scan_progress': {
@@ -1261,6 +1270,8 @@ function updateInteractiveFeaturesUI(channel) {
   }
 }
 
+const PLAYER_AUTOHIDE_DELAY = 1800;
+
 function showPlayerUI(channel) {
   if (playerHideTimer) {
     clearTimeout(playerHideTimer);
@@ -1293,10 +1304,10 @@ function showPlayerUI(channel) {
     videoOsd.style.opacity = '1';
   }
 
-  schedulePlayerUIHide(3500);
+  schedulePlayerUIHide(PLAYER_AUTOHIDE_DELAY);
 }
 
-function schedulePlayerUIHide(delay = 3500) {
+function schedulePlayerUIHide(delay = PLAYER_AUTOHIDE_DELAY) {
   if (playerHideTimer) {
     clearTimeout(playerHideTimer);
     playerHideTimer = null;
@@ -1830,7 +1841,7 @@ function setupPlayerControls() {
     });
     bottomBar.addEventListener('mouseleave', () => {
       isMouseOverControls = false;
-      schedulePlayerUIHide(3500);
+      schedulePlayerUIHide(500);
     });
   }
 
@@ -1842,7 +1853,7 @@ function setupPlayerControls() {
     });
     playerControls.addEventListener('mouseleave', () => {
       isMouseOverControls = false;
-      schedulePlayerUIHide(3500);
+      schedulePlayerUIHide(500);
     });
   }
 
@@ -1854,7 +1865,7 @@ function setupPlayerControls() {
     });
     timeshiftBar.addEventListener('mouseleave', () => {
       isMouseOverControls = false;
-      schedulePlayerUIHide(3500);
+      schedulePlayerUIHide(500);
     });
   }
 
@@ -1867,7 +1878,7 @@ function setupPlayerControls() {
   });
   videoOsd.addEventListener('mouseleave', () => {
     isMouseOverOSD = false;
-    schedulePlayerUIHide(3500);
+    schedulePlayerUIHide(500);
   });
   videoOsd.addEventListener('click', () => {
     openLiveProgramDetails();
@@ -1879,8 +1890,19 @@ function setupPlayerControls() {
   });
   wrapper.addEventListener('mouseleave', () => {
     wrapper.classList.remove('cursor-hidden');
-    schedulePlayerUIHide(800);
+    schedulePlayerUIHide(500);
   });
+
+  // Scrollwheel on live TV to change volume
+  wrapper.addEventListener('wheel', (e) => {
+    if (isOverlayOrModalOpen()) return;
+    if (e.target.closest('.aspect-ratio-menu') || e.target.closest('.audio-tracks-menu') || e.target.closest('.subtitles-menu')) return;
+    e.preventDefault();
+    const step = 0.05;
+    const delta = e.deltaY < 0 ? step : -step;
+    adjustVolume(delta);
+    showPlayerUI();
+  }, { passive: false });
   window.addEventListener('resize', () => {
     updateMobileVideoHeight();
     // Never show OSD on window resize! Only ensure controls stay visible if in dark letterbox space
@@ -1915,14 +1937,30 @@ function setupPlayerControls() {
 function adjustVolume(delta) {
   const volSlider = document.getElementById('vol-slider');
   const btnMute = document.getElementById('btn-mute');
-  video.volume = Math.max(0, Math.min(1, Math.round((video.volume + delta) * 100) / 100));
-  video.muted = false;
-  if (volSlider) volSlider.value = video.volume;
-  if (btnMute) btnMute.textContent = video.volume === 0 ? '🔇' : (video.volume < 0.5 ? '🔉' : '🔊');
+  const v1 = document.getElementById('tv-video');
+  const v2 = document.getElementById('tv-video-next');
+  const currentVol = (video ? video.volume : (v1 ? v1.volume : 1));
+  const newVol = Math.max(0, Math.min(1, Math.round((currentVol + delta) * 100) / 100));
+
+  if (video) {
+    video.volume = newVol;
+    video.muted = false;
+  }
+  if (v1 && v1 !== video) {
+    v1.volume = newVol;
+    v1.muted = false;
+  }
+  if (v2 && v2 !== video) {
+    v2.volume = newVol;
+    v2.muted = false;
+  }
+
+  if (volSlider) volSlider.value = newVol;
+  if (btnMute) btnMute.textContent = newVol === 0 ? '🔇' : (newVol < 0.5 ? '🔉' : '🔊');
   const volGroup = document.querySelector('.vol-group');
-  if (volGroup) volGroup.classList.toggle('is-muted', video.volume === 0);
+  if (volGroup) volGroup.classList.toggle('is-muted', newVol === 0);
   try {
-    localStorage.setItem('dvb_player_volume', video.volume);
+    localStorage.setItem('dvb_player_volume', newVol);
     localStorage.setItem('dvb_player_muted', 'false');
   } catch (_) {}
 }
@@ -3166,7 +3204,7 @@ async function renderProgramRows(startTime, endTime) {
     const rawEvents = eventsByChannel.get(c.id) || [];
 
     // Parse, filter valid ranges, and sort strictly chronologically by start_time
-    const validEvents = [];
+    const sortedEvents = [];
     for (let i = 0; i < rawEvents.length; i++) {
       const e = rawEvents[i];
       const s = new Date(e.start_time);
@@ -3174,30 +3212,61 @@ async function renderProgramRows(startTime, endTime) {
       if (!isNaN(s) && !isNaN(end) && end > startTime && s < endTime && end > s) {
         e._start = s;
         e._end = end;
-        validEvents.push(e);
+        sortedEvents.push(e);
       }
     }
-    validEvents.sort((a, b) => a._start - b._start);
+    // Sort primarily by start time, and secondarily shorter duration first (real shows before broad placeholders)
+    sortedEvents.sort((a, b) => a._start - b._start || (a._end - a._start) - (b._end - b._start));
 
-    let lastEndPx = 0;
+    // Deduplicate and resolve overlapping programs on the same channel
+    const validEvents = [];
+    let prevEv = null;
+    for (let i = 0; i < sortedEvents.length; i++) {
+      const e = sortedEvents[i];
+      const durMinutes = (e._end - e._start) / 60000;
+      if (durMinutes <= 1 || durMinutes > 24 * 60) continue; // Skip corrupt or absurd >24h spans
+
+      if (prevEv) {
+        const diffStartMs = Math.abs(e._start.getTime() - prevEv._start.getTime());
+        // Same or virtually identical start time (< 60s) -> Duplicate!
+        if (diffStartMs < 60000) {
+          // Merge metadata into prevEv if prevEv is missing language
+          if (!getLocalized(prevEv.titles, currentLanguage) && getLocalized(e.titles, currentLanguage)) {
+            prevEv.titles = { ...prevEv.titles, ...e.titles };
+          }
+          continue; // Discard duplicate!
+        }
+
+        // If this event starts before prevEv ends (overlap)
+        if (e._start < prevEv._end) {
+          // If prevEv is a huge placeholder (> 4x duration of e)
+          if ((prevEv._end - prevEv._start) > 4 * (e._end - e._start)) {
+            validEvents.pop(); // Remove the placeholder
+          } else {
+            // Normal transition: clamp prevEv end time to when e starts
+            prevEv._end = e._start;
+          }
+        }
+      }
+      validEvents.push(e);
+      prevEv = e;
+    }
+
     const rowFragment = document.createDocumentFragment();
 
     for (let i = 0; i < validEvents.length; i++) {
       const e = validEvents[i];
+      if (e._end <= e._start) continue;
+
       const effectiveStart = e._start < startTime ? startTime : e._start;
+      const effectiveEnd = e._end > endTime ? endTime : e._end;
+      if (effectiveEnd <= effectiveStart) continue;
+
       const offsetMinutes = Math.max(0, (effectiveStart - startTime) / 60000);
-      const durationMinutes = Math.max(10, (e._end - effectiveStart) / 60000);
+      const durationMinutes = (effectiveEnd - effectiveStart) / 60000;
 
-      let leftPx = offsetMinutes * PIXELS_PER_MINUTE;
-      const targetEndPx = (offsetMinutes + durationMinutes) * PIXELS_PER_MINUTE;
-
-      // Prevent block overlapping
-      if (leftPx < lastEndPx) {
-        leftPx = lastEndPx;
-      }
-
-      const widthPx = Math.max(14, targetEndPx - leftPx - 4);
-      lastEndPx = leftPx + widthPx + 4;
+      const leftPx = offsetMinutes * PIXELS_PER_MINUTE;
+      const widthPx = Math.max(14, durationMinutes * PIXELS_PER_MINUTE - 4);
 
       const block = document.createElement('div');
       const isNow = nowMs >= e._start.getTime() && nowMs < e._end.getTime();

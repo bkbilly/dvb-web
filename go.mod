@@ -3,7 +3,6 @@ module dvb-web
 go 1.26.8
 
 require (
-	github.com/gogpu/systray v0.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/interceptor v0.1.49
@@ -15,8 +14,6 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/go-webgpu/goffi v0.6.3 // indirect
-	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/pion/datachannel v1.6.3 // indirect

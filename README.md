@@ -6,7 +6,6 @@
 
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![OS - Linux](https://img.shields.io/badge/OS-Linux-blue?logo=linux&logoColor=white)]()
-[![OS - Windows](https://img.shields.io/badge/OS-Windows-blue?logo=windows&logoColor=white)]()
 [![Go](https://img.shields.io/badge/Go-1.24+-blue?logo=go&logoColor=white)]()
 [![GHCR](https://img.shields.io/badge/GHCR-dvb--web-blue?logo=github&logoColor=white)](https://github.com/bkbilly/dvb-web/pkgs/container/dvb-web)
 
@@ -70,18 +69,6 @@ docker run -d \
   -v $(pwd)/data:/app/data \
   ghcr.io/bkbilly/dvb-web:latest
 ```
-
----
-
-### Windows Standalone Executable
-
-1. Download **`dvb-web-windows-amd64.zip`** from [GitHub Releases](https://github.com/bkbilly/dvb-web/releases).
-2. Extract and double-click **`dvb-web.exe`**.
-3. The TV broadcast icon will appear in your **Windows Taskbar / System Tray** (bottom-right near the clock).
-4. Click the icon (or right-click &rarr; **Open Web UI**) to launch DVB-Web in your default browser (`http://localhost:8080`).
-5. To stop the application, right-click the taskbar icon and select **Exit**.
-
-> **Note**: Place `ffmpeg.exe` in the same directory or install FFmpeg to your system PATH for video transcoding.
 
 ---
 

@@ -22,9 +22,3 @@ func GetFileSystem(overrideDir string) http.FileSystem {
 	}
 	return http.FS(EmbeddedFS)
 }
-
-// GetIconPNG returns the raw PNG icon bytes embedded in the binary
-func GetIconPNG() []byte {
-	data, _ := EmbeddedFS.ReadFile("favicon.png")
-	return data
-}

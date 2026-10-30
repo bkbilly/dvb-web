@@ -17,7 +17,6 @@ import (
 	"dvb-web/internal/epg"
 	"dvb-web/internal/recorder"
 	"dvb-web/internal/transcoder"
-	"dvb-web/internal/tray"
 	"dvb-web/internal/tuner"
 	"dvb-web/internal/webrtc"
 )
@@ -27,8 +26,6 @@ func main() {
 	dataDir := flag.String("data-dir", "./data", "Path to data directory for database and channel logos")
 	webDir := flag.String("web-dir", "./web", "Path to web frontend assets directory (defaults to embedded assets)")
 	mock := flag.Bool("mock", false, "Force mock/virtual tuner for testing without physical DVB hardware")
-	noTray := flag.Bool("no-tray", false, "Disable taskbar system tray indicator")
-	openBrowser := flag.Bool("open", false, "Open web UI in default browser on launch")
 	flag.Parse()
 
 	log.Println("==================================================")
@@ -55,7 +52,7 @@ func main() {
 		if server != nil {
 			epgMu.Lock()
 			now := time.Now()
-			if now.Sub(lastEPGBroadcast) >= 2*time.Minute {
+			if now.Sub(lastEPGBroadcast) >= 10*time.Second {
 				lastEPGBroadcast = now
 				epgMu.Unlock()
 				server.BroadcastEPGUpdate(events)
@@ -107,41 +104,30 @@ func main() {
 		Handler: mux,
 	}
 
-	// Graceful shutdown helper
-	shutdownServer := func() {
-		log.Println("[Server] Shutdown requested. Closing server and releasing hardware...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = srv.Shutdown(shutdownCtx)
-		cancel()
-
-		rtcManager.CloseAll()
-		rec.Stop()
-		pool.StopAll()
-		epgParser.Stop()
-		log.Println("[Server] Stopped cleanly. Goodbye!")
-	}
+	// Graceful shutdown handling (SIGINT, SIGTERM, SIGHUP)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 
 	go func() {
 		log.Printf("[Server] Web application listening on http://0.0.0.0:%d", *port)
-		if *openBrowser {
-			_ = tray.OpenBrowser(fmt.Sprintf("http://localhost:%d", *port))
-		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Fatal: HTTP server failed: %v", err)
 		}
 	}()
 
-	if *noTray {
-		stop := make(chan os.Signal, 1)
-		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-		<-stop
-		shutdownServer()
-		os.Exit(0)
-	}
+	<-stop
+	log.Println("[Server] Shutdown signal received. Closing server and releasing hardware...")
 
-	appCtx, appCancel := context.WithCancel(context.Background())
-	defer appCancel()
-	_ = tray.Run(appCtx, *port, shutdownServer)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = srv.Shutdown(shutdownCtx)
+	cancel()
+
+	rtcManager.CloseAll()
+	rec.Stop()
+	pool.StopAll()
+	epgParser.Stop()
+	log.Println("[Server] Stopped cleanly. Goodbye!")
+	os.Exit(0)
 }
 
 func seedInitialChannels(database *db.Database) {

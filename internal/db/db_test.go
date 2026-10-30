@@ -222,3 +222,66 @@ func TestSearchEPG(t *testing.T) {
 		t.Fatalf("Expected 0 results, got %d", len(resNone))
 	}
 }
+
+func TestEPGDeduplication(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "dvb-epg-dedup-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	database, err := db.Open(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	ch := &db.Channel{
+		Name:      "Channel 1",
+		Number:    1,
+		Frequency: 506000000,
+		Enabled:   true,
+	}
+	if err := database.SaveChannel(ch); err != nil {
+		t.Fatalf("SaveChannel error: %v", err)
+	}
+
+	start := time.Date(2026, 10, 30, 20, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 10, 30, 21, 0, 0, 0, time.UTC)
+
+	// Insert first event (present/following with event_id 100)
+	ev1 := db.EPGEvent{
+		ChannelID: ch.ID,
+		EventID:   100,
+		StartTime: start,
+		EndTime:   end,
+		Titles:    map[string]string{"gre": "Ειδήσεις"},
+	}
+	if err := database.SaveEPGEvents([]db.EPGEvent{ev1}); err != nil {
+		t.Fatalf("SaveEPGEvents 1 error: %v", err)
+	}
+
+	// Insert duplicate event (schedule table with different event_id 200, same start_time, English title)
+	ev2 := db.EPGEvent{
+		ChannelID: ch.ID,
+		EventID:   200,
+		StartTime: start,
+		EndTime:   end,
+		Titles:    map[string]string{"eng": "News"},
+	}
+	if err := database.SaveEPGEvents([]db.EPGEvent{ev2}); err != nil {
+		t.Fatalf("SaveEPGEvents 2 error: %v", err)
+	}
+
+	events, err := database.GetEPG(ch.ID, start.Add(-time.Hour), end.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("GetEPG error: %v", err)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("Expected exactly 1 merged event, got %d", len(events))
+	}
+	if events[0].Titles["gre"] != "Ειδήσεις" || events[0].Titles["eng"] != "News" {
+		t.Errorf("Expected merged titles, got %+v", events[0].Titles)
+	}
+}

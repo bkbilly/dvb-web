@@ -127,8 +127,8 @@ func (p *Parser) processEITSection(sec []byte, channelMap map[int]int64) {
 			break
 		}
 
-		// Discard corrupt packets or absurd years
-		if startTime.IsZero() || startTime.Year() < 2024 || startTime.Year() > 2035 || duration <= 0 {
+		// Discard corrupt packets, absurd years, or placeholder blocks > 24 hours
+		if startTime.IsZero() || startTime.Year() < 2024 || startTime.Year() > 2035 || duration <= 0 || duration > 24*time.Hour {
 			offset = descEnd
 			continue
 		}
