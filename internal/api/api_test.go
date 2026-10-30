@@ -288,7 +288,7 @@ function goRed(url) {
 		case "/ram/keycodes-min.js":
 			w.Header().Set("Content-Type", "application/javascript")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`var VK_RED = 403; document.location.href = "http://example.com/portal"; var res = t?document.location.href=t:window.close();`))
+			_, _ = w.Write([]byte(`var VK_RED = 403; document.location.href = "http://example.com/portal"; var res = t?document.location.href=t:window.close(); window.location.href = 'http://example.com/comment'//trailing comment;`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -347,6 +347,9 @@ function goRed(url) {
 	}
 	if !bytes.Contains([]byte(subBody), []byte("t?window.__proxyNav(t):window.close()")) {
 		t.Errorf("Expected ternary navigation to be rewritten without syntax error, got: %s", subBody)
+	}
+	if !bytes.Contains([]byte(subBody), []byte("window.__proxyNav('http://example.com/comment')//trailing comment;")) {
+		t.Errorf("Expected comment after navigation to remain outside function call, got: %s", subBody)
 	}
 
 	// 4. Test CSS sub-resource and url(...) rewriting

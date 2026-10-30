@@ -2612,6 +2612,18 @@ window.toggleTeletextSubtitles = toggleTeletextSubtitles;
 // ==========================================================
 // HBBTV INTERACTIVE PORTAL
 // ==========================================================
+let hbbtvMutedVideo = false;
+
+function syncPlayerMuteUI() {
+  const vid = document.getElementById('tv-video');
+  const btnMute = document.getElementById('btn-mute');
+  const volGroup = document.querySelector('.vol-group');
+  if (!vid) return;
+  const isMuted = vid.muted || vid.volume === 0;
+  if (btnMute) btnMute.textContent = isMuted ? '🔇' : (vid.volume < 0.5 ? '🔉' : '🔊');
+  if (volGroup) volGroup.classList.toggle('is-muted', isMuted);
+}
+
 function toggleHbbTV(force) {
   const modal = document.getElementById('hbbtv-modal');
   if (!modal) return;
@@ -2620,6 +2632,14 @@ function toggleHbbTV(force) {
     modal.classList.add('hidden');
     const iframe = document.getElementById('hbbtv-iframe');
     if (iframe) iframe.src = 'about:blank';
+    if (hbbtvMutedVideo) {
+      const v1 = document.getElementById('tv-video');
+      const v2 = document.getElementById('tv-video-next');
+      if (v1) v1.muted = false;
+      if (v2) v2.muted = false;
+      hbbtvMutedVideo = false;
+      syncPlayerMuteUI();
+    }
     return;
   }
   const url = (availableChannelTracks && availableChannelTracks.hbbtv_url) || (activeChannel && activeChannel.hbbtv_url) || '';
@@ -2636,6 +2656,17 @@ function toggleHbbTV(force) {
   if (iframe) iframe.src = `/api/hbbtv/proxy?url=${encodeURIComponent(url)}`;
   if (title && activeChannel) title.textContent = `🔴 HbbTV: ${activeChannel.name}`;
   modal.classList.remove('hidden');
+
+  // Mute background TV playback while HbbTV interactive portal is open
+  const v1 = document.getElementById('tv-video');
+  const v2 = document.getElementById('tv-video-next');
+  if (v1 && !v1.muted) {
+    v1.muted = true;
+    hbbtvMutedVideo = true;
+  }
+  if (v2) v2.muted = true;
+  syncPlayerMuteUI();
+
   const wrapper = document.getElementById('video-wrapper');
   if (wrapper) wrapper.classList.remove('cursor-hidden');
   showPlayerUI();

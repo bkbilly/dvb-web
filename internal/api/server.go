@@ -1799,6 +1799,8 @@ func rewriteLocationNav(code string) string {
 					}
 				} else if ch == ';' || ch == ',' || ch == '\n' || ch == '\r' {
 					break
+				} else if ch == '/' && exprEnd+1 < len(code) && (code[exprEnd+1] == '/' || code[exprEnd+1] == '*') {
+					break
 				}
 			}
 
