@@ -8,8 +8,11 @@
 [![OS - Linux](https://img.shields.io/badge/OS-Linux-blue?logo=linux&logoColor=white)]()
 [![Go](https://img.shields.io/badge/Go-1.24+-blue?logo=go&logoColor=white)]()
 [![GHCR](https://img.shields.io/badge/GHCR-dvb--web-blue?logo=github&logoColor=white)](https://github.com/bkbilly/dvb-web/pkgs/container/dvb-web)
+[![Live Demo](https://img.shields.io/badge/demo-online-brightgreen?logo=github)](https://bkbilly.github.io/dvb-web/)
 
 A fast, lightweight web TV streaming server and DVR for digital broadcast television (DVB-T/T2, DVB-C, DVB-S/S2). Built in pure Go with WebRTC for instant channel zapping, multi-tuner multiplex sharing, and native integration for **Jellyfin**, **Plex**, **Kodi**, and **VLC**.
+
+> 🎮 **Live Interactive Demo:** Try the frontend directly in your browser without hardware at [**bkbilly.github.io/dvb-web**](https://bkbilly.github.io/dvb-web/) — featuring simulated broadcast playback, 7-day EPG TV Guide, recordings management, live RF signal analyzer (`S`), and teletext (`T`).
 
 ---
 
