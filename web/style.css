@@ -597,6 +597,57 @@ body {
   white-space: nowrap;
 }
 
+/* OSD Next Program Banner */
+.osd-next-wrapper {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.35rem, 0.6vmin, 0.65rem);
+  margin-top: clamp(0.28rem, 0.5vmin, 0.55rem);
+  padding-top: clamp(0.28rem, 0.5vmin, 0.45rem);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: clamp(0.68rem, 1.25vmin, 0.92rem);
+  color: var(--text-muted, #94a3b8);
+  transition: color 0.15s ease, background-color 0.15s ease;
+  cursor: pointer;
+}
+
+.osd-next-wrapper.clickable:hover {
+  color: #e2e8f0;
+}
+
+.osd-next-wrapper.clickable:hover .osd-next-title {
+  color: #93c5fd;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.osd-next-badge {
+  font-size: clamp(0.55rem, 1vmin, 0.72rem);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(59, 130, 246, 0.2);
+  color: #93c5fd;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 3px;
+  padding: 0.08rem 0.35rem;
+  flex-shrink: 0;
+}
+
+.osd-next-time {
+  font-weight: 600;
+  color: #cbd5e1;
+  flex-shrink: 0;
+}
+
+.osd-next-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
 /* Stream Tuning / Buffering Loader */
 .stream-loader {
   position: absolute;
@@ -4831,6 +4882,11 @@ input:checked + .slider:before {
   position: absolute;
   inset: 0;
   z-index: 1000;
+  cursor: default !important;
+}
+
+.video-container .modal * {
+  cursor: auto;
 }
 
 .video-container #app-toast {

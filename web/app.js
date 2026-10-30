@@ -1438,6 +1438,64 @@ function updateOSD(channel) {
       refreshActiveChannelEPG(channel.id);
     }
   }
+
+  // Populate Next Program row
+  const nextWrapper = document.getElementById('osd-next-wrapper');
+  const nextTitleEl = document.getElementById('osd-next-title');
+  const nextTimeEl = document.getElementById('osd-next-time');
+  const nextShow = channel.next_playing;
+
+  if (nextShow && nextWrapper) {
+    const nextTitle = getLocalized(nextShow.titles, currentLanguage) || 'Upcoming Program';
+    const nextStart = new Date(nextShow.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const nextEnd = new Date(nextShow.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (nextTitleEl) nextTitleEl.textContent = nextTitle;
+    if (nextTimeEl) nextTimeEl.textContent = nextStart;
+    nextWrapper.title = `Next: ${nextTitle} (${nextStart} - ${nextEnd}) — Click to view description & schedule recording`;
+    nextWrapper.classList.remove('hidden');
+  } else if (nextWrapper) {
+    nextWrapper.classList.add('hidden');
+  }
+}
+
+async function openNextProgramDetails() {
+  const ch = activeChannel;
+  if (!ch) return;
+
+  let event = ch.next_playing;
+  // If no next_playing or missing description, query EPG events around current/next time
+  if (!event || !event.descriptions || Object.keys(event.descriptions).length === 0) {
+    try {
+      const now = new Date();
+      const from = new Date(now.getTime() - 3600000).toISOString();
+      const to = new Date(now.getTime() + 12 * 3600000).toISOString();
+      const res = await fetch(`/api/epg?channel_id=${ch.id}&from=${from}&to=${to}`);
+      if (res.ok) {
+        const events = await res.json();
+        if (events && events.length > 0) {
+          const nowMs = now.getTime();
+          const currentEnd = ch.now_playing && ch.now_playing.end_time ? new Date(ch.now_playing.end_time).getTime() : nowMs;
+          const nextEv = events.find(e => {
+            const s = new Date(e.start_time).getTime();
+            return s >= currentEnd - 60000 && s > nowMs;
+          });
+          if (nextEv) {
+            event = nextEv;
+            ch.next_playing = nextEv;
+            updateOSD(ch);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Could not fetch Next EPG details:', e);
+    }
+  }
+
+  if (event) {
+    window.showEPGModal(event, ch.name);
+  } else {
+    showToast('No upcoming program information available for this channel.', 'info');
+  }
 }
 
 async function openLiveProgramDetails() {
@@ -1880,8 +1938,12 @@ function setupPlayerControls() {
     isMouseOverOSD = false;
     schedulePlayerUIHide(500);
   });
-  videoOsd.addEventListener('click', () => {
-    openLiveProgramDetails();
+  videoOsd.addEventListener('click', (e) => {
+    if (e.target.closest('#osd-next-wrapper')) {
+      openNextProgramDetails();
+    } else {
+      openLiveProgramDetails();
+    }
   });
 
   const wrapper = document.getElementById('video-wrapper');
@@ -2680,7 +2742,7 @@ function setupInteractiveFeatures() {
 
     // Modals and toasts move into videoWrapper during fullscreen so they are visible, and return to document.body outside fullscreen
     const modalTarget = isFullscreen ? videoWrapper : document.body;
-    ['shortcuts-modal', 'hbbtv-modal', 'app-toast'].forEach(id => {
+    ['shortcuts-modal', 'hbbtv-modal', 'epg-modal', 'conflict-modal', 'app-toast'].forEach(id => {
       const el = document.getElementById(id);
       if (el && el.parentElement !== modalTarget) {
         modalTarget.appendChild(el);
@@ -2840,6 +2902,13 @@ function setupKeybindings() {
         closeEPGModal();
       } else {
         openLiveProgramDetails();
+      }
+    } else if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      const modal = document.getElementById('epg-modal');
+      if (modal && !modal.classList.contains('hidden')) {
+        closeEPGModal();
+      } else {
+        openNextProgramDetails();
       }
     } else if (e.key >= '0' && e.key <= '9') {
       digitBuffer += e.key;
@@ -3661,6 +3730,13 @@ function clearInGridSearchHighlights() {
 // Show EPG Event Details Modal
 window.showEPGModal = function(event, channelName) {
   const modal = document.getElementById('epg-modal');
+  const videoWrapper = document.getElementById('video-wrapper');
+  const isFullscreen = !!document.fullscreenElement;
+  const modalTarget = isFullscreen ? (document.fullscreenElement === videoWrapper ? videoWrapper : document.fullscreenElement) : document.body;
+  if (modal && modal.parentElement !== modalTarget) {
+    modalTarget.appendChild(modal);
+  }
+
   document.getElementById('modal-event-title').textContent = getLocalized(event.titles, currentLanguage) || 'Program Details';
   document.getElementById('modal-event-channel').textContent = channelName;
 
@@ -3678,7 +3754,12 @@ window.showEPGModal = function(event, channelName) {
 
 function closeEPGModal() {
   const modal = document.getElementById('epg-modal');
-  if (modal) modal.classList.add('hidden');
+  if (modal) {
+    modal.classList.add('hidden');
+    if (!document.fullscreenElement && modal.parentElement !== document.body) {
+      document.body.appendChild(modal);
+    }
+  }
 }
 
 document.getElementById('btn-close-epg-modal').onclick = closeEPGModal;
