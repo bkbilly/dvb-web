@@ -1818,7 +1818,6 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 		reNav := regexp.MustCompile(`(?i)(?:document\.)?location\.(?:href|assign|replace)\s*=\s*([^;,\n\r]+)(;|\n|$)`)
 		bodyStr = reNav.ReplaceAllString(bodyStr, "window.__proxyNav($1)$2")
 
-		baseTag := fmt.Sprintf(`<base href="%s" />`, baseURL)
 		polyfill := fmt.Sprintf(`
 <style>
 html, body {
@@ -1898,13 +1897,27 @@ if (!window.KeyEvent) {
 
   var origGetElementsByTagName = document.getElementsByTagName.bind(document);
   document.getElementsByTagName = function(tag) {
+    var res = origGetElementsByTagName(tag);
     if (tag && tag.toLowerCase() === 'object') {
-      var real = Array.prototype.slice.call(origGetElementsByTagName('object'));
+      var arr = Array.prototype.slice.call(res);
       var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #appMan, #oipfcfg, #appConf, #mybroadcast, #oipfAppMan, #oipfConfig'));
-      return real.concat(mocks);
+      mocks.forEach(function(m) {
+        if (arr.indexOf(m) === -1) arr.push(m);
+      });
+      arr.item = function(idx) { return arr[idx] || null; };
+      arr.namedItem = function(name) { return document.getElementById(name) || null; };
+      return arr;
     }
-    return origGetElementsByTagName(tag);
+    return res;
   };
+
+  document.addEventListener('click', function(e) {
+    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (a && a.href && !a.href.startsWith('javascript:')) {
+      e.preventDefault();
+      window.__proxyNav(a.getAttribute('href') || a.href);
+    }
+  }, true);
 })();
 
 var mockKeyset = {
@@ -2081,11 +2094,11 @@ setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 400);
 		}
 
 		if headIdx != -1 {
-			bodyStr = bodyStr[:headIdx] + baseTag + polyfill + bodyStr[headIdx:]
+			bodyStr = bodyStr[:headIdx] + polyfill + bodyStr[headIdx:]
 		} else if idx := strings.Index(lowerBody, "</head>"); idx != -1 {
-			bodyStr = bodyStr[:idx] + baseTag + polyfill + bodyStr[idx:]
+			bodyStr = bodyStr[:idx] + polyfill + bodyStr[idx:]
 		} else {
-			bodyStr = baseTag + polyfill + bodyStr
+			bodyStr = polyfill + bodyStr
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=UTF-8")

@@ -316,9 +316,6 @@ function goRed(url) {
 	if !bytes.Contains([]byte(body), []byte("window.sendHbbtvKey")) {
 		t.Errorf("Expected body to contain 'window.sendHbbtvKey'")
 	}
-	if !bytes.Contains([]byte(body), []byte("<base href=")) {
-		t.Errorf("Expected body to contain '<base href='")
-	}
 	// Check that relative script/css were rewritten to proxy URLs
 	if !bytes.Contains([]byte(body), []byte("/api/hbbtv/proxy?url=")) {
 		t.Errorf("Expected static assets to be rewritten to /api/hbbtv/proxy?url=")
