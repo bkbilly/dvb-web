@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
@@ -123,7 +124,34 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 
 	// Static Web UI (supports embedded binary assets with local directory override)
 	fileServer := http.FileServer(web.GetFileSystem(webDir))
-	mux.Handle("/", fileServer)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Fallback for HbbTV relative assets requested by browser
+		ref := r.Referer()
+		if strings.Contains(ref, "/api/hbbtv/proxy") {
+			if refURL, err := url.Parse(ref); err == nil {
+				if target := refURL.Query().Get("url"); target != "" {
+					if parsedTarget, err := url.Parse(target); err == nil {
+						cleanPath := r.URL.Path
+						if strings.HasPrefix(cleanPath, "/api/") && !strings.HasPrefix(cleanPath, "/api/hbbtv/") {
+							cleanPath = cleanPath[len("/api"):]
+						}
+						destURL := parsedTarget.ResolveReference(&url.URL{
+							Path:     cleanPath,
+							RawQuery: r.URL.RawQuery,
+						})
+						http.Redirect(w, r, "/api/hbbtv/proxy?url="+url.QueryEscape(destURL.String()), http.StatusTemporaryRedirect)
+						return
+					}
+				}
+			}
+		}
+		if strings.HasPrefix(r.URL.Path, "/ert-new/") {
+			target := "http://hbbtvapplb.ert.gr" + r.URL.RequestURI()
+			http.Redirect(w, r, "/api/hbbtv/proxy?url="+url.QueryEscape(target), http.StatusTemporaryRedirect)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -1657,6 +1685,135 @@ func (s *Server) handleRecordingDetail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func rewriteLocationNav(code string) string {
+	var sb strings.Builder
+	sb.Grow(len(code))
+
+	re := regexp.MustCompile(`(?i)(?:window\.|document\.)?location\.(href\s*=|assign\s*\(|replace\s*\()`)
+	locs := re.FindAllStringIndex(code, -1)
+	if len(locs) == 0 {
+		return code
+	}
+
+	lastIdx := 0
+	for _, loc := range locs {
+		start := loc[0]
+		end := loc[1]
+
+		if start < lastIdx {
+			continue
+		}
+
+		matchStr := code[start:end]
+		lower := strings.ToLower(matchStr)
+
+		// Don't match == or ===
+		if strings.Contains(lower, "href") && end < len(code) && code[end] == '=' {
+			continue
+		}
+
+		sb.WriteString(code[lastIdx:start])
+
+		if strings.Contains(lower, "assign") || strings.Contains(lower, "replace") {
+			sb.WriteString("window.__proxyNav(")
+			lastIdx = end
+			continue
+		}
+
+		exprEnd := end
+		var inQuote rune = 0
+		escaped := false
+		parenDepth := 0
+		bracketDepth := 0
+		braceDepth := 0
+		ternaryDepth := 0
+
+		for exprEnd < len(code) {
+			ch := rune(code[exprEnd])
+
+			if inQuote != 0 {
+				if escaped {
+					escaped = false
+				} else if ch == '\\' {
+					escaped = true
+				} else if ch == inQuote {
+					inQuote = 0
+				}
+				exprEnd++
+				continue
+			}
+
+			if ch == '\'' || ch == '"' || ch == '`' {
+				inQuote = ch
+				exprEnd++
+				continue
+			}
+
+			if ch == '(' {
+				parenDepth++
+				exprEnd++
+				continue
+			} else if ch == ')' {
+				if parenDepth > 0 {
+					parenDepth--
+					exprEnd++
+					continue
+				}
+				break
+			}
+
+			if ch == '[' {
+				bracketDepth++
+				exprEnd++
+				continue
+			} else if ch == ']' {
+				if bracketDepth > 0 {
+					bracketDepth--
+					exprEnd++
+					continue
+				}
+				break
+			}
+
+			if ch == '{' {
+				braceDepth++
+				exprEnd++
+				continue
+			} else if ch == '}' {
+				if braceDepth > 0 {
+					braceDepth--
+					exprEnd++
+					continue
+				}
+				break
+			}
+
+			if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 {
+				if ch == '?' {
+					ternaryDepth++
+				} else if ch == ':' {
+					if ternaryDepth > 0 {
+						ternaryDepth--
+					} else {
+						break
+					}
+				} else if ch == ';' || ch == ',' || ch == '\n' || ch == '\r' {
+					break
+				}
+			}
+
+			exprEnd++
+		}
+
+		expr := strings.TrimSpace(code[end:exprEnd])
+		sb.WriteString("window.__proxyNav(" + expr + ")")
+		lastIdx = exprEnd
+	}
+
+	sb.WriteString(code[lastIdx:])
+	return sb.String()
+}
+
 func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" {
@@ -1701,8 +1858,12 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("User-Agent", "Mozilla/5.0 (SmartTV; HbbTV/1.4.1 (+PVR; DVB-T/T2;)) AppleWebkit/537.36")
 	req.Header.Set("Accept", "*/*")
 
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
 	client := &http.Client{
-		Timeout: 15 * time.Second,
+		Transport: tr,
+		Timeout:   15 * time.Second,
 	}
 
 	resp, err := client.Do(req)
@@ -1722,9 +1883,7 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		jsStr := string(bodyBytes)
-		reNav := regexp.MustCompile(`(?i)(?:document\.)?location\.(?:href|assign|replace)\s*=\s*([^;,\n\r]+)(;|\n|$)`)
-		jsStr = reNav.ReplaceAllString(jsStr, "window.__proxyNav($1)$2")
+		jsStr := rewriteLocationNav(string(bodyBytes))
 
 		w.Header().Set("Content-Type", "application/javascript; charset=UTF-8")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1733,13 +1892,42 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. CSS Stylesheets: ensure valid text/css MIME type
+	// 2. CSS Stylesheets: ensure valid text/css MIME type and rewrite url(...)
 	isCSS := strings.Contains(strings.ToLower(ct), "css") || strings.HasSuffix(strings.ToLower(targetURL.Path), ".css")
 	if isCSS {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cssStr := string(bodyBytes)
+		reCSSURL := regexp.MustCompile(`(?i)url\(\s*['"]?([^'"\)\s]+)['"]?\s*\)`)
+		cssStr = reCSSURL.ReplaceAllStringFunc(cssStr, func(m string) string {
+			parts := reCSSURL.FindStringSubmatch(m)
+			if len(parts) >= 2 {
+				raw := strings.TrimSpace(parts[1])
+				if raw == "" || strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "#") || strings.HasPrefix(raw, "/api/hbbtv/") {
+					return m
+				}
+				var fullURL string
+				if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+					fullURL = raw
+				} else {
+					if u, err := url.Parse(raw); err == nil {
+						fullURL = targetURL.ResolveReference(u).String()
+					} else {
+						return m
+					}
+				}
+				return fmt.Sprintf("url('/api/hbbtv/proxy?url=%s')", url.QueryEscape(fullURL))
+			}
+			return m
+		})
+
 		w.Header().Set("Content-Type", "text/css; charset=UTF-8")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = w.Write([]byte(cssStr))
 		return
 	}
 
@@ -1814,9 +2002,34 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 			return m
 		})
 
+		// Rewrite url(...) in inline CSS or <style> tags
+		reStyleURL := regexp.MustCompile(`(?i)url\(\s*['"]?([^'"\)\s]+)['"]?\s*\)`)
+		bodyStr = reStyleURL.ReplaceAllStringFunc(bodyStr, func(m string) string {
+			parts := reStyleURL.FindStringSubmatch(m)
+			if len(parts) >= 2 {
+				raw := strings.TrimSpace(parts[1])
+				if raw == "" || strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "#") || strings.HasPrefix(raw, "/api/hbbtv/") {
+					return m
+				}
+				var fullURL string
+				if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+					fullURL = raw
+				} else if baseParsed != nil {
+					if u, err := url.Parse(raw); err == nil {
+						fullURL = baseParsed.ResolveReference(u).String()
+					} else {
+						return m
+					}
+				} else {
+					return m
+				}
+				return fmt.Sprintf("url('/api/hbbtv/proxy?url=%s')", url.QueryEscape(fullURL))
+			}
+			return m
+		})
+
 		// Rewrite inline navigations in HTML
-		reNav := regexp.MustCompile(`(?i)(?:document\.)?location\.(?:href|assign|replace)\s*=\s*([^;,\n\r]+)(;|\n|$)`)
-		bodyStr = reNav.ReplaceAllString(bodyStr, "window.__proxyNav($1)$2")
+		bodyStr = rewriteLocationNav(bodyStr)
 
 		polyfill := fmt.Sprintf(`
 <style>
@@ -1836,6 +2049,10 @@ div#tvbild, div[data-type="video/broadcast"], div[type="video/broadcast"], div#p
 window.__hbbtvBase = %q;
 window.__proxyNav = function(u) {
   if (!u) return;
+  if (typeof u === 'string' && u.startsWith('/api/hbbtv/')) {
+    window.location.href = u;
+    return;
+  }
   var resolved = u;
   try {
     resolved = new URL(u, window.__hbbtvBase).href;
@@ -1892,6 +2109,73 @@ if (!window.KeyEvent) {
         }
       }
       return origFetch.call(this, input, init);
+    };
+  }
+
+  try {
+    var origImgSrcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    if (origImgSrcDesc && origImgSrcDesc.set) {
+      Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        get: function() { return origImgSrcDesc.get.call(this); },
+        set: function(val) {
+          if (val && typeof val === 'string' && !val.startsWith('data:') && !val.startsWith('blob:') && !val.startsWith('/api/hbbtv/')) {
+            try {
+              var resolved = new URL(val, window.__hbbtvBase).href;
+              val = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+            } catch(e) {}
+          }
+          return origImgSrcDesc.set.call(this, val);
+        }
+      });
+    }
+  } catch(e) {}
+
+  try {
+    var origScriptSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+    if (origScriptSrcDesc && origScriptSrcDesc.set) {
+      Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+        get: function() { return origScriptSrcDesc.get.call(this); },
+        set: function(val) {
+          if (val && typeof val === 'string' && !val.startsWith('data:') && !val.startsWith('/api/hbbtv/')) {
+            try {
+              var resolved = new URL(val, window.__hbbtvBase).href;
+              val = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+            } catch(e) {}
+          }
+          return origScriptSrcDesc.set.call(this, val);
+        }
+      });
+    }
+  } catch(e) {}
+
+  try {
+    var origLinkHrefDesc = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'href');
+    if (origLinkHrefDesc && origLinkHrefDesc.set) {
+      Object.defineProperty(HTMLLinkElement.prototype, 'href', {
+        get: function() { return origLinkHrefDesc.get.call(this); },
+        set: function(val) {
+          if (val && typeof val === 'string' && !val.startsWith('data:') && !val.startsWith('/api/hbbtv/')) {
+            try {
+              var resolved = new URL(val, window.__hbbtvBase).href;
+              val = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+            } catch(e) {}
+          }
+          return origLinkHrefDesc.set.call(this, val);
+        }
+      });
+    }
+  } catch(e) {}
+
+  if (navigator.sendBeacon) {
+    var origSendBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function(url, data) {
+      if (typeof url === 'string' && !url.startsWith('/api/hbbtv/')) {
+        try {
+          var resolved = new URL(url, window.__hbbtvBase).href;
+          url = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+        } catch(e) {}
+      }
+      return origSendBeacon(url, data);
     };
   }
 
@@ -2106,6 +2390,25 @@ setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 400);
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write([]byte(bodyStr))
 		return
+	}
+
+	lowerPath := strings.ToLower(targetURL.Path)
+	if strings.HasSuffix(lowerPath, ".otf") {
+		ct = "font/otf"
+	} else if strings.HasSuffix(lowerPath, ".ttf") {
+		ct = "font/ttf"
+	} else if strings.HasSuffix(lowerPath, ".woff") {
+		ct = "font/woff"
+	} else if strings.HasSuffix(lowerPath, ".woff2") {
+		ct = "font/woff2"
+	} else if strings.HasSuffix(lowerPath, ".png") {
+		ct = "image/png"
+	} else if strings.HasSuffix(lowerPath, ".jpg") || strings.HasSuffix(lowerPath, ".jpeg") {
+		ct = "image/jpeg"
+	} else if strings.HasSuffix(lowerPath, ".gif") {
+		ct = "image/gif"
+	} else if strings.HasSuffix(lowerPath, ".svg") {
+		ct = "image/svg+xml"
 	}
 
 	w.Header().Set("Content-Type", ct)

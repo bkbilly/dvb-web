@@ -280,11 +280,11 @@ function goRed(url) {
 		case "/ram/start.css":
 			w.Header().Set("Content-Type", "text/css")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`body { background: transparent; }`))
+			_, _ = w.Write([]byte(`body { background: transparent; } .icon { background-image: url('../img/logo.png'); }`))
 		case "/ram/keycodes-min.js":
 			w.Header().Set("Content-Type", "application/javascript")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`var VK_RED = 403; document.location.href = "http://example.com/portal";`))
+			_, _ = w.Write([]byte(`var VK_RED = 403; document.location.href = "http://example.com/portal"; var res = t?document.location.href=t:window.close();`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -341,8 +341,11 @@ function goRed(url) {
 	if !bytes.Contains([]byte(subBody), []byte("window.__proxyNav(\"http://example.com/portal\")")) {
 		t.Errorf("Expected JS location navigation to be rewritten to window.__proxyNav, got: %s", subBody)
 	}
+	if !bytes.Contains([]byte(subBody), []byte("t?window.__proxyNav(t):window.close()")) {
+		t.Errorf("Expected ternary navigation to be rewritten without syntax error, got: %s", subBody)
+	}
 
-	// 4. Test CSS sub-resource
+	// 4. Test CSS sub-resource and url(...) rewriting
 	cssReq := httptest.NewRequest(http.MethodGet, "/api/hbbtv/ram/start.css", nil)
 	cssReq.Header.Set("Referer", "http://127.0.0.1:8080"+mainURL)
 	cssW := httptest.NewRecorder()
@@ -353,5 +356,23 @@ function goRed(url) {
 	}
 	if cssW.Header().Get("Content-Type") != "text/css; charset=UTF-8" {
 		t.Errorf("Expected Content-Type 'text/css; charset=UTF-8', got '%s'", cssW.Header().Get("Content-Type"))
+	}
+	cssBody := cssW.Body.String()
+	if !bytes.Contains([]byte(cssBody), []byte("/api/hbbtv/proxy?url=")) {
+		t.Errorf("Expected CSS url(...) to be rewritten through /api/hbbtv/proxy, got: %s", cssBody)
+	}
+
+	// 5. Test root fallback for stray relative asset (e.g. /api/img/logo.png with Referer)
+	fallbackReq := httptest.NewRequest(http.MethodGet, "/api/img/logo.png", nil)
+	fallbackReq.Header.Set("Referer", "http://127.0.0.1:8080"+mainURL)
+	fallbackW := httptest.NewRecorder()
+	mux.ServeHTTP(fallbackW, fallbackReq)
+
+	if fallbackW.Code != http.StatusTemporaryRedirect {
+		t.Errorf("Expected 307 Temporary Redirect for stray relative asset, got %d", fallbackW.Code)
+	}
+	loc := fallbackW.Header().Get("Location")
+	if !bytes.Contains([]byte(loc), []byte("/api/hbbtv/proxy?url=")) {
+		t.Errorf("Expected redirect to proxy url, got: %s", loc)
 	}
 }
