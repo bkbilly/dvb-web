@@ -297,6 +297,73 @@
     } catch (_) {}
   }
 
+  // Active mock tuners pool (matches backend TunerStatus struct)
+  const MOCK_TUNERS = [
+    {
+      id: 0,
+      name: 'Sony CXD2880 DVB-T/T2/C (Simulated)',
+      frontend_path: '/dev/dvb/adapter0/frontend0',
+      status: 'idle',
+      current_frequency: 0,
+      current_channel: '',
+      active_channels: [],
+      enabled: true,
+      viewers: [],
+      is_mock: true,
+      signal: {
+        has_lock: true,
+        has_signal: true,
+        has_carrier: true,
+        has_viterbi: true,
+        has_sync: true,
+        signal_strength: 95,
+        signal_quality: 98,
+        snr_db: 28.5,
+        ber: 0,
+        unc: 0
+      },
+      active_recording: null
+    },
+    {
+      id: 1,
+      name: 'Silicon Labs Si2168 DVB-T/T2 (Simulated)',
+      frontend_path: '/dev/dvb/adapter1/frontend0',
+      status: 'idle',
+      current_frequency: 0,
+      current_channel: '',
+      active_channels: [],
+      enabled: true,
+      viewers: [],
+      is_mock: true,
+      signal: {
+        has_lock: true,
+        has_signal: true,
+        has_carrier: true,
+        has_viterbi: true,
+        has_sync: true,
+        signal_strength: 91,
+        signal_quality: 95,
+        snr_db: 27.0,
+        ber: 0,
+        unc: 0
+      },
+      active_recording: null
+    }
+  ];
+
+  const activeMockSockets = new Set();
+
+  function broadcastTunersUpdate() {
+    activeMockSockets.forEach(ws => {
+      if (ws.readyState === 1) {
+        ws._dispatch({
+          event: 'tuners_update',
+          tuners: MOCK_TUNERS
+        });
+      }
+    });
+  }
+
   // ==========================================================
   // 2. INTERCEPT FETCH API
   // ==========================================================
@@ -517,39 +584,130 @@
 
     // L. Settings
     if (pathname === '/api/settings') {
+      if (options && options.method === 'POST') {
+        return new Response(JSON.stringify({ status: 'ok' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
       return new Response(JSON.stringify({
         preferred_language: 'eng',
         transcoder_mode: 'auto',
         video_bitrate: '4500k',
-        audio_codec: 'aac'
+        audio_codec: 'aac',
+        rec_pre_padding: 2,
+        rec_post_padding: 5
       }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    // M. Tuners
+    // M. System Status (Required by initial load and Settings tab)
+    if (pathname === '/api/status') {
+      return new Response(JSON.stringify({
+        tuners: MOCK_TUNERS,
+        hardware: 'nvenc',
+        server_time: new Date().toISOString(),
+        default_lang: 'eng',
+        epg_languages: ['eng', 'fra', 'deu', 'ell']
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // N. Tuners List & Admin
     if (pathname === '/api/tuners') {
-      return new Response(JSON.stringify([
-        {
-          id: 0,
-          name: 'Sony CXD2880 DVB-T/T2/C (Simulated)',
-          status: 'active',
-          frequency: 506000000,
-          bandwidth: 8000000,
-          delivery_system: 'DVBT2',
-          viewers: 1
-        },
-        {
-          id: 1,
-          name: 'Silicon Labs Si2168 DVB-T/T2 (Simulated)',
-          status: 'idle',
-          frequency: 0,
-          bandwidth: 8000000,
-          delivery_system: 'DVBT2',
-          viewers: 0
+      return new Response(JSON.stringify(MOCK_TUNERS), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Tuner Toggle: /api/tuners/{id}/toggle
+    const toggleMatch = pathname.match(/^\/api\/tuners\/(\d+)\/toggle$/);
+    if (toggleMatch && options && options.method === 'POST') {
+      const tid = parseInt(toggleMatch[1], 10);
+      const tuner = MOCK_TUNERS.find(t => t.id === tid);
+      if (tuner) {
+        try {
+          const body = options.body ? JSON.parse(options.body) : {};
+          tuner.enabled = body.enabled !== undefined ? !!body.enabled : !tuner.enabled;
+        } catch (_) {
+          tuner.enabled = !tuner.enabled;
         }
-      ]), {
+        broadcastTunersUpdate();
+      }
+      return new Response(JSON.stringify({ status: 'updated', enabled: tuner ? tuner.enabled : true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Tuner Force Release: /api/tuners/{id}/force-release
+    const releaseMatch = pathname.match(/^\/api\/tuners\/(\d+)\/force-release$/);
+    if (releaseMatch && options && options.method === 'POST') {
+      const tid = parseInt(releaseMatch[1], 10);
+      const tuner = MOCK_TUNERS.find(t => t.id === tid);
+      if (tuner) {
+        tuner.status = 'idle';
+        tuner.current_frequency = 0;
+        tuner.current_channel = '';
+        tuner.active_channels = [];
+        tuner.viewers = [];
+        broadcastTunersUpdate();
+      }
+      return new Response(JSON.stringify({ status: 'released' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Stop Recording: /api/recordings/{id}/stop or stop-and-tune
+    const stopRecMatch = pathname.match(/^\/api\/recordings\/(\d+)\/(stop|stop-and-tune)$/);
+    if (stopRecMatch) {
+      const recId = parseInt(stopRecMatch[1], 10);
+      let recList = getStoredRecordings();
+      const rec = recList.find(r => r.id === recId);
+      if (rec) {
+        rec.status = 'completed';
+        saveStoredRecordings(recList);
+      }
+      MOCK_TUNERS.forEach(t => {
+        if (t.active_recording && t.active_recording.recording_id === recId) {
+          t.active_recording = null;
+        }
+      });
+      broadcastTunersUpdate();
+      return new Response(JSON.stringify({ status: 'stopped' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Frequency Channel Scan: /api/scan & /api/scan/prune
+    if (pathname === '/api/scan' && options && options.method === 'POST') {
+      return new Response(JSON.stringify({
+        new_channels: [],
+        updated_channels: MOCK_CHANNELS,
+        missing_channels: []
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (pathname === '/api/scan/prune') {
+      return new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Reorder channels
+    if (pathname === '/api/channels/reorder') {
+      return new Response(JSON.stringify({ status: 'ok' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' }
       });
@@ -575,17 +733,16 @@
       this.onclose = null;
       this.onerror = null;
 
+      activeMockSockets.add(this);
+
       setTimeout(() => {
         this.readyState = 1; // OPEN
         if (this.onopen) this.onopen({ type: 'open' });
 
-        // Initial Tuner status update
+        // Initial Tuner status update with enabled tuners
         this._dispatch({
           event: 'tuners_update',
-          tuners: [
-            { id: 0, name: 'Sony CXD2880 DVB-T/T2/C (Simulated)', status: 'active', frequency: 506000000, viewers: 1 },
-            { id: 1, name: 'Silicon Labs Si2168 DVB-T/T2 (Simulated)', status: 'idle', frequency: 0, viewers: 0 }
-          ]
+          tuners: MOCK_TUNERS
         });
 
         // Periodic signal updates (for real-time Signal Analyzer HUD)
@@ -608,7 +765,7 @@
             });
           }
         }, 2000);
-      }, 100);
+      }, 50);
     }
 
     send(data) {
@@ -616,15 +773,51 @@
         const msg = JSON.parse(data);
         if (msg.action === 'tune') {
           const ch = MOCK_CHANNELS.find(c => c.id === msg.channel_id) || MOCK_CHANNELS[0];
+          activeMockChannel = ch;
           const { nowShow, nextShow } = getChannelNowNext(ch.id);
+
+          // Find appropriate tuner:
+          // 1. Same frequency?
+          let targetTuner = MOCK_TUNERS.find(t => t.enabled && t.status === 'active' && t.current_frequency === ch.frequency);
+          // 2. Idle tuner?
+          if (!targetTuner) {
+            targetTuner = MOCK_TUNERS.find(t => t.enabled && t.status === 'idle');
+          }
+          // 3. Fallback to any enabled tuner
+          if (!targetTuner) {
+            targetTuner = MOCK_TUNERS.find(t => t.enabled) || MOCK_TUNERS[0];
+          }
+
+          targetTuner.status = 'active';
+          targetTuner.current_frequency = ch.frequency;
+          targetTuner.current_channel = ch.name;
+          targetTuner.active_channels = [ch.name];
+          targetTuner.viewers = [
+            {
+              id: 'demo-session',
+              ip: '127.0.0.1 (Demo User)',
+              user_agent: navigator.userAgent,
+              channel_id: ch.id,
+              channel_name: ch.name,
+              connected_at: new Date().toISOString()
+            }
+          ];
+
+          broadcastTunersUpdate();
+
           setTimeout(() => {
             this._dispatch({
               event: 'tuned',
-              tuner_id: 0,
+              tuner_id: targetTuner.id,
               channel: { ...ch, now_playing: nowShow, next_playing: nextShow },
               now_playing: nowShow,
               next_playing: nextShow,
               signal: {
+                has_lock: true,
+                has_signal: true,
+                has_carrier: true,
+                has_viterbi: true,
+                has_sync: true,
                 lock: true,
                 carrier: true,
                 viterbi: true,
@@ -636,13 +829,14 @@
                 unc: 0
               }
             });
-          }, 150);
+          }, 100);
         }
       } catch (_) {}
     }
 
     close() {
       this.readyState = 3;
+      activeMockSockets.delete(this);
       if (this._sigTimer) clearInterval(this._sigTimer);
       if (this.onclose) this.onclose({ type: 'close' });
     }
@@ -759,16 +953,19 @@
   }
 
   // Intercept mpegts createPlayer to attach live canvas stream seamlessly
-  if (window.mpegts) {
+  function hookMpegts() {
+    if (!window.mpegts || window.mpegts._mockHooked) return;
+    window.mpegts._mockHooked = true;
     const origCreatePlayer = window.mpegts.createPlayer;
     window.mpegts.createPlayer = function(mediaDataSource, config) {
       const isMock = isGitHubPages || isMockRequested;
-      if (!isMock) {
+      if (!isMock && origCreatePlayer) {
         return origCreatePlayer.call(window.mpegts, mediaDataSource, config);
       }
 
       let attachedMedia = null;
       const listeners = {};
+      let isLoaded = false;
 
       return {
         attachMediaElement(el) {
@@ -783,11 +980,12 @@
           }
         },
         load() {
+          isLoaded = true;
           setTimeout(() => {
             if (listeners['media_info']) {
-              listeners['media_info'].forEach(fn => fn());
+              listeners['media_info'].forEach(fn => fn({}));
             }
-          }, 150);
+          }, 60);
         },
         play() {
           if (attachedMedia) {
@@ -810,10 +1008,29 @@
         on(event, fn) {
           if (!listeners[event]) listeners[event] = [];
           listeners[event].push(fn);
+          if (event === 'media_info' && isLoaded) {
+            setTimeout(() => fn({}), 10);
+          }
         }
       };
     };
   }
+
+  let _mpegts = window.mpegts;
+  try {
+    Object.defineProperty(window, 'mpegts', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return _mpegts;
+      },
+      set(val) {
+        _mpegts = val;
+        hookMpegts();
+      }
+    });
+  } catch (_) {}
+  if (_mpegts) hookMpegts();
 
   // ==========================================================
   // 5. BANNER INDICATOR FOR GITHUB PAGES DEMO
