@@ -2207,7 +2207,7 @@ if (!window.KeyEvent) {
     var res = origGetElementsByTagName(tag);
     if (tag && tag.toLowerCase() === 'object') {
       var arr = Array.prototype.slice.call(res);
-      var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #appMan, #oipfcfg, #appConf, #mybroadcast, #oipfAppMan, #oipfConfig, #video, #video2, #videodiv'));
+      var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #appMan, #oipfcfg, #appConf, #mybroadcast, #oipfAppMan, #oipfConfig, #video, #video2'));
       mocks.forEach(function(m) {
         if (arr.indexOf(m) === -1) arr.push(m);
       });
@@ -2223,7 +2223,7 @@ if (!window.KeyEvent) {
     var el = origCreateElement(tag, options);
     if (tag && typeof tag === 'string') {
       var lower = tag.toLowerCase();
-      if (lower === 'object' || lower === 'video') {
+      if (lower === 'video') {
         setupAvObject(el);
       }
     }
@@ -2233,7 +2233,7 @@ if (!window.KeyEvent) {
   var origGetElementById = document.getElementById.bind(document);
   document.getElementById = function(id) {
     var el = origGetElementById(id);
-    if (el && (id === 'video' || id === 'video2' || id === 'videodiv' || id === 'myradio') && id !== 'mybroadcast') {
+    if (el && (id === 'video' || id === 'video2' || id === 'myradio') && isAvCandidate(el)) {
       setupAvObject(el);
     }
     return el;
@@ -2247,6 +2247,28 @@ if (!window.KeyEvent) {
     }
   }, true);
 })();
+
+function isAvCandidate(el) {
+  if (!el || el._isAvObject || el.nodeType !== 1) return false;
+  var id = (el.id || '').toLowerCase();
+  if (id === 'mybroadcast' || id === 'tvbild' || id === 'tvspot' || id === 'videodiv' || id === 'player-container' ||
+      id === 'appmgr' || id === 'appman' || id === 'oipfappman' || id === 'oipfcfg' || id === 'appconf' || id === 'oipfconfig') {
+    return false;
+  }
+  var type = (el.getAttribute('type') || el.type || '').toLowerCase();
+  var dataType = (el.getAttribute('data-type') || '').toLowerCase();
+  if (type.indexOf('broadcast') !== -1 || dataType.indexOf('broadcast') !== -1 ||
+      type.indexOf('applicationmanager') !== -1 || type.indexOf('configuration') !== -1) {
+    return false;
+  }
+  var tag = (el.tagName || '').toLowerCase();
+  if (tag === 'video') return true;
+  if (id === 'video' || id === 'video2' || id === 'myradio') return true;
+  if (type.indexOf('dash') !== -1 || type.indexOf('mp4') !== -1 || type.indexOf('mpeg') !== -1 || type.indexOf('avobject') !== -1 || type.indexOf('x-net-oipf-video') !== -1) {
+    return true;
+  }
+  return false;
+}
 
 function loadDashPlayer(cb) {
   if (window.dashjs) return cb();
@@ -2326,7 +2348,7 @@ function setupMediaSource(v, val, el) {
 }
 
 function setupAvObject(el) {
-  if (!el || el._isAvObject || el.id === 'mybroadcast') return;
+  if (!isAvCandidate(el)) return;
   el._isAvObject = true;
 
   if (el.tagName && el.tagName.toLowerCase() === 'object') {
@@ -2337,7 +2359,7 @@ function setupAvObject(el) {
   var v = isHtmlVideo ? el : el.querySelector('video');
   if (!v) {
     v = document.createElement('video');
-    v.style.cssText = 'position:absolute;top:0;left:0;width:100%%;height:100%%;z-index:100;background:black;object-fit:contain;';
+    v.style.cssText = 'position:absolute;top:0;left:0;width:100%%;height:100%%;object-fit:contain;background:transparent;pointer-events:none;';
     v.autoplay = true;
     v.playsInline = true;
     el.appendChild(v);
@@ -2348,6 +2370,8 @@ function setupAvObject(el) {
 
   v.addEventListener('playing', function() {
     el._playState = 1;
+    v.style.background = 'black';
+    v.style.pointerEvents = 'auto';
     if (typeof el.onPlayStateChange === 'function') {
       try { el.onPlayStateChange(); } catch(e) {}
     }
@@ -2383,6 +2407,8 @@ function setupAvObject(el) {
   el.play = function(speed) {
     el._playState = 1;
     if (v) {
+      v.style.background = 'black';
+      v.style.pointerEvents = 'auto';
       var p = v.play();
       if (p && p.catch) p.catch(function(){});
     }
@@ -2396,6 +2422,8 @@ function setupAvObject(el) {
     if (v) {
       v.pause();
       try { v.currentTime = 0; } catch(e) {}
+      v.style.background = 'transparent';
+      v.style.pointerEvents = 'none';
     }
     if (typeof el.onPlayStateChange === 'function') {
       try { el.onPlayStateChange(); } catch(e) {}
@@ -2428,6 +2456,10 @@ function setupAvObject(el) {
         if (!val) return;
         el._dataUrl = val;
         el._playState = 3;
+        if (v) {
+          v.style.background = 'black';
+          v.style.pointerEvents = 'auto';
+        }
         if (typeof el.onPlayStateChange === 'function') {
           try { el.onPlayStateChange(); } catch(e) {}
         }
@@ -2479,6 +2511,76 @@ function setupAvObject(el) {
     });
   } catch(e) {}
 }
+
+try {
+  if (!HTMLObjectElement.prototype.play) {
+    HTMLObjectElement.prototype.play = function(speed) {
+      if (this.id === 'mybroadcast' || (this.type && this.type.indexOf('broadcast') !== -1)) return 0;
+      setupAvObject(this);
+      if (this._html5Video) {
+        this._playState = 1;
+        this._html5Video.style.background = 'black';
+        this._html5Video.style.pointerEvents = 'auto';
+        var p = this._html5Video.play();
+        if (p && p.catch) p.catch(function(){});
+      }
+      if (typeof this.onPlayStateChange === 'function') {
+        try { this.onPlayStateChange(); } catch(e) {}
+      }
+      return true;
+    };
+  }
+  if (!HTMLObjectElement.prototype.stop) {
+    HTMLObjectElement.prototype.stop = function() {
+      if (this._html5Video) {
+        this._html5Video.pause();
+        try { this._html5Video.currentTime = 0; } catch(e) {}
+        this._html5Video.style.background = 'transparent';
+        this._html5Video.style.pointerEvents = 'none';
+      }
+      this._playState = 0;
+      if (typeof this.onPlayStateChange === 'function') {
+        try { this.onPlayStateChange(); } catch(e) {}
+      }
+    };
+  }
+  if (!HTMLObjectElement.prototype.seek) {
+    HTMLObjectElement.prototype.seek = function(ms) {
+      if (this._html5Video) {
+        this._html5Video.currentTime = (ms || 0) / 1000;
+      }
+    };
+  }
+  var origObjDataDesc = Object.getOwnPropertyDescriptor(HTMLObjectElement.prototype, 'data');
+  Object.defineProperty(HTMLObjectElement.prototype, 'data', {
+    get: function() {
+      if (this._isAvObject && this._dataUrl) return this._dataUrl;
+      if (origObjDataDesc && origObjDataDesc.get) return origObjDataDesc.get.call(this);
+      return this.getAttribute('data') || '';
+    },
+    set: function(val) {
+      if (isAvCandidate(this) || this.id === 'video' || this.id === 'video2') {
+        setupAvObject(this);
+        this._dataUrl = val;
+        this._playState = 3;
+        if (this._html5Video) {
+          this._html5Video.style.background = 'black';
+          this._html5Video.style.pointerEvents = 'auto';
+          setupMediaSource(this._html5Video, val, this);
+        }
+        if (typeof this.onPlayStateChange === 'function') {
+          try { this.onPlayStateChange(); } catch(e) {}
+        }
+        return;
+      }
+      if (origObjDataDesc && origObjDataDesc.set) {
+        return origObjDataDesc.set.call(this, val);
+      }
+      this.setAttribute('data', val);
+    },
+    configurable: true
+  });
+} catch(e) {}
 
 try {
   if (!HTMLVideoElement.prototype.stop) {
@@ -2593,8 +2695,8 @@ function initHbbtvMocks() {
   document.querySelectorAll('#mybroadcast, #tvbild, [type*="broadcast"], [data-type*="broadcast"]').forEach(function(el) {
     Object.assign(el, mockBc);
   });
-  document.querySelectorAll('object, video, #video, #video2, #videodiv, [type*="dash"], [type*="mp4"], [type*="video/"]').forEach(function(el) {
-    if (el.id !== 'mybroadcast' && el.getAttribute('type') !== 'video/broadcast' && el.getAttribute('data-type') !== 'video/broadcast') {
+  document.querySelectorAll('video, #video, #video2, [type*="dash"], [type*="mp4"]').forEach(function(el) {
+    if (isAvCandidate(el)) {
       setupAvObject(el);
     }
   });
@@ -2612,12 +2714,12 @@ try {
     mutations.forEach(function(mut) {
       mut.addedNodes.forEach(function(n) {
         if (n.nodeType === 1) {
-          if (n.id !== 'mybroadcast' && (n.matches && n.matches('object, video, #video, #video2, [type*="dash"], [type*="mp4"]'))) {
+          if (isAvCandidate(n)) {
             setupAvObject(n);
           }
           if (n.querySelectorAll) {
-            n.querySelectorAll('object, video, #video, #video2, [type*="dash"], [type*="mp4"]').forEach(function(sub) {
-              if (sub.id !== 'mybroadcast') setupAvObject(sub);
+            n.querySelectorAll('video, #video, #video2, [type*="dash"], [type*="mp4"]').forEach(function(sub) {
+              if (isAvCandidate(sub)) setupAvObject(sub);
             });
           }
         }
