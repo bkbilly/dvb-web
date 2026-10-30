@@ -2746,49 +2746,55 @@ function fitHbbTV() {
   }
 }
 
+var inSendHbbtvKey = false;
 window.sendHbbtvKey = function(code) {
-  var codes = [code];
-  if (code === 403) codes.push(116);
-  if (code === 404) codes.push(117);
-  if (code === 405) codes.push(118);
-  if (code === 406) codes.push(119);
-  if (code === 461 || code === 8) codes = [461, 8];
+  if (inSendHbbtvKey) return;
+  inSendHbbtvKey = true;
+  try {
+    var codes = [code];
+    if (code === 403) codes.push(116);
+    if (code === 404) codes.push(117);
+    if (code === 405) codes.push(118);
+    if (code === 406) codes.push(119);
+    if (code === 461 || code === 8) codes = [461, 8];
 
-  codes.forEach(function(k) {
-    ['keydown', 'keyup'].forEach(function(evtType) {
-      try {
-        var evt = new KeyboardEvent(evtType, {
-          bubbles: true,
-          cancelable: true,
-          keyCode: k,
-          which: k,
-          view: window
-        });
-        Object.defineProperty(evt, 'keyCode', { get: function() { return k; } });
-        Object.defineProperty(evt, 'which', { get: function() { return k; } });
-        document.dispatchEvent(evt);
-        window.dispatchEvent(evt);
-        if (document.body) document.body.dispatchEvent(evt);
-        if (document.activeElement && document.activeElement !== document.body) {
-          document.activeElement.dispatchEvent(evt);
-        }
-      } catch(e) {}
+    var target = (document.activeElement && document.activeElement !== document.body) ? document.activeElement : (document.body || document);
 
-      try {
-        var legacyEvt = document.createEvent('Events');
-        legacyEvt.initEvent(evtType, true, true);
-        legacyEvt.keyCode = k;
-        legacyEvt.which = k;
-        Object.defineProperty(legacyEvt, 'keyCode', { get: function() { return k; } });
-        Object.defineProperty(legacyEvt, 'which', { get: function() { return k; } });
-        document.dispatchEvent(legacyEvt);
-        window.dispatchEvent(legacyEvt);
-      } catch(e) {}
+    codes.forEach(function(k) {
+      ['keydown', 'keyup'].forEach(function(evtType) {
+        try {
+          var evt = new KeyboardEvent(evtType, {
+            bubbles: true,
+            cancelable: true,
+            keyCode: k,
+            which: k,
+            view: window
+          });
+          evt._isSyntheticHbbtvKey = true;
+          Object.defineProperty(evt, 'keyCode', { get: function() { return k; } });
+          Object.defineProperty(evt, 'which', { get: function() { return k; } });
+          target.dispatchEvent(evt);
+        } catch(e) {}
+
+        try {
+          var legacyEvt = document.createEvent('Events');
+          legacyEvt.initEvent(evtType, true, true);
+          legacyEvt._isSyntheticHbbtvKey = true;
+          legacyEvt.keyCode = k;
+          legacyEvt.which = k;
+          Object.defineProperty(legacyEvt, 'keyCode', { get: function() { return k; } });
+          Object.defineProperty(legacyEvt, 'which', { get: function() { return k; } });
+          target.dispatchEvent(legacyEvt);
+        } catch(e) {}
+      });
     });
-  });
+  } finally {
+    inSendHbbtvKey = false;
+  }
 };
 
 window.addEventListener('keydown', function(e) {
+  if (e._isSyntheticHbbtvKey) return;
   var code = e.keyCode || e.which;
   if (code === 82 || code === 49) {
     window.sendHbbtvKey(403);
@@ -2798,7 +2804,7 @@ window.addEventListener('keydown', function(e) {
     window.sendHbbtvKey(405);
   } else if (code === 66 || code === 52) {
     window.sendHbbtvKey(406);
-  } else if (code === 8 || code === 461) {
+  } else if (code === 8) {
     e.preventDefault();
     window.sendHbbtvKey(461);
   }

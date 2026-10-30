@@ -2690,6 +2690,7 @@ function sendHbbtvKeyToIframe(keyCode) {
         bubbles: true,
         cancelable: true
       });
+      evt._isSyntheticHbbtvKey = true;
       Object.defineProperty(evt, 'keyCode', { value: keyCode });
       Object.defineProperty(evt, 'which', { value: keyCode });
       if (targetDoc) targetDoc.dispatchEvent(evt);
