@@ -394,4 +394,16 @@ function goRed(url) {
 	if v6W.Body.String() != "2a02:587:32fe:8db:d5eb:5daf:98c:7e67" {
 		t.Errorf("Expected exact clean IP string without polyfill, got: %q", v6W.Body.String())
 	}
+
+	// 7. Test that /api/hbbtv/undefined returns 200 OK 1x1 GIF
+	undefReq := httptest.NewRequest(http.MethodGet, "/api/hbbtv/undefined", nil)
+	undefW := httptest.NewRecorder()
+	mux.ServeHTTP(undefW, undefReq)
+
+	if undefW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for /api/hbbtv/undefined, got %d", undefW.Code)
+	}
+	if undefW.Header().Get("Content-Type") != "image/gif" {
+		t.Errorf("Expected image/gif for /api/hbbtv/undefined, got %s", undefW.Header().Get("Content-Type"))
+	}
 }

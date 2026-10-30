@@ -1817,6 +1817,23 @@ func rewriteLocationNav(code string) string {
 }
 
 func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
+	subPath := strings.TrimPrefix(r.URL.Path, "/api/hbbtv/")
+	if subPath == "undefined" || subPath == "null" || r.URL.Query().Get("url") == "undefined" {
+		w.Header().Set("Content-Type", "image/gif")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(http.StatusOK)
+		// 1x1 transparent GIF
+		_, _ = w.Write([]byte{
+			0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00,
+			0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00,
+			0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
+			0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44,
+			0x01, 0x00, 0x3b,
+		})
+		return
+	}
+
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" {
 		// Relative asset requested directly by the browser under /api/hbbtv/ (e.g. /api/hbbtv/ram/keycodes-min.js)
@@ -2124,12 +2141,23 @@ if (!window.KeyEvent) {
     };
   }
 
+  var origAddEventListener = window.addEventListener.bind(window);
+  window.addEventListener = function(type, listener, options) {
+    if (type === 'unload') {
+      return origAddEventListener('pagehide', listener, options);
+    }
+    return origAddEventListener(type, listener, options);
+  };
+
   try {
     var origImgSrcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
     if (origImgSrcDesc && origImgSrcDesc.set) {
       Object.defineProperty(HTMLImageElement.prototype, 'src', {
         get: function() { return origImgSrcDesc.get.call(this); },
         set: function(val) {
+          if (!val || val === 'undefined' || val === 'null') {
+            return origImgSrcDesc.set.call(this, 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+          }
           val = toProxyUrl(val);
           return origImgSrcDesc.set.call(this, val);
         }
@@ -2143,6 +2171,7 @@ if (!window.KeyEvent) {
       Object.defineProperty(HTMLScriptElement.prototype, 'src', {
         get: function() { return origScriptSrcDesc.get.call(this); },
         set: function(val) {
+          if (!val || val === 'undefined' || val === 'null') return;
           val = toProxyUrl(val);
           return origScriptSrcDesc.set.call(this, val);
         }
@@ -2156,6 +2185,7 @@ if (!window.KeyEvent) {
       Object.defineProperty(HTMLLinkElement.prototype, 'href', {
         get: function() { return origLinkHrefDesc.get.call(this); },
         set: function(val) {
+          if (!val || val === 'undefined' || val === 'null') return;
           val = toProxyUrl(val);
           return origLinkHrefDesc.set.call(this, val);
         }
@@ -2166,6 +2196,7 @@ if (!window.KeyEvent) {
   if (navigator.sendBeacon) {
     var origSendBeacon = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = function(url, data) {
+      if (!url || url === 'undefined' || url === 'null') return false;
       url = toProxyUrl(url);
       return origSendBeacon(url, data);
     };
