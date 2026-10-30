@@ -2207,7 +2207,7 @@ if (!window.KeyEvent) {
     var res = origGetElementsByTagName(tag);
     if (tag && tag.toLowerCase() === 'object') {
       var arr = Array.prototype.slice.call(res);
-      var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #appMan, #oipfcfg, #appConf, #mybroadcast, #oipfAppMan, #oipfConfig'));
+      var mocks = Array.prototype.slice.call(document.querySelectorAll('div[data-type], div[type*="oipf"], div[type*="broadcast"], #appmgr, #appMan, #oipfcfg, #appConf, #mybroadcast, #oipfAppMan, #oipfConfig, #video, #video2, #videodiv'));
       mocks.forEach(function(m) {
         if (arr.indexOf(m) === -1) arr.push(m);
       });
@@ -2218,6 +2218,27 @@ if (!window.KeyEvent) {
     return res;
   };
 
+  var origCreateElement = document.createElement.bind(document);
+  document.createElement = function(tag, options) {
+    var el = origCreateElement(tag, options);
+    if (tag && typeof tag === 'string') {
+      var lower = tag.toLowerCase();
+      if (lower === 'object' || lower === 'video') {
+        setupAvObject(el);
+      }
+    }
+    return el;
+  };
+
+  var origGetElementById = document.getElementById.bind(document);
+  document.getElementById = function(id) {
+    var el = origGetElementById(id);
+    if (el && (id === 'video' || id === 'video2' || id === 'videodiv' || id === 'myradio') && id !== 'mybroadcast') {
+      setupAvObject(el);
+    }
+    return el;
+  };
+
   document.addEventListener('click', function(e) {
     var a = e.target && e.target.closest ? e.target.closest('a') : null;
     if (a && a.href && !a.href.startsWith('javascript:')) {
@@ -2226,6 +2247,281 @@ if (!window.KeyEvent) {
     }
   }, true);
 })();
+
+function loadDashPlayer(cb) {
+  if (window.dashjs) return cb();
+  var s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/dashjs/4.7.4/dash.all.min.js';
+  s.onload = cb;
+  s.onerror = function() { cb(); };
+  (document.head || document.documentElement).appendChild(s);
+}
+
+function loadHlsPlayer(cb) {
+  if (window.Hls) return cb();
+  var s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.8/hls.min.js';
+  s.onload = cb;
+  s.onerror = function() { cb(); };
+  (document.head || document.documentElement).appendChild(s);
+}
+
+function setupMediaSource(v, val, el) {
+  if (!v || !val) return;
+  var proxied = toProxyUrl(val);
+
+  if (v._dashPlayer) {
+    try { v._dashPlayer.reset(); } catch(e) {}
+    v._dashPlayer = null;
+  }
+  if (v._hlsPlayer) {
+    try { v._hlsPlayer.destroy(); } catch(e) {}
+    v._hlsPlayer = null;
+  }
+
+  if (/\.mpd(?:$|[?#])/i.test(val)) {
+    loadDashPlayer(function() {
+      if (window.dashjs) {
+        try {
+          var dp = dashjs.MediaPlayer().create();
+          dp.initialize(v, proxied, true);
+          v._dashPlayer = dp;
+          dp.on(dashjs.MediaPlayer.events.PLAYBACK_PLAYING, function() {
+            if (el) {
+              el._playState = 1;
+              if (typeof el.onPlayStateChange === 'function') el.onPlayStateChange();
+            }
+          });
+          return;
+        } catch(e) {}
+      }
+      v.src = proxied;
+      v.load();
+    });
+  } else if (/\.m3u8(?:$|[?#])/i.test(val)) {
+    loadHlsPlayer(function() {
+      if (window.Hls && Hls.isSupported()) {
+        try {
+          var hls = new Hls();
+          hls.loadSource(proxied);
+          hls.attachMedia(v);
+          v._hlsPlayer = hls;
+          hls.on(Hls.Events.MANIFEST_PARSED, function() {
+            v.play().catch(function(){});
+            if (el) {
+              el._playState = 1;
+              if (typeof el.onPlayStateChange === 'function') el.onPlayStateChange();
+            }
+          });
+          return;
+        } catch(e) {}
+      }
+      v.src = proxied;
+      v.load();
+    });
+  } else {
+    v.src = proxied;
+    v.load();
+  }
+}
+
+function setupAvObject(el) {
+  if (!el || el._isAvObject || el.id === 'mybroadcast') return;
+  el._isAvObject = true;
+
+  if (el.tagName && el.tagName.toLowerCase() === 'object') {
+    el.style.display = 'block';
+  }
+
+  var isHtmlVideo = el.tagName && el.tagName.toLowerCase() === 'video';
+  var v = isHtmlVideo ? el : el.querySelector('video');
+  if (!v) {
+    v = document.createElement('video');
+    v.style.cssText = 'position:absolute;top:0;left:0;width:100%%;height:100%%;z-index:100;background:black;object-fit:contain;';
+    v.autoplay = true;
+    v.playsInline = true;
+    el.appendChild(v);
+  }
+  el._html5Video = v;
+  el._playState = 0;
+  el.error = 0;
+
+  v.addEventListener('playing', function() {
+    el._playState = 1;
+    if (typeof el.onPlayStateChange === 'function') {
+      try { el.onPlayStateChange(); } catch(e) {}
+    }
+  });
+  v.addEventListener('pause', function() {
+    if (el._playState !== 0 && el._playState !== 5) {
+      el._playState = 2;
+      if (typeof el.onPlayStateChange === 'function') {
+        try { el.onPlayStateChange(); } catch(e) {}
+      }
+    }
+  });
+  v.addEventListener('waiting', function() {
+    el._playState = 4;
+    if (typeof el.onPlayStateChange === 'function') {
+      try { el.onPlayStateChange(); } catch(e) {}
+    }
+  });
+  v.addEventListener('ended', function() {
+    el._playState = 5;
+    if (typeof el.onPlayStateChange === 'function') {
+      try { el.onPlayStateChange(); } catch(e) {}
+    }
+  });
+  v.addEventListener('error', function() {
+    el._playState = 6;
+    el.error = 1;
+    if (typeof el.onPlayStateChange === 'function') {
+      try { el.onPlayStateChange(); } catch(e) {}
+    }
+  });
+
+  el.play = function(speed) {
+    el._playState = 1;
+    if (v) {
+      var p = v.play();
+      if (p && p.catch) p.catch(function(){});
+    }
+    if (typeof el.onPlayStateChange === 'function') {
+      try { el.onPlayStateChange(); } catch(e) {}
+    }
+    return true;
+  };
+  el.stop = function() {
+    el._playState = 0;
+    if (v) {
+      v.pause();
+      try { v.currentTime = 0; } catch(e) {}
+    }
+    if (typeof el.onPlayStateChange === 'function') {
+      try { el.onPlayStateChange(); } catch(e) {}
+    }
+    return true;
+  };
+  el.pause = function() {
+    el._playState = 2;
+    if (v) v.pause();
+    if (typeof el.onPlayStateChange === 'function') {
+      try { el.onPlayStateChange(); } catch(e) {}
+    }
+    return true;
+  };
+  el.seek = function(ms) {
+    if (v) {
+      v.currentTime = (ms || 0) / 1000;
+    }
+    return true;
+  };
+  el.setFullScreen = el.setFullscreen = function() { return true; };
+  el.setMute = function(m) { if (v) v.muted = !!m; };
+  el.setVolume = function(vol) { if (v) v.volume = Math.max(0, Math.min(1, vol / 100)); };
+  el.getComponents = function() { return []; };
+
+  try {
+    Object.defineProperty(el, 'data', {
+      get: function() { return el._dataUrl || (v ? v.src : ''); },
+      set: function(val) {
+        if (!val) return;
+        el._dataUrl = val;
+        el._playState = 3;
+        if (typeof el.onPlayStateChange === 'function') {
+          try { el.onPlayStateChange(); } catch(e) {}
+        }
+        setupMediaSource(v, val, el);
+      },
+      configurable: true
+    });
+  } catch(e) {}
+
+  try {
+    Object.defineProperty(el, 'playPosition', {
+      get: function() { return Math.floor((v ? v.currentTime : 0) * 1000); },
+      configurable: true
+    });
+  } catch(e) {}
+
+  try {
+    Object.defineProperty(el, 'playTime', {
+      get: function() { return Math.floor(((v && !isNaN(v.duration)) ? v.duration : 0) * 1000); },
+      configurable: true
+    });
+  } catch(e) {}
+
+  try {
+    Object.defineProperty(el, 'playState', {
+      get: function() {
+        if (typeof el._playState === 'number') return el._playState;
+        return 0;
+      },
+      set: function(s) {
+        el._playState = s;
+      },
+      configurable: true
+    });
+  } catch(e) {}
+
+  try {
+    Object.defineProperty(el, 'currentTime', {
+      get: function() { return v ? v.currentTime : 0; },
+      set: function(t) { if (v) v.currentTime = t; },
+      configurable: true
+    });
+  } catch(e) {}
+
+  try {
+    Object.defineProperty(el, 'duration', {
+      get: function() { return v ? v.duration : 0; },
+      configurable: true
+    });
+  } catch(e) {}
+}
+
+try {
+  if (!HTMLVideoElement.prototype.stop) {
+    HTMLVideoElement.prototype.stop = function() {
+      this.pause();
+      try { this.currentTime = 0; } catch(e) {}
+      this._playState = 0;
+      if (typeof this.onPlayStateChange === 'function') {
+        try { this.onPlayStateChange(); } catch(e) {}
+      }
+    };
+  }
+  if (!HTMLVideoElement.prototype.seek) {
+    HTMLVideoElement.prototype.seek = function(ms) {
+      this.currentTime = (ms || 0) / 1000;
+    };
+  }
+  if (!('playPosition' in HTMLVideoElement.prototype)) {
+    Object.defineProperty(HTMLVideoElement.prototype, 'playPosition', {
+      get: function() { return Math.floor((this.currentTime || 0) * 1000); },
+      configurable: true
+    });
+  }
+  if (!('playTime' in HTMLVideoElement.prototype)) {
+    Object.defineProperty(HTMLVideoElement.prototype, 'playTime', {
+      get: function() { return Math.floor(((this.duration && !isNaN(this.duration)) ? this.duration : 0) * 1000); },
+      configurable: true
+    });
+  }
+  if (!('playState' in HTMLVideoElement.prototype)) {
+    Object.defineProperty(HTMLVideoElement.prototype, 'playState', {
+      get: function() {
+        if (typeof this._playState === 'number') return this._playState;
+        if (this.ended) return 5;
+        if (this.paused && this.currentTime > 0) return 2;
+        if (!this.paused && this.currentTime > 0) return 1;
+        return 0;
+      },
+      set: function(s) { this._playState = s; },
+      configurable: true
+    });
+  }
+} catch(e) {}
 
 var mockKeyset = {
   setValue: function() {},
@@ -2272,6 +2568,7 @@ var mockBc = {
   release: function() {},
   stop: function() {},
   play: function() { return 0; },
+  playState: 3,
   currentChannel: { name: 'DVB Broadcast', sid: 101 },
   getChannelConfig: function() {
     return {
@@ -2296,6 +2593,11 @@ function initHbbtvMocks() {
   document.querySelectorAll('#mybroadcast, #tvbild, [type*="broadcast"], [data-type*="broadcast"]').forEach(function(el) {
     Object.assign(el, mockBc);
   });
+  document.querySelectorAll('object, video, #video, #video2, #videodiv, [type*="dash"], [type*="mp4"], [type*="video/"]').forEach(function(el) {
+    if (el.id !== 'mybroadcast' && el.getAttribute('type') !== 'video/broadcast' && el.getAttribute('data-type') !== 'video/broadcast') {
+      setupAvObject(el);
+    }
+  });
   document.querySelectorAll('#redbutton, #RedButton, [id*="redbutton" i], [class*="redbutton" i], [id*="RedButton"]').forEach(function(el) {
     el.style.cursor = 'pointer';
     el.onclick = function(e) {
@@ -2304,6 +2606,26 @@ function initHbbtvMocks() {
     };
   });
 }
+
+try {
+  var obs = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mut) {
+      mut.addedNodes.forEach(function(n) {
+        if (n.nodeType === 1) {
+          if (n.id !== 'mybroadcast' && (n.matches && n.matches('object, video, #video, #video2, [type*="dash"], [type*="mp4"]'))) {
+            setupAvObject(n);
+          }
+          if (n.querySelectorAll) {
+            n.querySelectorAll('object, video, #video, #video2, [type*="dash"], [type*="mp4"]').forEach(function(sub) {
+              if (sub.id !== 'mybroadcast') setupAvObject(sub);
+            });
+          }
+        }
+      });
+    });
+  });
+  obs.observe(document.documentElement || document, { childList: true, subtree: true });
+} catch(e) {}
 
 function fitHbbTV() {
   var w = window.innerWidth || document.documentElement.clientWidth || 1280;
@@ -2328,6 +2650,7 @@ window.sendHbbtvKey = function(code) {
   if (code === 404) codes.push(117);
   if (code === 405) codes.push(118);
   if (code === 406) codes.push(119);
+  if (code === 461 || code === 8) codes = [461, 8];
 
   codes.forEach(function(k) {
     ['keydown', 'keyup'].forEach(function(evtType) {
@@ -2373,6 +2696,9 @@ window.addEventListener('keydown', function(e) {
     window.sendHbbtvKey(405);
   } else if (code === 66 || code === 52) {
     window.sendHbbtvKey(406);
+  } else if (code === 8 || code === 461) {
+    e.preventDefault();
+    window.sendHbbtvKey(461);
   }
 });
 

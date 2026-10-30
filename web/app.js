@@ -2698,6 +2698,12 @@ function sendHbbtvKeyToIframe(keyCode) {
   } catch (e) {
     console.warn('Could not dispatch key into HbbTV iframe:', e);
   }
+
+  // Remove focus from button and return focus to main page so keyboard shortcuts continue seamlessly
+  if (document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+  }
+  window.focus();
 }
 window.sendHbbtvKeyToIframe = sendHbbtvKeyToIframe;
 

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DVB-Web — Live TV & EPG</title>
-  <link rel="stylesheet" href="style.css?v=14">
+  <link rel="stylesheet" href="style.css?v=15">
   <link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 </head>
@@ -824,6 +824,17 @@
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>?</kbd></span><span class="shortcut-desc">Show / Hide Keyboard Shortcuts Cheat-Sheet</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>Esc</kbd></span><span class="shortcut-desc">Close any Open Modal or Overlay</span></div>
         </div>
+        <div class="shortcuts-section">
+          <h4>🔴 HbbTV Smart TV Portal Controls</h4>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>H</kbd></span><span class="shortcut-desc">Open / Close HbbTV Interactive Portal</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>R</kbd> / <kbd>1</kbd></span><span class="shortcut-desc">Red Button (Main Broadcaster Menu)</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>G</kbd> / <kbd>2</kbd></span><span class="shortcut-desc">Green Button</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>Y</kbd> / <kbd>3</kbd></span><span class="shortcut-desc">Yellow Button</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>B</kbd> / <kbd>4</kbd></span><span class="shortcut-desc">Blue Button</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></span><span class="shortcut-desc">Navigate Menus & Video Items</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>Enter</kbd></span><span class="shortcut-desc">Select / Open Video</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>Backspace</kbd></span><span class="shortcut-desc">Back / Return to Previous Menu</span></div>
+        </div>
       </div>
     </div>
   </div>
@@ -834,10 +845,11 @@
       <div class="modal-header">
         <h3 id="hbbtv-modal-title">🔴 HbbTV Interactive Application</h3>
         <div class="hbbtv-remote-bar">
-          <button type="button" class="btn-color-pill btn-red" onclick="sendHbbtvKeyToIframe(403)" title="Red Button (Key R or 1)">● Red</button>
-          <button type="button" class="btn-color-pill btn-green" onclick="sendHbbtvKeyToIframe(404)" title="Green Button (Key G or 2)">● Green</button>
-          <button type="button" class="btn-color-pill btn-yellow" onclick="sendHbbtvKeyToIframe(405)" title="Yellow Button (Key Y or 3)">● Yellow</button>
-          <button type="button" class="btn-color-pill btn-blue" onclick="sendHbbtvKeyToIframe(406)" title="Blue Button (Key B or 4)">● Blue</button>
+          <button type="button" class="btn-color-pill btn-red" onclick="sendHbbtvKeyToIframe(403); this.blur();" title="Red Button (Key R or 1)">● Red</button>
+          <button type="button" class="btn-color-pill btn-green" onclick="sendHbbtvKeyToIframe(404); this.blur();" title="Green Button (Key G or 2)">● Green</button>
+          <button type="button" class="btn-color-pill btn-yellow" onclick="sendHbbtvKeyToIframe(405); this.blur();" title="Yellow Button (Key Y or 3)">● Yellow</button>
+          <button type="button" class="btn-color-pill btn-blue" onclick="sendHbbtvKeyToIframe(406); this.blur();" title="Blue Button (Key B or 4)">● Blue</button>
+          <button type="button" class="btn-color-pill btn-back" onclick="sendHbbtvKeyToIframe(461); this.blur();" title="Back Button (Backspace)">⮌ Back</button>
         </div>
         <div class="hbbtv-header-actions">
           <button id="btn-close-hbbtv" class="modal-close-btn">&times;</button>
@@ -881,6 +893,6 @@
 
   <script src="mpegts.min.js"></script>
   <script src="mock.js"></script>
-  <script src="app.js?v=15"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

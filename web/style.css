@@ -4811,6 +4811,11 @@ input:checked + .slider:before {
   color: #fff;
 }
 
+.btn-back {
+  background: #475569;
+  color: #f8fafc;
+}
+
 .hbbtv-header-actions {
   display: flex;
   align-items: center;

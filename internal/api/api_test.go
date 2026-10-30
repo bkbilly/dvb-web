@@ -320,6 +320,15 @@ function goRed(url) {
 	if !bytes.Contains([]byte(body), []byte("window.sendHbbtvKey")) {
 		t.Errorf("Expected body to contain 'window.sendHbbtvKey'")
 	}
+	if !bytes.Contains([]byte(body), []byte("setupAvObject")) {
+		t.Errorf("Expected body to contain 'setupAvObject' for OIPF video support")
+	}
+	if !bytes.Contains([]byte(body), []byte("setupMediaSource")) {
+		t.Errorf("Expected body to contain 'setupMediaSource' for video playback")
+	}
+	if !bytes.Contains([]byte(body), []byte("codes = [461, 8]")) {
+		t.Errorf("Expected body to map VK_BACK (461) to both 461 and 8")
+	}
 	// Check that relative script/css were rewritten to proxy URLs
 	if !bytes.Contains([]byte(body), []byte("/api/hbbtv/proxy?url=")) {
 		t.Errorf("Expected static assets to be rewritten to /api/hbbtv/proxy?url=")
