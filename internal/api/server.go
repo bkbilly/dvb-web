@@ -1941,6 +1941,15 @@ func (s *Server) handleHbbtvProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		bodyStr := string(bodyBytes)
+		lowerBody := strings.ToLower(bodyStr)
+		isActualHTML := strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<!doctype") || strings.Contains(lowerBody, "<head") || strings.Contains(lowerBody, "<body")
+		if !isActualHTML {
+			w.Header().Set("Content-Type", ct)
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write([]byte(bodyStr))
+			return
+		}
 
 		// Replace plugin-triggering <object> and <embed> tags with <div> to prevent browser plugin alerts
 		bodyStr = regexp.MustCompile(`(?i)<object\b`).ReplaceAllString(bodyStr, "<div")
@@ -2080,18 +2089,26 @@ if (!window.KeyEvent) {
 }
 
 (function() {
+  function shouldProxy(u) {
+    if (!u || typeof u !== 'string') return false;
+    if (u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('javascript:') || u.startsWith('#')) return false;
+    if (u.startsWith('/api/hbbtv/') || u.startsWith(window.location.origin) || u.indexOf('/api/hbbtv/proxy') !== -1) return false;
+    return true;
+  }
+
+  function toProxyUrl(u) {
+    if (!shouldProxy(u)) return u;
+    try {
+      var resolved = new URL(u, window.__hbbtvBase).href;
+      return '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
+    } catch(e) {
+      return u;
+    }
+  }
+
   var origOpen = window.XMLHttpRequest.prototype.open;
   window.XMLHttpRequest.prototype.open = function(method, u, async, user, password) {
-    if (u && typeof u === 'string') {
-      if (!u.match(/^https?:\/\//i)) {
-        try {
-          var resolved = new URL(u, window.__hbbtvBase).href;
-          u = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
-        } catch(e) {}
-      } else if (!u.startsWith(window.location.origin)) {
-        u = '/api/hbbtv/proxy?url=' + encodeURIComponent(u);
-      }
-    }
+    u = toProxyUrl(u);
     return origOpen.call(this, method, u, async !== false, user, password);
   };
 
@@ -2099,14 +2116,7 @@ if (!window.KeyEvent) {
     var origFetch = window.fetch;
     window.fetch = function(input, init) {
       if (typeof input === 'string') {
-        if (!input.match(/^https?:\/\//i)) {
-          try {
-            var resolved = new URL(input, window.__hbbtvBase).href;
-            input = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
-          } catch(e) {}
-        } else if (!input.startsWith(window.location.origin)) {
-          input = '/api/hbbtv/proxy?url=' + encodeURIComponent(input);
-        }
+        input = toProxyUrl(input);
       }
       return origFetch.call(this, input, init);
     };
@@ -2118,12 +2128,7 @@ if (!window.KeyEvent) {
       Object.defineProperty(HTMLImageElement.prototype, 'src', {
         get: function() { return origImgSrcDesc.get.call(this); },
         set: function(val) {
-          if (val && typeof val === 'string' && !val.startsWith('data:') && !val.startsWith('blob:') && !val.startsWith('/api/hbbtv/')) {
-            try {
-              var resolved = new URL(val, window.__hbbtvBase).href;
-              val = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
-            } catch(e) {}
-          }
+          val = toProxyUrl(val);
           return origImgSrcDesc.set.call(this, val);
         }
       });
@@ -2136,12 +2141,7 @@ if (!window.KeyEvent) {
       Object.defineProperty(HTMLScriptElement.prototype, 'src', {
         get: function() { return origScriptSrcDesc.get.call(this); },
         set: function(val) {
-          if (val && typeof val === 'string' && !val.startsWith('data:') && !val.startsWith('/api/hbbtv/')) {
-            try {
-              var resolved = new URL(val, window.__hbbtvBase).href;
-              val = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
-            } catch(e) {}
-          }
+          val = toProxyUrl(val);
           return origScriptSrcDesc.set.call(this, val);
         }
       });
@@ -2154,12 +2154,7 @@ if (!window.KeyEvent) {
       Object.defineProperty(HTMLLinkElement.prototype, 'href', {
         get: function() { return origLinkHrefDesc.get.call(this); },
         set: function(val) {
-          if (val && typeof val === 'string' && !val.startsWith('data:') && !val.startsWith('/api/hbbtv/')) {
-            try {
-              var resolved = new URL(val, window.__hbbtvBase).href;
-              val = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
-            } catch(e) {}
-          }
+          val = toProxyUrl(val);
           return origLinkHrefDesc.set.call(this, val);
         }
       });
@@ -2169,12 +2164,7 @@ if (!window.KeyEvent) {
   if (navigator.sendBeacon) {
     var origSendBeacon = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = function(url, data) {
-      if (typeof url === 'string' && !url.startsWith('/api/hbbtv/')) {
-        try {
-          var resolved = new URL(url, window.__hbbtvBase).href;
-          url = '/api/hbbtv/proxy?url=' + encodeURIComponent(resolved);
-        } catch(e) {}
-      }
+      url = toProxyUrl(url);
       return origSendBeacon(url, data);
     };
   }
@@ -2366,9 +2356,9 @@ setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 80);
 setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 400);
 </script>`, baseURL)
 
-		// Inject <base> tag and polyfill at the very top of <head> so it takes effect before any external scripts/links
+		// Inject polyfill at the very top of <head> so it takes effect before any external scripts/links
 		headIdx := -1
-		lowerBody := strings.ToLower(bodyStr)
+		lowerBody = strings.ToLower(bodyStr)
 		if idx := strings.Index(lowerBody, "<head>"); idx != -1 {
 			headIdx = idx + 6
 		} else if idx := strings.Index(lowerBody, "<head "); idx != -1 {
@@ -2381,6 +2371,13 @@ setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 400);
 			bodyStr = bodyStr[:headIdx] + polyfill + bodyStr[headIdx:]
 		} else if idx := strings.Index(lowerBody, "</head>"); idx != -1 {
 			bodyStr = bodyStr[:idx] + polyfill + bodyStr[idx:]
+		} else if idx := strings.Index(lowerBody, "<body"); idx != -1 {
+			if endBody := strings.Index(lowerBody[idx:], ">"); endBody != -1 {
+				bodyIdx := idx + endBody + 1
+				bodyStr = bodyStr[:bodyIdx] + polyfill + bodyStr[bodyIdx:]
+			} else {
+				bodyStr = polyfill + bodyStr
+			}
 		} else {
 			bodyStr = polyfill + bodyStr
 		}

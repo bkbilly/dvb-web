@@ -277,6 +277,10 @@ function goRed(url) {
 <div id="redbutton"><img src="img/red.png" /></div>
 </body>
 </html>`))
+		case "/v6/":
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("2a02:587:32fe:8db:d5eb:5daf:98c:7e67"))
 		case "/ram/start.css":
 			w.Header().Set("Content-Type", "text/css")
 			w.WriteHeader(http.StatusOK)
@@ -374,5 +378,17 @@ function goRed(url) {
 	loc := fallbackW.Header().Get("Location")
 	if !bytes.Contains([]byte(loc), []byte("/api/hbbtv/proxy?url=")) {
 		t.Errorf("Expected redirect to proxy url, got: %s", loc)
+	}
+
+	// 6. Test that non-HTML endpoints sending text/html (like v6 IP lookup) are not polyfilled
+	v6Req := httptest.NewRequest(http.MethodGet, "/api/hbbtv/proxy?url="+mockBroadcaster.URL+"/v6/", nil)
+	v6W := httptest.NewRecorder()
+	mux.ServeHTTP(v6W, v6Req)
+
+	if v6W.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for /v6/ endpoint, got %d: %s", v6W.Code, v6W.Body.String())
+	}
+	if v6W.Body.String() != "2a02:587:32fe:8db:d5eb:5daf:98c:7e67" {
+		t.Errorf("Expected exact clean IP string without polyfill, got: %q", v6W.Body.String())
 	}
 }
