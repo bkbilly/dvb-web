@@ -379,7 +379,7 @@ func (s *Server) handleEPG(w http.ResponseWriter, r *http.Request) {
 	channelID, _ := strconv.ParseInt(q.Get("channel_id"), 10, 64)
 
 	from := time.Now().Add(-2 * time.Hour)
-	to := time.Now().Add(7 * 24 * time.Hour)
+	to := time.Now().Add(14 * 24 * time.Hour)
 
 	if f := q.Get("from"); f != "" {
 		if t, err := time.Parse(time.RFC3339, f); err == nil {
@@ -1016,7 +1016,7 @@ func (s *Server) handleXMLTV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	from := time.Now().Add(-6 * time.Hour)
-	to := time.Now().Add(7 * 24 * time.Hour)
+	to := time.Now().Add(14 * 24 * time.Hour)
 	events, err := s.db.GetAllEPG(from, to)
 	if err != nil {
 		http.Error(w, "epg database error", http.StatusInternalServerError)

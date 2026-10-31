@@ -1687,11 +1687,16 @@ body {
   position: relative;
   width: 100%;
   cursor: grab;
+  will-change: scroll-position;
 }
 
-.epg-grid-scroll.is-dragging,
-.epg-grid-scroll.is-dragging * {
+.epg-grid-scroll.is-dragging {
   cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.epg-grid-scroll.is-dragging * {
+  pointer-events: none !important;
   user-select: none !important;
 }
 

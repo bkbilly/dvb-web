@@ -78,12 +78,23 @@ docker run -d \
 ### Build from Source
 
 ```bash
-# Prerequisites: Linux, Go 1.22+, ffmpeg
+# Prerequisites: Linux, Go 1.24+, ffmpeg
 go build -o dvb-web cmd/server/main.go
 ./dvb-web
 ```
 
 > **No physical tuner attached?** Run `./dvb-web -mock` to test with simulated channels and sample EPG data.
+
+---
+
+## ⚙️ CLI Arguments
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `-port` | `8080` | HTTP server port for Web UI, WebRTC, and external streaming |
+| `-data-dir` | `./data` | Directory storing SQLite database (`tv.db`), logos, and recordings |
+| `-web-dir` | `./web` | Directory for web frontend assets (falls back to embedded static assets) |
+| `-mock` | `false` | Enable virtual tuner mode with sample channels and EPG without physical DVB hardware |
 
 ---
 
@@ -97,28 +108,6 @@ go build -o dvb-web cmd/server/main.go
 
 - **Plex**: Go to **Settings** &rarr; **Live TV & DVR** &rarr; **Set up Plex DVR**. Enter `http://<server-ip>:8080`.
 - **Jellyfin**: Go to **Dashboard** &rarr; **Live TV** &rarr; add **HDHomeRun** (`http://<server-ip>:8080`) and **XMLTV** (`http://<server-ip>:8080/epg.xml`).
-
----
-
-## ⌨️ Keyboard Shortcuts
-
-| Key | Action |
-| :--- | :--- |
-| `↑` / `↓` or `PageUp` / `PageDown` | Previous / Next Channel |
-| `0` – `9` | Direct Channel Number Zap |
-| `Space` / `K` | Pause / Resume Live Broadcast (Timeshift) |
-| `←` / `→` | Rewind / Skip Forward 10 seconds |
-| `L` | Jump Back to Live Stream |
-| `M` | Mute / Unmute Audio |
-| `+` / `-` | Volume Up / Down |
-| `F` or `Double-Click Video` | Toggle Fullscreen |
-| `A` | Cycle Aspect Ratio (Auto, 16:9, 4:3, Stretch, Zoom) |
-| `S` | Real-Time RF Signal Analyzer HUD Overlay |
-| `T` | Teletext Page Viewer & Subtitle Track |
-| `H` | HbbTV Interactive Portal |
-| `I` | Live Program Synopsis & Details |
-| `?` | Keyboard Shortcuts Cheat-Sheet Modal |
-| `Esc` | Close any Open Modal or Overlay |
 
 ---
 

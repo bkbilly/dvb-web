@@ -371,6 +371,7 @@ function switchTab(tabId) {
     } else {
       updateEPGPlayingHighlight();
       updateNowMarkerPosition();
+      updateEPGActiveDay();
     }
   } else if (tabId === 'recordings') {
     loadRecordings();
@@ -1974,11 +1975,13 @@ function setupPlayerControls() {
     }
     // Update EPG marker and keep ruler in sync on window resize
     updateNowMarkerPosition();
+    updateCachedLayoutMetrics();
     const gridScroll = document.getElementById('epg-grid-scroll');
     const rulerScroll = document.getElementById('epg-ruler-scroll');
     if (gridScroll && rulerScroll) {
       rulerScroll.scrollLeft = gridScroll.scrollLeft;
     }
+    updateEPGActiveDay();
   });
   video.addEventListener('loadedmetadata', () => {
     updateMobileVideoHeight();
@@ -2986,23 +2989,54 @@ function formatEPGTime(date) {
 }
 
 async function loadEPGTimeline(isInitial = false) {
-  const hoursCount = 168; // 7 days of full TV guide
+  // Query up to 14 days of EPG (supports standard 7-day, 10-day, and 14-day extended guides)
+  const maxQueryDays = 14;
   if (!timelineStartTime || isInitial) {
     const now = new Date();
-    // Timeline starts 2 hours ago, runs for 7 days (168 hours)
+    // Timeline starts 2 hours ago
     timelineStartTime = new Date(now.getTime() - 2 * 60 * 60 * 1000);
     timelineStartTime.setMinutes(0, 0, 0); // align to hour
   }
-  timelineEndTime = new Date(timelineStartTime.getTime() + hoursCount * 60 * 60 * 1000);
+  const maxQueryEndTime = new Date(timelineStartTime.getTime() + maxQueryDays * 24 * 60 * 60 * 1000);
 
   const gridScroll = document.getElementById('epg-grid-scroll');
   const prevScrollLeft = gridScroll ? gridScroll.scrollLeft : 0;
   const prevScrollTop = gridScroll ? gridScroll.scrollTop : 0;
 
-  renderDaySelector(timelineStartTime, hoursCount);
+  // Fetch ALL channels' EPG in a single batch HTTP request
+  let allEvents = [];
+  try {
+    const res = await fetch(`/api/epg?from=${timelineStartTime.toISOString()}&to=${maxQueryEndTime.toISOString()}`);
+    allEvents = await res.json() || [];
+  } catch (err) {
+    console.error('Failed to load EPG events:', err);
+  }
+
+  // Determine the actual end of EPG data dynamically based on the events returned
+  let maxEventTime = timelineStartTime.getTime();
+  if (allEvents && allEvents.length > 0) {
+    for (let i = 0; i < allEvents.length; i++) {
+      const eEnd = new Date(allEvents[i].end_time).getTime();
+      if (!isNaN(eEnd) && eEnd > maxEventTime) {
+        maxEventTime = eEnd;
+      }
+    }
+  }
+
+  // Calculate timeline end time aligned to the end of the last day with programs (or at least 24h)
+  const minEndTime = new Date(timelineStartTime.getTime() + 24 * 60 * 60 * 1000);
+  const endOfLastDay = new Date(maxEventTime);
+  endOfLastDay.setHours(24, 0, 0, 0);
+
+  timelineEndTime = endOfLastDay > minEndTime ? endOfLastDay : minEndTime;
+  const totalMinutes = (timelineEndTime - timelineStartTime) / (60 * 1000);
+  const hoursCount = Math.ceil(totalMinutes / 60);
+
+  updateCachedLayoutMetrics();
+  renderDaySelector(timelineStartTime, hoursCount, allEvents);
   renderTimeRuler(timelineStartTime, hoursCount);
   renderChannelsColumn();
-  await renderProgramRows(timelineStartTime, timelineEndTime);
+  await renderProgramRows(timelineStartTime, timelineEndTime, allEvents);
   updateNowMarkerPosition();
   setupEPGScrolling();
   lastEPGLoadTime = Date.now();
@@ -3012,53 +3046,168 @@ async function loadEPGTimeline(isInitial = false) {
   } else if (gridScroll) {
     gridScroll.scrollLeft = prevScrollLeft;
     gridScroll.scrollTop = prevScrollTop;
+    updateEPGActiveDay();
   }
 }
 
-function renderDaySelector(startTime, hoursCount) {
+let isProgrammaticDayScroll = false;
+let dayScrollTimeout = null;
+let timelineTotalWidthPx = 0;
+let cachedChColWidth = 130;
+let lastEPGScrollLeft = -1;
+
+function updateCachedLayoutMetrics() {
+  cachedChColWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ch-col-width')) || 130;
+}
+
+function isSameDay(d1, d2) {
+  if (!d1 || !d2) return false;
+  return d1.getFullYear() === d2.getFullYear() &&
+         d1.getMonth() === d2.getMonth() &&
+         d1.getDate() === d2.getDate();
+}
+
+function scrollDayButtonIntoView(btn, center = false) {
+  const container = document.getElementById('epg-day-selector');
+  if (!container || !btn) return;
+  const btnLeft = btn.offsetLeft;
+  const btnWidth = btn.offsetWidth;
+  const btnRight = btnLeft + btnWidth;
+  const scrollLeft = container.scrollLeft;
+  const visibleWidth = container.clientWidth;
+
+  if (center) {
+    const targetScroll = btnLeft - (visibleWidth / 2) + (btnWidth / 2);
+    container.scrollTo({ left: Math.max(0, targetScroll), behavior: 'smooth' });
+  } else {
+    if (btnLeft < scrollLeft) {
+      container.scrollTo({ left: btnLeft, behavior: 'smooth' });
+    } else if (btnRight > scrollLeft + visibleWidth) {
+      container.scrollTo({ left: btnRight - visibleWidth, behavior: 'smooth' });
+    }
+  }
+}
+
+function updateEPGActiveDay() {
+  if (isProgrammaticDayScroll) return;
+
+  const gridScroll = document.getElementById('epg-grid-scroll');
+  const dayButtons = document.querySelectorAll('.day-btn');
+  if (!gridScroll || !timelineStartTime || dayButtons.length === 0) return;
+
+  const scrollLeft = gridScroll.scrollLeft;
+  if (scrollLeft === lastEPGScrollLeft) return;
+  lastEPGScrollLeft = scrollLeft;
+
+  const maxScrollLeft = Math.max(0, (timelineTotalWidthPx || 40320) - gridScroll.clientWidth);
+
+  let targetBtn = null;
+
+  if (maxScrollLeft > 0 && scrollLeft >= maxScrollLeft - 20) {
+    targetBtn = dayButtons[dayButtons.length - 1];
+  } else if (scrollLeft <= 5) {
+    targetBtn = dayButtons[0];
+  } else {
+    const eventsVisibleWidth = Math.max(0, gridScroll.clientWidth - cachedChColWidth);
+    const centerPx = scrollLeft + (eventsVisibleWidth / 2);
+    const centerMinutes = centerPx / PIXELS_PER_MINUTE;
+    const targetDate = new Date(timelineStartTime.getTime() + centerMinutes * 60 * 1000);
+
+    targetBtn = Array.from(dayButtons).find(btn => btn._dayDate && isSameDay(btn._dayDate, targetDate));
+
+    if (!targetBtn && dayButtons.length > 0) {
+      if (targetDate < dayButtons[0]._dayDate) {
+        targetBtn = dayButtons[0];
+      } else if (targetDate > dayButtons[dayButtons.length - 1]._dayDate) {
+        targetBtn = dayButtons[dayButtons.length - 1];
+      }
+    }
+  }
+
+  if (!targetBtn || targetBtn.classList.contains('active')) return;
+
+  dayButtons.forEach(b => b.classList.remove('active'));
+  targetBtn.classList.add('active');
+  scrollDayButtonIntoView(targetBtn, false);
+}
+
+function renderDaySelector(startTime, hoursCount, allEvents = []) {
   const container = document.getElementById('epg-day-selector');
   if (!container) return;
   container.innerHTML = '';
 
-  const days = [];
-  const cur = new Date(startTime);
-  cur.setHours(0, 0, 0, 0);
+  const nowZero = new Date();
+  nowZero.setHours(0, 0, 0, 0);
+
+  const candidateDays = [];
+  const cur = new Date(nowZero); // Days start from Today
 
   const endDay = new Date(startTime.getTime() + hoursCount * 60 * 60 * 1000);
   while (cur < endDay) {
-    days.push(new Date(cur));
+    candidateDays.push(new Date(cur));
     cur.setDate(cur.getDate() + 1);
   }
 
-  days.slice(0, 7).forEach((day, idx) => {
+  // Pre-calculate which days have at least one EPG event
+  const daysWithEPG = candidateDays.filter(day => {
+    const dayStart = day.getTime();
+    const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+
+    return allEvents && allEvents.some(e => {
+      const s = new Date(e.start_time).getTime();
+      const end = new Date(e.end_time).getTime();
+      return !isNaN(s) && !isNaN(end) && s < dayEnd && end > dayStart;
+    });
+  });
+
+  // Only contain the days that there is an EPG program.
+  // Ensure Today is always included as the anchor day.
+  let days = daysWithEPG;
+  if (!days.some(d => isSameDay(d, nowZero))) {
+    days.unshift(new Date(nowZero));
+  }
+
+  days.forEach((day, idx) => {
     const btn = document.createElement('button');
     btn._dayDate = day;
-    btn.className = `day-btn ${idx === 0 ? 'active' : ''}`;
+    const diffDays = Math.round((day.getTime() - nowZero.getTime()) / 86400000);
+    const isToday = diffDays === 0;
+    const isActive = isToday || (idx === 0);
+    btn.className = `day-btn ${isActive ? 'active' : ''}`;
+
     let label = '';
-    const nowZero = new Date();
-    nowZero.setHours(0, 0, 0, 0);
-    const diffDays = Math.round((day - nowZero) / (86400000));
     if (diffDays === 0) {
       label = 'Today';
     } else if (diffDays === 1) {
       label = 'Tomorrow';
+    } else if (diffDays === -1) {
+      label = 'Yesterday';
     } else {
       label = day.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
     }
     btn.textContent = label;
     btn.onclick = () => {
+      isProgrammaticDayScroll = true;
       document.querySelectorAll('.day-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      scrollDayButtonIntoView(btn, true);
+
       let targetTime = new Date(day);
       targetTime.setHours(8, 0, 0, 0);
       if (targetTime < startTime) targetTime = startTime;
       const minutesSinceStart = (targetTime.getTime() - startTime.getTime()) / (60 * 1000);
       const gridScroll = document.getElementById('epg-grid-scroll');
       gridScroll.scrollTo({ left: Math.max(0, minutesSinceStart * PIXELS_PER_MINUTE), behavior: 'smooth' });
+
+      clearTimeout(dayScrollTimeout);
+      dayScrollTimeout = setTimeout(() => {
+        isProgrammaticDayScroll = false;
+      }, 600);
     };
     container.appendChild(btn);
   });
+
+  updateEPGActiveDay();
 }
 
 function setupEPGScrolling() {
@@ -3071,7 +3220,10 @@ function setupEPGScrolling() {
   gridScroll.onscroll = () => {
     if (!scrollRaf) {
       scrollRaf = requestAnimationFrame(() => {
-        rulerScroll.scrollLeft = gridScroll.scrollLeft;
+        if (!window._epgIsDragging) {
+          rulerScroll.scrollLeft = gridScroll.scrollLeft;
+        }
+        updateEPGActiveDay();
         scrollRaf = null;
       });
     }
@@ -3083,6 +3235,7 @@ function setupEPGScrolling() {
   if (!gridScroll._hasWheelListener) {
     gridScroll._hasWheelListener = true;
     gridScroll.addEventListener('wheel', (e) => {
+      isProgrammaticDayScroll = false;
       if (e.shiftKey && e.deltaY !== 0) {
         e.preventDefault();
         gridScroll.scrollLeft += e.deltaY;
@@ -3090,7 +3243,26 @@ function setupEPGScrolling() {
     }, { passive: false });
   }
 
-  // 3. Click and Drag to pan freely in ALL directions
+  // 3. Touch scroll listener
+  if (!gridScroll._hasTouchListener) {
+    gridScroll._hasTouchListener = true;
+    gridScroll.addEventListener('touchstart', () => {
+      isProgrammaticDayScroll = false;
+    }, { passive: true });
+  }
+
+  // 4. Scrollend listener
+  if (!gridScroll._hasScrollEndListener) {
+    gridScroll._hasScrollEndListener = true;
+    gridScroll.addEventListener('scrollend', () => {
+      if (isProgrammaticDayScroll) {
+        isProgrammaticDayScroll = false;
+        updateEPGActiveDay();
+      }
+    });
+  }
+
+  // 5. Click and Drag to pan freely in ALL directions
   if (!gridScroll._hasDragListener) {
     gridScroll._hasDragListener = true;
     let isDown = false;
@@ -3104,6 +3276,8 @@ function setupEPGScrolling() {
     const DRAG_THRESHOLD = 5;
 
     gridScroll.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      isProgrammaticDayScroll = false;
       // Don't drag if clicking directly on a channel cell in the left column
       if (e.target.closest('.epg-channel-cell')) return;
       isDown = true;
@@ -3124,6 +3298,14 @@ function setupEPGScrolling() {
       }
     });
 
+    window.addEventListener('blur', () => {
+      if (isDown) {
+        isDown = false;
+        gridScroll.classList.remove('is-dragging');
+        window._epgIsDragging = false;
+      }
+    });
+
     window.addEventListener('mousemove', (e) => {
       if (!isDown) return;
       const dx = e.pageX - startX;
@@ -3140,6 +3322,7 @@ function setupEPGScrolling() {
           dragRaf = requestAnimationFrame(() => {
             gridScroll.scrollLeft = targetLeft;
             gridScroll.scrollTop = targetTop;
+            rulerScroll.scrollLeft = targetLeft;
             dragRaf = null;
           });
         }
@@ -3147,10 +3330,11 @@ function setupEPGScrolling() {
     });
   }
 
-  // 4. Navigation Buttons
+  // 6. Navigation Buttons
   const btnPrev = document.getElementById('btn-epg-prev');
   if (btnPrev) {
     btnPrev.onclick = () => {
+      isProgrammaticDayScroll = false;
       gridScroll.scrollBy({ left: -2 * 60 * PIXELS_PER_MINUTE, behavior: 'smooth' });
     };
   }
@@ -3158,13 +3342,17 @@ function setupEPGScrolling() {
   const btnNext = document.getElementById('btn-epg-next');
   if (btnNext) {
     btnNext.onclick = () => {
+      isProgrammaticDayScroll = false;
       gridScroll.scrollBy({ left: 2 * 60 * PIXELS_PER_MINUTE, behavior: 'smooth' });
     };
   }
 
   const btnNow = document.getElementById('btn-epg-now');
   if (btnNow) {
-    btnNow.onclick = jumpToNow;
+    btnNow.onclick = () => {
+      isProgrammaticDayScroll = false;
+      jumpToNow();
+    };
   }
 }
 
@@ -3259,22 +3447,26 @@ function updateEPGPlayingHighlight() {
   });
 }
 
-async function renderProgramRows(startTime, endTime) {
+async function renderProgramRows(startTime, endTime, prefetchedEvents = null) {
   const container = document.getElementById('epg-rows-container');
   if (!container) return;
 
   const totalMinutes = (endTime - startTime) / (60 * 1000);
   const totalWidthPx = totalMinutes * PIXELS_PER_MINUTE;
+  timelineTotalWidthPx = totalWidthPx;
   const canvas = document.getElementById('epg-events-canvas');
   if (canvas) canvas.style.width = `${totalWidthPx}px`;
 
-  // Fetch ALL channels' EPG in a single batch HTTP request instead of N sequential fetches
-  let allEvents = [];
-  try {
-    const res = await fetch(`/api/epg?from=${startTime.toISOString()}&to=${endTime.toISOString()}`);
-    allEvents = await res.json() || [];
-  } catch (err) {
-    console.error('Failed to load EPG events:', err);
+  // Fetch ALL channels' EPG in a single batch HTTP request instead of N sequential fetches (use prefetched if provided)
+  let allEvents = prefetchedEvents;
+  if (!allEvents) {
+    try {
+      const res = await fetch(`/api/epg?from=${startTime.toISOString()}&to=${endTime.toISOString()}`);
+      allEvents = await res.json() || [];
+    } catch (err) {
+      console.error('Failed to load EPG events:', err);
+      allEvents = [];
+    }
   }
 
   // Pre-index events by channel_id
@@ -3463,21 +3655,26 @@ function updateNowMarkerPosition() {
 function jumpToNow() {
   if (!timelineStartTime) return;
   const gridScroll = document.getElementById('epg-grid-scroll');
-  const now = Date.now();
-  const minutesSinceStart = (now - timelineStartTime.getTime()) / (60 * 1000);
+  const now = new Date();
+  const minutesSinceStart = (now.getTime() - timelineStartTime.getTime()) / (60 * 1000);
   const targetPx = minutesSinceStart * PIXELS_PER_MINUTE - (gridScroll.clientWidth / 2);
+
+  isProgrammaticDayScroll = true;
   gridScroll.scrollTo({ left: Math.max(0, targetPx), behavior: 'smooth' });
 
-  // Update active day button
+  // Update active day button to 'today'
   const dayButtons = document.querySelectorAll('.day-btn');
-  if (dayButtons.length > 0) {
-    dayButtons.forEach((b, idx) => {
-      b.classList.toggle('active', idx === 0);
-      if (idx === 0) {
-        b.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-      }
-    });
+  const todayBtn = Array.from(dayButtons).find(btn => btn._dayDate && isSameDay(btn._dayDate, now)) || dayButtons[0];
+  if (todayBtn) {
+    dayButtons.forEach(b => b.classList.remove('active'));
+    todayBtn.classList.add('active');
+    scrollDayButtonIntoView(todayBtn, true);
   }
+
+  clearTimeout(dayScrollTimeout);
+  dayScrollTimeout = setTimeout(() => {
+    isProgrammaticDayScroll = false;
+  }, 600);
 }
 
 // ==========================================================
@@ -3671,9 +3868,15 @@ async function jumpToEPGEvent(chId, startTimeIso, eventId) {
     if (btn._dayDate && btn._dayDate.toDateString() === eventDateStr) {
       document.querySelectorAll('.day-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      scrollDayButtonIntoView(btn, true);
     }
   });
+
+  isProgrammaticDayScroll = true;
+  clearTimeout(dayScrollTimeout);
+  dayScrollTimeout = setTimeout(() => {
+    isProgrammaticDayScroll = false;
+  }, 600);
 
   // Calculate horizontal offset
   const minutesSinceStart = (startTime.getTime() - timelineStartTime.getTime()) / (60 * 1000);
