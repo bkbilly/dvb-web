@@ -27,6 +27,7 @@ import (
 
 	"dvb-web/internal/db"
 	"dvb-web/internal/epg"
+	"dvb-web/internal/hls"
 	"dvb-web/internal/recorder"
 	"dvb-web/internal/transcoder"
 	"dvb-web/internal/tuner"
@@ -45,6 +46,7 @@ type Server struct {
 	webrtcMgr  *webRTCManager.Manager
 	epgParser  *epg.Parser
 	recorder   *recorder.Recorder
+	hlsMgr     *hls.Manager
 	wsClients  map[*wsClient]bool
 	wsMu       sync.RWMutex
 }
@@ -76,6 +78,7 @@ func NewServer(database *db.Database, pool *tuner.Pool, detector *transcoder.Det
 		webrtcMgr:  rtcMgr,
 		epgParser:  epgP,
 		recorder:   rec,
+		hlsMgr:     hls.NewManager(pool, database),
 		wsClients:  make(map[*wsClient]bool),
 	}
 	s.startSignalMonitor()
@@ -90,6 +93,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/channels/reorder", s.handleReorderChannels)
 	mux.HandleFunc("/api/channels/", s.handleChannelDetail)
 	mux.HandleFunc("/api/scan", s.handleScan)
+	mux.HandleFunc("/api/scan/regions", s.handleScanRegions)
 	mux.HandleFunc("/api/scan/prune", s.handleScanPrune)
 	mux.HandleFunc("/api/epg", s.handleEPG)
 	mux.HandleFunc("/api/epg/search", s.handleEPGSearch)
@@ -101,6 +105,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/hbbtv/", s.handleHbbtvProxy)
 	mux.HandleFunc("/api/hbbtv/proxy", s.handleHbbtvProxy)
 	mux.HandleFunc("/api/stream", s.handleStream)
+	mux.HandleFunc("/api/stream/hls/", s.handleHLSStream)
+	mux.HandleFunc("/api/stream/hls", s.handleHLSStream)
 	mux.HandleFunc("/api/recordings", s.handleRecordings)
 	mux.HandleFunc("/api/recordings/instant", s.handleRecordingInstant)
 	mux.HandleFunc("/api/recordings/", s.handleRecordingDetail)
@@ -321,18 +327,24 @@ func (s *Server) handleLogoStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filePath)
 }
 
+func (s *Server) handleScanRegions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	jsonResponse(w, http.StatusOK, tuner.GetPredefinedRegions())
+}
+
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req struct {
-		AdapterID int `json:"adapter_id"`
-	}
+	var req tuner.ScanConfig
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	discovered, err := s.tunerPool.ScanFrequencies(req.AdapterID, func(freq int64, progressPct int, foundCount int, recent []string) {
+	discovered, err := s.tunerPool.ScanFrequencies(req, func(freq int64, progressPct int, foundCount int, recent []string) {
 		s.BroadcastScanProgress(freq, progressPct, foundCount, recent)
 	})
 	if err != nil {
@@ -347,6 +359,78 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, diff)
+}
+
+func (s *Server) handleHLSStream(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/stream/hls/")
+	path = strings.TrimPrefix(path, "/api/stream/hls")
+	path = strings.TrimPrefix(path, "/")
+	parts := strings.Split(path, "/")
+
+	var channelIDStr string
+	var filename string
+
+	if len(parts) >= 1 && parts[0] != "" {
+		channelIDStr = parts[0]
+		if len(parts) >= 2 && parts[1] != "" {
+			filename = parts[1]
+		}
+	} else {
+		channelIDStr = r.URL.Query().Get("channel_id")
+	}
+
+	if channelIDStr == "" {
+		http.Error(w, "missing channel_id", http.StatusBadRequest)
+		return
+	}
+
+	channelID, err := strconv.ParseInt(channelIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid channel_id", http.StatusBadRequest)
+		return
+	}
+
+	if filename == "" || filename == "index.m3u8" || filename == "master.m3u8" {
+		playlist, err := s.hlsMgr.GetPlaylist(channelID)
+		if err != nil {
+			if err == hls.ErrStreamNotReady {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "stream buffering", http.StatusServiceUnavailable)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		_, _ = w.Write([]byte(playlist))
+		return
+	}
+
+	if strings.HasPrefix(filename, "segment_") && strings.HasSuffix(filename, ".ts") {
+		seqStr := strings.TrimSuffix(strings.TrimPrefix(filename, "segment_"), ".ts")
+		seq, err := strconv.Atoi(seqStr)
+		if err != nil {
+			http.Error(w, "invalid segment sequence", http.StatusBadRequest)
+			return
+		}
+
+		data, err := s.hlsMgr.GetSegment(channelID, seq)
+		if err != nil {
+			http.Error(w, "segment not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Cache-Control", "public, max-age=10")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		_, _ = w.Write(data)
+		return
+	}
+
+	http.NotFound(w, r)
 }
 
 func (s *Server) handleScanPrune(w http.ResponseWriter, r *http.Request) {

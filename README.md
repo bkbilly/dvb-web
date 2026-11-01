@@ -18,7 +18,9 @@ A fast, lightweight web TV streaming server and DVR for digital broadcast televi
 
 ## ✨ Features
 
-- ⚡ **Sub-Second WebRTC Zapping**: Instant video rendering (~150ms) without HLS buffering delay.
+- ⚡ **Sub-Second WebRTC Zapping**: Instant video rendering (~150ms) on desktop and Android without buffering delay.
+- 🍏 **Native HLS & Apple AirPlay**: In-memory HLS streaming (`/api/stream/hls/<id>/index.m3u8`) with automatic device detection for iOS/iPadOS Safari, Picture-in-Picture, and native AirPlay.
+- 🔍 **Ultra-Fast Regional Channel Scanner**: Scan preconfigured transmitter sites (UK, Germany, France, Greece, Spain, Italy, Australia) in under 10 seconds, scan specific individual frequencies, or run a full spectrum sweep.
 - 💤 **Zero-Resource Idle**: Automatically releases tuners and stops FFmpeg when idle (0% CPU and low power).
 - 🍿 **Plex & Jellyfin Integration**: Built-in HDHomeRun emulation (UDP discovery on port `65001`), M3U playlist (`/playlist.m3u`), and XMLTV guide (`/epg.xml`).
 - 🔀 **Smart Multi-Tuner Pooling**: Multiplex sharing allows multiple viewers to watch channels on the same frequency using a single tuner.
@@ -28,7 +30,7 @@ A fast, lightweight web TV streaming server and DVR for digital broadcast televi
 - 📟 **Teletext & Subtitles**: Retro CRT teletext viewer (press `T`) with index, technical specs, and synchronized subtitles (page 888).
 - 🔴 **HbbTV Interactive Portal**: Seamless access to interactive TV portals and catch-up services on supported channels (press `H`).
 - 📻 **Radio & Multi-Track Audio/Subtitles**: Audio-only radio playback with equalizer display, plus live audio language and subtitle switching.
-- 🚀 **Hardware Acceleration**: Automatic detection for Intel/AMD VA-API, NVIDIA NVENC, and Raspberry Pi V4L2 M2M, with CPU fallback.
+- 🚀 **Hardware Acceleration & Resilient Fallback**: Automatic detection for Intel/AMD VA-API, NVIDIA NVENC, and Raspberry Pi V4L2 M2M, with automatic runtime CPU encoding fallback (`libx264`) if hardware encoders fail.
 - 📅 **Live Multi-Language EPG**: Interactive timeline guide with dynamic broadcast EIT table parsing and full program descriptions.
 
 ---
@@ -105,9 +107,11 @@ go build -o dvb-web cmd/server/main.go
 | **HDHomeRun Tuner** | `http://<server-ip>:8080` | **Plex** Live TV & DVR, **Jellyfin** HDHomeRun |
 | **M3U Playlist** | `http://<server-ip>:8080/playlist.m3u` | **Jellyfin**, **VLC**, **Kodi**, **TiviMate** |
 | **XMLTV Guide** | `http://<server-ip>:8080/epg.xml` | **Jellyfin**, **Plex** |
+| **HLS Stream** | `http://<server-ip>:8080/api/stream/hls/<id>/index.m3u8` | **Safari / iOS**, **QuickTime**, **Apple TV**, **VLC** |
 
 - **Plex**: Go to **Settings** &rarr; **Live TV & DVR** &rarr; **Set up Plex DVR**. Enter `http://<server-ip>:8080`.
 - **Jellyfin**: Go to **Dashboard** &rarr; **Live TV** &rarr; add **HDHomeRun** (`http://<server-ip>:8080`) and **XMLTV** (`http://<server-ip>:8080/epg.xml`).
+- **Apple Devices & Safari**: Open `http://<server-ip>:8080` directly in Safari or point any media player to the HLS URL for native hardware decoding and AirPlay.
 
 ---
 

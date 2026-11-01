@@ -686,6 +686,74 @@
       });
     }
 
+    // Scan Predefined Regions & Transmitters
+    if (pathname === '/api/scan/regions') {
+      return new Response(JSON.stringify([
+        {
+          code: 'GB',
+          name: 'United Kingdom',
+          flag: '🇬🇧',
+          transmitters: [
+            {
+              id: 'gb-london',
+              name: 'London - Crystal Palace',
+              transponders: [
+                { frequency: 490000000, bandwidth: 8000000, delivery_system: 'DVBT' },
+                { frequency: 498000000, bandwidth: 8000000, delivery_system: 'DVBT' },
+                { frequency: 514000000, bandwidth: 8000000, delivery_system: 'DVBT' },
+                { frequency: 530000000, bandwidth: 8000000, delivery_system: 'DVBT' },
+                { frequency: 546000000, bandwidth: 8000000, delivery_system: 'DVBT' },
+                { frequency: 578000000, bandwidth: 8000000, delivery_system: 'DVBT2' }
+              ]
+            },
+            {
+              id: 'gb-all',
+              name: 'United Kingdom - All National Frequencies',
+              transponders: [
+                { frequency: 490000000, bandwidth: 8000000, delivery_system: 'DVBT' },
+                { frequency: 578000000, bandwidth: 8000000, delivery_system: 'DVBT2' }
+              ]
+            }
+          ]
+        },
+        {
+          code: 'GR',
+          name: 'Greece',
+          flag: '🇬🇷',
+          transmitters: [
+            {
+              id: 'gr-athens-ymittos',
+              name: 'Athens - Ymittos',
+              transponders: [
+                { frequency: 474000000, bandwidth: 8000000, delivery_system: 'DVBT2' },
+                { frequency: 482000000, bandwidth: 8000000, delivery_system: 'DVBT2' },
+                { frequency: 522000000, bandwidth: 8000000, delivery_system: 'DVBT2' },
+                { frequency: 578000000, bandwidth: 8000000, delivery_system: 'DVBT2' }
+              ]
+            }
+          ]
+        },
+        {
+          code: 'DE',
+          name: 'Germany',
+          flag: '🇩🇪',
+          transmitters: [
+            {
+              id: 'de-berlin',
+              name: 'Berlin - Alexanderplatz',
+              transponders: [
+                { frequency: 506000000, bandwidth: 8000000, delivery_system: 'DVBT2' },
+                { frequency: 578000000, bandwidth: 8000000, delivery_system: 'DVBT2' }
+              ]
+            }
+          ]
+        }
+      ]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
     // Frequency Channel Scan: /api/scan & /api/scan/prune
     if (pathname === '/api/scan' && options && options.method === 'POST') {
       return new Response(JSON.stringify({

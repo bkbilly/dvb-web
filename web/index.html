@@ -369,7 +369,72 @@
                 <span class="badge badge-system">DVB-T / DVB-T2</span>
               </div>
             </div>
-            <p class="card-desc">Sweep UHF (474–786 MHz) and VHF (177.5–226.5 MHz) broadcast frequencies using your hardware tuner to discover all available digital TV and radio services.</p>
+            <p class="card-desc">Scan broadcast frequencies using your hardware tuner to discover digital TV and radio channels. Choose a transmitter for ultra-fast scanning, enter a specific frequency, or sweep the full spectrum.</p>
+
+            <!-- Scan Mode Selector -->
+            <div class="scan-mode-tabs">
+              <button type="button" class="scan-mode-tab active" data-mode="region" id="tab-scan-region">
+                <span>🌍 By Region / Transmitter</span>
+              </button>
+              <button type="button" class="scan-mode-tab" data-mode="sweep" id="tab-scan-sweep">
+                <span>⚡ Full Sweep</span>
+              </button>
+              <button type="button" class="scan-mode-tab" data-mode="manual" id="tab-scan-manual">
+                <span>🎯 Manual Frequency</span>
+              </button>
+            </div>
+
+            <!-- Region Scan Form -->
+            <div id="scan-mode-region" class="scan-mode-panel">
+              <div class="scan-form-grid">
+                <div class="scan-form-group">
+                  <label for="scan-country-select">Country:</label>
+                  <select id="scan-country-select" class="form-select"></select>
+                </div>
+                <div class="scan-form-group">
+                  <label for="scan-transmitter-select">Transmitter / City:</label>
+                  <select id="scan-transmitter-select" class="form-select"></select>
+                </div>
+              </div>
+              <div id="scan-region-info" class="scan-panel-info">
+                <span>⚡ Tests only the active multiplexes for this site (~8s).</span>
+              </div>
+            </div>
+
+            <!-- Full Sweep Form -->
+            <div id="scan-mode-sweep" class="scan-mode-panel hidden">
+              <div class="scan-panel-info">
+                <span>Sweeps all standard UHF (474–786 MHz) and VHF Band III (177.5–226.5 MHz) channels across the broadcast spectrum.</span>
+              </div>
+            </div>
+
+            <!-- Manual Frequency Form -->
+            <div id="scan-mode-manual" class="scan-mode-panel hidden">
+              <div class="scan-form-grid scan-form-grid-3">
+                <div class="scan-form-group">
+                  <label for="scan-manual-freq">Frequency (MHz):</label>
+                  <input type="number" id="scan-manual-freq" class="form-input" placeholder="e.g. 578.0" step="0.1" value="578.0" />
+                </div>
+                <div class="scan-form-group">
+                  <label for="scan-manual-bw">Bandwidth:</label>
+                  <select id="scan-manual-bw" class="form-select">
+                    <option value="8000000" selected>8 MHz (Standard UHF)</option>
+                    <option value="7000000">7 MHz (VHF / Australia)</option>
+                    <option value="6000000">6 MHz (ATSC / Americas)</option>
+                  </select>
+                </div>
+                <div class="scan-form-group">
+                  <label for="scan-manual-sys">Delivery System:</label>
+                  <select id="scan-manual-sys" class="form-select">
+                    <option value="DVBT2" selected>DVB-T2 / Auto</option>
+                    <option value="DVBT">DVB-T</option>
+                  </select>
+                </div>
+              </div>
+              <div class="scan-panel-info">
+                <span>Scan a single specific frequency to test signal or add a newly launched multiplex.</span>
+              </div>
+            </div>
             
             <div class="scanner-controls-bar">
               <button id="btn-start-scan" class="btn btn-primary btn-scan">

@@ -1775,11 +1775,11 @@ func (t *Tuner) GetSignal() *SignalInfo {
 }
 
 // ScanFrequencies performs a channel scan on the specified adapter
-func (p *Pool) ScanFrequencies(adapterID int, onProgress func(freq int64, progressPct int, foundCount int, recentChannels []string)) ([]db.Channel, error) {
+func (p *Pool) ScanFrequencies(cfg ScanConfig, onProgress func(freq int64, progressPct int, foundCount int, recentChannels []string)) ([]db.Channel, error) {
 	p.mu.Lock()
 	var target *Tuner
 	for _, t := range p.tuners {
-		if t.ID == adapterID {
+		if t.ID == cfg.AdapterID {
 			target = t
 			break
 		}
@@ -1808,29 +1808,50 @@ func (p *Pool) ScanFrequencies(adapterID int, onProgress func(freq int64, progre
 
 	// If mock mode, return standard simulated digital broadcast channels
 	if target.IsMock {
-		time.Sleep(500 * time.Millisecond) // simulate scan duration
-		mockChs := []db.Channel{
-			{Name: "BBC One HD", Number: 1, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 101, VideoPID: 1011, AudioPID: 1012, Enabled: true},
-			{Name: "BBC Two HD", Number: 2, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 102, VideoPID: 1021, AudioPID: 1022, Enabled: true},
-			{Name: "ITV1 HD", Number: 3, Frequency: 538000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 201, VideoPID: 2011, AudioPID: 2012, Enabled: true},
-			{Name: "Channel 4 HD", Number: 4, Frequency: 538000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 202, VideoPID: 2021, AudioPID: 2022, Enabled: true},
-			{Name: "Channel 5", Number: 5, Frequency: 570000000, Bandwidth: 8000000, DeliverySystem: "DVBT", ServiceID: 301, VideoPID: 3011, AudioPID: 3012, Enabled: true},
-			{Name: "Sky News", Number: 11, Frequency: 570000000, Bandwidth: 8000000, DeliverySystem: "DVBT", ServiceID: 302, VideoPID: 3021, AudioPID: 3022, Enabled: true},
-			{Name: "BBC Radio 1", Number: 701, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 701, VideoPID: 0, AudioPID: 7012, Enabled: true, IsRadio: true},
-			{Name: "BBC Radio 4", Number: 704, Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 704, VideoPID: 0, AudioPID: 7042, Enabled: true, IsRadio: true},
-		}
-		if onProgress != nil {
-			var names []string
-			for _, ch := range mockChs {
-				names = append(names, ch.Name)
+		tps := cfg.Transponders
+		if len(tps) == 0 {
+			tps = []Transponder{
+				{Frequency: 506000000, Bandwidth: 8000000},
+				{Frequency: 538000000, Bandwidth: 8000000},
+				{Frequency: 570000000, Bandwidth: 8000000},
 			}
-			onProgress(506000000, 100, len(mockChs), names)
+		}
+
+		f1 := int64(tps[0].Frequency)
+		f2 := int64(tps[len(tps)/2].Frequency)
+		f3 := int64(tps[len(tps)-1].Frequency)
+
+		mockChs := []db.Channel{
+			{Name: "BBC One HD", Number: 1, Frequency: f1, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 101, VideoPID: 1011, AudioPID: 1012, Enabled: true},
+			{Name: "BBC Two HD", Number: 2, Frequency: f1, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 102, VideoPID: 1021, AudioPID: 1022, Enabled: true},
+			{Name: "ITV1 HD", Number: 3, Frequency: f2, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 201, VideoPID: 2011, AudioPID: 2012, Enabled: true},
+			{Name: "Channel 4 HD", Number: 4, Frequency: f2, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 202, VideoPID: 2021, AudioPID: 2022, Enabled: true},
+			{Name: "Channel 5", Number: 5, Frequency: f3, Bandwidth: 8000000, DeliverySystem: "DVBT", ServiceID: 301, VideoPID: 3011, AudioPID: 3012, Enabled: true},
+			{Name: "Sky News", Number: 11, Frequency: f3, Bandwidth: 8000000, DeliverySystem: "DVBT", ServiceID: 302, VideoPID: 3021, AudioPID: 3022, Enabled: true},
+			{Name: "BBC Radio 1", Number: 701, Frequency: f1, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 701, VideoPID: 0, AudioPID: 7012, Enabled: true, IsRadio: true},
+			{Name: "BBC Radio 4", Number: 704, Frequency: f1, Bandwidth: 8000000, DeliverySystem: "DVBT2", ServiceID: 704, VideoPID: 0, AudioPID: 7042, Enabled: true, IsRadio: true},
+		}
+
+		for idx, tp := range tps {
+			time.Sleep(100 * time.Millisecond) // simulate scan duration
+			pct := int(float64(idx+1) / float64(len(tps)) * 100)
+			if onProgress != nil {
+				var recent []string
+				if idx == 0 {
+					recent = []string{"BBC One HD", "BBC Two HD"}
+				} else if idx == len(tps)/2 {
+					recent = []string{"ITV1 HD", "Channel 4 HD"}
+				} else if idx == len(tps)-1 {
+					recent = []string{"Channel 5", "Sky News"}
+				}
+				onProgress(int64(tp.Frequency), pct, len(mockChs), recent)
+			}
 		}
 		return mockChs, nil
 	}
 
 	// Real hardware scan using native Linux DVB API ioctl
-	return ScanFrequenciesNative(target.FrontendPath, target.DVRPath, target.DemuxPath, onProgress)
+	return ScanFrequenciesNative(target.FrontendPath, target.DVRPath, target.DemuxPath, cfg.Transponders, onProgress)
 }
 
 // UDPListener creates a listener for receiving RTP packets from FFmpeg

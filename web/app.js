@@ -1118,6 +1118,36 @@ function startStream(channel) {
   }
 
   const streamUrl = `/api/stream?channel_id=${channel.id}&session_id=${currentSessionID}&audio_track=${currentAudioTrack}&sub_track=${currentSubTrack}&sub_offset=${currentSubOffsetMs}`;
+  const hlsUrl = `/api/stream/hls/${channel.id}/index.m3u8`;
+
+  const isAppleDevice = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const canPlayHLS = video.canPlayType('application/vnd.apple.mpegurl') !== '';
+
+  const playHLS = () => {
+    if (player) {
+      if (player._clearWatchdog) player._clearWatchdog();
+      try {
+        player.pause();
+        player.unload();
+        player.detachMediaElement();
+        player.destroy();
+      } catch (_) {}
+      player = null;
+    }
+    console.log('[Player] Playing via HLS stream:', hlsUrl);
+    video.src = hlsUrl;
+    video.muted = false;
+    video.load();
+    video.play().catch(e => console.log('[Player] HLS autoplay notice:', e));
+  };
+
+  // Direct native HLS for iOS / iPadOS Safari (which stutters or drops audio on continuous MSE MPEG-TS)
+  if (isAppleDevice && canPlayHLS) {
+    console.log('[Player] Apple device detected. Direct native HLS playback.');
+    playHLS();
+    return;
+  }
 
   if (window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
     player = mpegts.createPlayer({
@@ -1141,7 +1171,12 @@ function startStream(channel) {
     let streamWatchdog = setTimeout(() => {
       if (player && activeChannel && activeChannel.id === channel.id && video.paused && (!video.buffered || video.buffered.length === 0)) {
         console.warn('[Player] Initial stream buffering timed out (12s)');
-        handleStreamStopped('Stream tuning timed out. No broadcast data received from server.', true);
+        if (canPlayHLS) {
+          showToast('⚠️ Stream buffering stalled; switching to HLS fallback...', 'info');
+          playHLS();
+        } else {
+          handleStreamStopped('Stream tuning timed out. No broadcast data received from server.', true);
+        }
       }
     }, 12000);
 
@@ -1161,6 +1196,11 @@ function startStream(channel) {
         currentSubTrack = -1;
         renderTrackMenus();
         switchStreamTracks(channel);
+        return;
+      }
+      if (errorType === mpegts.ErrorTypes.MEDIA_ERROR && canPlayHLS) {
+        showToast('⚠️ Broadcast decode error; falling back to HLS stream...', 'warning');
+        playHLS();
         return;
       }
       if (errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
@@ -1194,6 +1234,9 @@ function startStream(channel) {
         }
       }, 8000);
     }
+  } else if (canPlayHLS) {
+    console.log('[Player] MSE unavailable; using native HLS playback.');
+    playHLS();
   } else {
     video.src = streamUrl;
     video.muted = false;
@@ -4344,6 +4387,85 @@ function setupScanFilterHandlers() {
 
 setupScanFilterHandlers();
 
+let availableScanRegions = [];
+let currentScanMode = 'region';
+
+function initScanModes() {
+  const tabs = document.querySelectorAll('.scan-mode-tab');
+  tabs.forEach(tab => {
+    tab.onclick = () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentScanMode = tab.dataset.mode;
+
+      document.querySelectorAll('.scan-mode-panel').forEach(p => p.classList.add('hidden'));
+      const activePanel = document.getElementById(`scan-mode-${currentScanMode}`);
+      if (activePanel) activePanel.classList.remove('hidden');
+
+      const btnText = document.getElementById('scan-btn-text');
+      if (btnText) {
+        if (currentScanMode === 'region') btnText.textContent = 'Scan Selected Transmitter';
+        else if (currentScanMode === 'manual') btnText.textContent = 'Scan Specific Frequency';
+        else btnText.textContent = 'Start Full Sweep';
+      }
+    };
+  });
+
+  const countrySel = document.getElementById('scan-country-select');
+  const transSel = document.getElementById('scan-transmitter-select');
+  const infoEl = document.getElementById('scan-region-info');
+
+  const updateTransmitters = () => {
+    if (!countrySel || !transSel) return;
+    const country = availableScanRegions.find(c => c.code === countrySel.value);
+    transSel.innerHTML = '';
+    if (!country || !country.transmitters) return;
+
+    country.transmitters.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t.id;
+      opt.textContent = `${t.name} (${t.transponders.length} muxes)`;
+      transSel.appendChild(opt);
+    });
+
+    updateRegionInfo();
+  };
+
+  const updateRegionInfo = () => {
+    if (!countrySel || !transSel || !infoEl) return;
+    const country = availableScanRegions.find(c => c.code === countrySel.value);
+    const trans = country?.transmitters?.find(t => t.id === transSel.value);
+    if (trans) {
+      const muxCount = trans.transponders.length;
+      infoEl.innerHTML = `<span>⚡ Will test <strong>${muxCount}</strong> active multiplexes (~${Math.round(muxCount * 1.3)}s estimated).</span>`;
+    }
+  };
+
+  if (countrySel) countrySel.onchange = updateTransmitters;
+  if (transSel) transSel.onchange = updateRegionInfo;
+
+  fetch('/api/scan/regions')
+    .then(r => r.ok ? r.json() : [])
+    .then(regions => {
+      if (regions && regions.length > 0) {
+        availableScanRegions = regions;
+        if (countrySel) {
+          countrySel.innerHTML = '';
+          availableScanRegions.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.code;
+            opt.textContent = `${c.flag || ''} ${c.name}`;
+            countrySel.appendChild(opt);
+          });
+          updateTransmitters();
+        }
+      }
+    })
+    .catch(err => console.warn('[Scanner] Failed to fetch scan regions:', err));
+}
+
+initScanModes();
+
 document.getElementById('btn-start-scan').onclick = async () => {
   const btn = document.getElementById('btn-start-scan');
   const btnText = document.getElementById('scan-btn-text');
@@ -4373,11 +4495,37 @@ document.getElementById('btn-start-scan').onclick = async () => {
   if (liveTicker) liveTicker.innerHTML = '<div class="ticker-placeholder">Listening for multiplex transport streams...</div>';
   if (resultsBox) resultsBox.classList.add('hidden');
 
+  let requestBody = { adapter_id: 0, mode: currentScanMode };
+  if (currentScanMode === 'region') {
+    const countrySel = document.getElementById('scan-country-select');
+    const transSel = document.getElementById('scan-transmitter-select');
+    const country = availableScanRegions.find(c => c.code === countrySel?.value);
+    const trans = country?.transmitters?.find(t => t.id === transSel?.value);
+    if (trans && trans.transponders) {
+      requestBody.country_code = country.code;
+      requestBody.transmitter_id = trans.id;
+      requestBody.transponders = trans.transponders;
+    }
+  } else if (currentScanMode === 'manual') {
+    const freqInput = document.getElementById('scan-manual-freq');
+    const bwInput = document.getElementById('scan-manual-bw');
+    const sysInput = document.getElementById('scan-manual-sys');
+    const freqMhz = parseFloat(freqInput?.value || '578.0');
+    const freqHz = Math.round(freqMhz * 1000000);
+    const bw = parseInt(bwInput?.value || '8000000');
+    const sys = sysInput?.value || 'DVBT2';
+    requestBody.transponders = [{
+      frequency: freqHz,
+      bandwidth: bw,
+      delivery_system: sys
+    }];
+  }
+
   try {
     const res = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ adapter_id: 0 })
+      body: JSON.stringify(requestBody)
     });
     scanDiff = await res.json();
     if (!res.ok) {
@@ -4459,7 +4607,11 @@ document.getElementById('btn-start-scan').onclick = async () => {
     showToast('⚠️ Scan failed: ' + err.message, 'error');
   } finally {
     btn.disabled = false;
-    if (btnText) btnText.textContent = 'Start Channel Scan';
+    if (btnText) {
+      if (currentScanMode === 'region') btnText.textContent = 'Scan Selected Transmitter';
+      else if (currentScanMode === 'manual') btnText.textContent = 'Scan Specific Frequency';
+      else btnText.textContent = 'Start Full Sweep';
+    }
     if (spinner) spinner.classList.add('hidden');
   }
 };

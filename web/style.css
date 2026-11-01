@@ -2382,6 +2382,86 @@ input:checked + .slider:before {
   box-shadow: none;
 }
 
+.scan-mode-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.scan-mode-tab {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.45rem 0.95rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.scan-mode-tab:hover {
+  color: var(--text-main);
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
+}
+
+.scan-mode-tab.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.scan-mode-panel {
+  margin-bottom: 1.25rem;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.scan-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.scan-form-grid-3 {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+@media (max-width: 640px) {
+  .scan-form-grid, .scan-form-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.scan-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.scan-form-group label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.scan-panel-info {
+  margin-top: 0.65rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .scan-spinner {
   width: 16px;
   height: 16px;

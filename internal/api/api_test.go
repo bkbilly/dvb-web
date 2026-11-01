@@ -416,3 +416,45 @@ function goRed(url) {
 		t.Errorf("Expected image/gif for /api/hbbtv/undefined, got %s", undefW.Header().Get("Content-Type"))
 	}
 }
+
+func TestAPIScanRegionsAndCustomScan(t *testing.T) {
+	server, _, _, _, tmpDir := setupTestServer(t)
+	defer os.RemoveAll(tmpDir)
+
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux, "")
+
+	// 1. Test GET /api/scan/regions
+	req := httptest.NewRequest(http.MethodGet, "/api/scan/regions", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from /api/scan/regions, got %d", w.Code)
+	}
+
+	var regions []tuner.CountryRegions
+	if err := json.Unmarshal(w.Body.Bytes(), &regions); err != nil {
+		t.Fatalf("Failed to parse regions JSON: %v", err)
+	}
+
+	if len(regions) == 0 {
+		t.Fatalf("Expected non-empty list of regions")
+	}
+
+	// 2. Test POST /api/scan with custom transponder
+	scanBody, _ := json.Marshal(tuner.ScanConfig{
+		AdapterID: 0,
+		Mode:      "manual",
+		Transponders: []tuner.Transponder{
+			{Frequency: 506000000, Bandwidth: 8000000, DeliverySystem: "DVBT2"},
+		},
+	})
+	scanReq := httptest.NewRequest(http.MethodPost, "/api/scan", bytes.NewReader(scanBody))
+	scanW := httptest.NewRecorder()
+	mux.ServeHTTP(scanW, scanReq)
+
+	if scanW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from custom /api/scan, got %d: %s", scanW.Code, scanW.Body.String())
+	}
+}

@@ -260,7 +260,7 @@ func ReadFrontendSignalInfo(feFD int) SignalInfo {
 }
 
 // ScanFrequenciesNative sweeps UHF & VHF TV channels to discover active broadcasts
-func ScanFrequenciesNative(frontendPath, dvrPath, demuxPath string, onProgress func(freq int64, progressPct int, foundCount int, recentChannels []string)) ([]db.Channel, error) {
+func ScanFrequenciesNative(frontendPath, dvrPath, demuxPath string, transponders []Transponder, onProgress func(freq int64, progressPct int, foundCount int, recentChannels []string)) ([]db.Channel, error) {
 	feFD, err := syscall.Open(frontendPath, syscall.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s: %w", frontendPath, err)
@@ -281,30 +281,36 @@ func ScanFrequenciesNative(frontendPath, dvrPath, demuxPath string, onProgress f
 	}
 	defer syscall.Close(dvrFD)
 
-	// Standard UHF DVB-T/T2 channels 21 to 60 (474 MHz to 786 MHz in 8 MHz steps)
-	var frequencies []uint32
-	for f := uint32(474000000); f <= 786000000; f += 8000000 {
-		frequencies = append(frequencies, f)
-	}
-	// Common VHF Band III channels (177.5 MHz - 226.5 MHz in 7 MHz steps)
-	for f := uint32(177500000); f <= 226500000; f += 7000000 {
-		frequencies = append(frequencies, f)
+	// If no specific transponders were provided, sweep default UHF & VHF channels
+	if len(transponders) == 0 {
+		// Standard UHF DVB-T/T2 channels 21 to 60 (474 MHz to 786 MHz in 8 MHz steps)
+		for f := uint32(474000000); f <= 786000000; f += 8000000 {
+			transponders = append(transponders, Transponder{Frequency: f, Bandwidth: 8000000})
+		}
+		// Common VHF Band III channels (177.5 MHz - 226.5 MHz in 7 MHz steps)
+		for f := uint32(177500000); f <= 226500000; f += 7000000 {
+			transponders = append(transponders, Transponder{Frequency: f, Bandwidth: 7000000})
+		}
 	}
 
-	log.Printf("[DVB Scanner] Starting frequency sweep across %d frequencies...", len(frequencies))
+	log.Printf("[DVB Scanner] Starting frequency sweep across %d transponders...", len(transponders))
 
 	var discovered []db.Channel
 	channelNum := 1
 
-	for idx, freq := range frequencies {
-		progressPct := int(float64(idx+1) / float64(len(frequencies)) * 100)
-		if onProgress != nil {
-			onProgress(int64(freq), progressPct, len(discovered), nil)
+	for idx, tp := range transponders {
+		freq := tp.Frequency
+		bw := tp.Bandwidth
+		if bw == 0 {
+			bw = 8000000
+			if freq < 300000000 {
+				bw = 7000000
+			}
 		}
 
-		bw := uint32(8000000)
-		if freq < 300000000 {
-			bw = 7000000
+		progressPct := int(float64(idx+1) / float64(len(transponders)) * 100)
+		if onProgress != nil {
+			onProgress(int64(freq), progressPct, len(discovered), nil)
 		}
 
 		locked, delivSys := tuneAndCheck(feFD, freq, bw)
