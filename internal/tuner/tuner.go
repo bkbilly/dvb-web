@@ -93,7 +93,7 @@ type ChannelStream struct {
 	ServiceID   int
 	ChannelName string
 	pipeline    *transcoder.Pipeline
-	pipeWriter  *io.PipeWriter
+	pipeWriter  io.WriteCloser
 	tsQueue     chan []byte
 	subscribers map[string]chan []byte
 	cancel      context.CancelFunc
@@ -453,15 +453,6 @@ func (p *Pool) StopAll() {
 }
 
 func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrack, subTrack, subOffset int) (*ChannelStream, error) {
-	var inputPipe io.Reader
-	var pw *io.PipeWriter
-
-	if !t.IsMock {
-		pr, pWriter := io.Pipe()
-		inputPipe = pr
-		pw = pWriter
-	}
-
 	// Validate subtitle track existence to prevent FFmpeg error 234
 	if subTrack >= 0 && !t.IsMock {
 		if t.detectedTracks != nil {
@@ -477,7 +468,7 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 	cfg := transcoder.PipelineConfig{
 		InputPath:        t.DVRPath,
-		InputPipe:        inputPipe,
+		UseStdinPipe:     !t.IsMock,
 		IsMock:           t.IsMock,
 		IsRadio:          channel.IsRadio,
 		ServiceID:        channel.ServiceID,
@@ -497,9 +488,6 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		pipeline, err = p.transcoder.StartPipeline(cfg)
 	}
 	if err != nil {
-		if pw != nil {
-			_ = pw.Close()
-		}
 		return nil, fmt.Errorf("failed to start stream for channel %s: %w", channel.Name, err)
 	}
 
@@ -508,13 +496,14 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		ServiceID:   channel.ServiceID,
 		ChannelName: channel.Name,
 		pipeline:    pipeline,
-		pipeWriter:  pw,
+		pipeWriter:  pipeline.Stdin(),
 		subscribers: make(map[string]chan []byte),
 	}
 
-	if !t.IsMock && pw != nil {
+	if !t.IsMock && cs.pipeWriter != nil {
 		cs.tsQueue = make(chan []byte, 2048)
 		go func() {
+			pw := cs.pipeWriter
 			defer pw.Close()
 			for chunk := range cs.tsQueue {
 				if _, err := pw.Write(chunk); err != nil {
@@ -529,7 +518,26 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 	stdout := pipeline.Stdout()
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			// Notify all subscribers by closing their channels so downstream HTTP connections terminate cleanly
+			cs.mu.Lock()
+			for id, ch := range cs.subscribers {
+				close(ch)
+				delete(cs.subscribers, id)
+			}
+			cs.mu.Unlock()
+
+			// Remove stopped ChannelStream from tuner to prevent subsequent sessions connecting to dead pipeline
+			t.mu.Lock()
+			streamKey := getStreamKey(channel.ID, audioTrack, subTrack, subOffset)
+			if active, exists := t.channels[streamKey]; exists && active == cs {
+				delete(t.channels, streamKey)
+				log.Printf("[TunerPool] Removed stopped ChannelStream %s on Tuner %d", streamKey, t.ID)
+			}
+			t.mu.Unlock()
+		}()
+
 		buf := make([]byte, 32*1024)
 		for {
 			select {
@@ -540,6 +548,9 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 			n, err := stdout.Read(buf)
 			if err != nil {
+				if err != io.EOF {
+					log.Printf("[ChannelStream] Transcoder stdout read error for %s: %v", channel.Name, err)
+				}
 				return
 			}
 			if n > 0 {

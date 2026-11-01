@@ -1,6 +1,7 @@
 package transcoder
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -105,10 +106,45 @@ func (d *Detector) checkFFmpegEncoder(encoderName string) bool {
 	return strings.Contains(string(out), encoderName)
 }
 
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+	max int
+}
+
+func (s *safeBuffer) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.max <= 0 {
+		s.max = 8192
+	}
+	if s.buf.Len()+len(p) > s.max {
+		toDrop := (s.buf.Len() + len(p)) - s.max
+		if toDrop >= s.buf.Len() {
+			s.buf.Reset()
+			if len(p) > s.max {
+				p = p[len(p)-s.max:]
+			}
+		} else {
+			remaining := s.buf.Bytes()[toDrop:]
+			s.buf.Reset()
+			s.buf.Write(remaining)
+		}
+	}
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
 // PipelineConfig contains the parameters needed to launch an FFmpeg transcode session
 type PipelineConfig struct {
 	InputPath      string       // e.g. "/dev/dvb/adapter0/dvr0" or pipe
 	InputPipe      io.Reader    // Piped TS reader (preferred for safe multi-consumer fanning)
+	UseStdinPipe   bool         // If true, creates stdin pipe for direct writing via Pipeline.Stdin()
 	IsMock         bool         // If mock, generates test pattern
 	IsRadio        bool         // True for audio-only radio channels (no video stream in DVB)
 	ServiceID      int          // DVB Program / Service ID
@@ -126,10 +162,15 @@ type Pipeline struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	stdout io.ReadCloser
+	stdin  io.WriteCloser
 }
 
 func (p *Pipeline) Stdout() io.ReadCloser {
 	return p.stdout
+}
+
+func (p *Pipeline) Stdin() io.WriteCloser {
+	return p.stdin
 }
 
 func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
@@ -147,7 +188,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 
 	var args []string
 	args = append(args, "-hide_banner")
-	if cfg.InputPipe == nil {
+	if cfg.InputPipe == nil && !cfg.UseStdinPipe {
 		args = append(args, "-nostdin")
 	}
 	args = append(args, "-loglevel", "warning")
@@ -186,7 +227,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				"-f", "lavfi", "-re", "-i", "aevalsrc=exprs='0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*261.63*t)+sin(2*PI*392*t)+0.5*sin(2*PI*130.81*t))|0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*329.63*t)+sin(2*PI*523.25*t)+0.5*sin(2*PI*130.81*t))':channel_layout=stereo:sample_rate=48000",
 			)
 		}
-	} else if cfg.InputPipe != nil {
+	} else if cfg.InputPipe != nil || cfg.UseStdinPipe {
 		args = append(args, "-i", "pipe:0")
 	} else {
 		args = append(args, "-i", cfg.InputPath)
@@ -352,31 +393,75 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	)
 
 	cmd := exec.CommandContext(ctx, d.ffmpegPath, args...)
-	if !cfg.IsMock && cfg.InputPipe != nil {
-		cmd.Stdin = cfg.InputPipe
+	var stdin io.WriteCloser
+	if !cfg.IsMock {
+		if cfg.InputPipe != nil {
+			cmd.Stdin = cfg.InputPipe
+		} else if cfg.UseStdinPipe {
+			var err error
+			stdin, err = cmd.StdinPipe()
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
+			}
+		}
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		if stdin != nil {
+			_ = stdin.Close()
+		}
 		cancel()
 		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+
+	stderrBuf := &safeBuffer{max: 8192}
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
 
 	if err := cmd.Start(); err != nil {
+		if stdin != nil {
+			_ = stdin.Close()
+		}
 		cancel()
 		return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
-	// For subtitle pipelines, quickly ensure filtergraph didn't exit immediately on missing/unsupported stream
-	if !cfg.IsMock && cfg.SubtitleTrack >= 0 {
-		time.Sleep(300 * time.Millisecond)
-		if checkProcessExited(cmd) {
-			// FFmpeg exited with error (e.g. subtitle stream missing/invalid)
-			log.Printf("[Transcoder] FFmpeg exited with subtitles enabled. Retrying without subtitles...")
-			cancel()
+	// Startup verification window: wait briefly to confirm the encoder and filtergraph initialize successfully.
+	time.Sleep(350 * time.Millisecond)
+
+	if exited, exitCode := checkProcessExited(cmd); exited {
+		cancel()
+		if stdin != nil {
+			_ = stdin.Close()
+		}
+		_ = stdout.Close()
+		errText := strings.TrimSpace(stderrBuf.String())
+
+		// If hardware acceleration (NVENC, VAAPI, V4L2M2M) was requested and failed, fall back to CPU (libx264)
+		if hw != HW_NONE {
+			log.Printf("[Transcoder] Hardware encoding (%s) failed during startup (exit %d): %s. Falling back to CPU encoding (libx264)...",
+				hw, exitCode, errText)
+
+			// Demote cached detected hardware so subsequent streams don't repeatedly fail on this broken device
+			d.mu.Lock()
+			if d.detectedHW == hw {
+				d.detectedHW = HW_NONE
+				log.Printf("[Transcoder] Demoted active hardware acceleration to CPU fallback")
+			}
+			d.mu.Unlock()
+
+			cfg.HWType = HW_NONE
+			return d.StartPipeline(cfg)
+		}
+
+		// If CPU encoding was used with subtitles and failed, retry without subtitles
+		if cfg.SubtitleTrack >= 0 {
+			log.Printf("[Transcoder] FFmpeg exited with subtitles enabled (exit %d): %s. Retrying without subtitles...", exitCode, errText)
 			cfg.SubtitleTrack = -1
 			return d.StartPipeline(cfg)
 		}
+
+		return nil, fmt.Errorf("ffmpeg exited immediately (code %d): %s", exitCode, errText)
 	}
 
 	log.Printf("[Transcoder] Started unified A/V MPEG-TS pipeline (HW: %s, ServiceID: %d)", hw, cfg.ServiceID)
@@ -385,6 +470,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		cmd:    cmd,
 		cancel: cancel,
 		stdout: stdout,
+		stdin:  stdin,
 	}, nil
 }
 
@@ -393,6 +479,9 @@ func (p *Pipeline) Stop() {
 		return
 	}
 	p.cancel()
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+	}
 	if p.stdout != nil {
 		_ = p.stdout.Close()
 	}

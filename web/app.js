@@ -243,6 +243,13 @@ function bindPlayerVideoEvents(v) {
     }
   });
 
+  v.addEventListener('error', () => {
+    if (v === video && activeChannel && !isSwitchingTracks) {
+      console.warn('[Player] Video element error event fired');
+      handleStreamStopped('Video playback failed.', true);
+    }
+  });
+
   v.addEventListener('dblclick', (e) => {
     e.preventDefault();
     toggleFullscreen();
@@ -945,6 +952,7 @@ function updateRadioOverlay(channel) {
 }
 
 function handleStreamStopped(reason = 'Stream was forced to stop', canRetry = true) {
+  const stoppedChannel = activeChannel;
   stopStream();
   activeChannel = null;
   updateRadioOverlay(null);
@@ -973,13 +981,13 @@ function handleStreamStopped(reason = 'Stream was forced to stop', canRetry = tr
   if (standbyTitle) standbyTitle.textContent = 'Stream Stopped';
   if (standbyDesc) standbyDesc.textContent = reason;
   if (standbyAction) {
-    if (canRetry && activeChannel) {
+    if (canRetry && stoppedChannel) {
       standbyAction.classList.remove('hidden');
-      standbyAction.textContent = `Reconnect to ${activeChannel.name}`;
+      standbyAction.textContent = `Reconnect to ${stoppedChannel.name}`;
       standbyAction.onclick = () => {
         standbyAction.classList.add('hidden');
         resetStandbyCard();
-        zapToChannel(activeChannel);
+        zapToChannel(stoppedChannel);
       };
     } else {
       standbyAction.classList.add('hidden');
@@ -1042,6 +1050,9 @@ function stopStream() {
   currentStreamingChannelId = null;
   cleanHandoffBridge();
   if (player) {
+    if (player._clearWatchdog) {
+      player._clearWatchdog();
+    }
     try {
       player.pause();
       player.unload();
@@ -1127,7 +1138,23 @@ function startStream(channel) {
     player.attachMediaElement(video);
     player.load();
 
+    let streamWatchdog = setTimeout(() => {
+      if (player && activeChannel && activeChannel.id === channel.id && video.paused && (!video.buffered || video.buffered.length === 0)) {
+        console.warn('[Player] Initial stream buffering timed out (12s)');
+        handleStreamStopped('Stream tuning timed out. No broadcast data received from server.', true);
+      }
+    }, 12000);
+
+    const clearWatchdog = () => {
+      if (streamWatchdog) {
+        clearTimeout(streamWatchdog);
+        streamWatchdog = null;
+      }
+    };
+    player._clearWatchdog = clearWatchdog;
+
     player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+      clearWatchdog();
       console.warn('[Player] mpegts error:', errorType, errorDetail, errorInfo);
       if (currentSubTrack >= 0) {
         showToast('⚠️ Subtitles not available in this broadcast; switching to live stream', 'warning');
@@ -1140,10 +1167,13 @@ function startStream(channel) {
         handleStreamStopped('Stream connection was closed by the server.', true);
       } else if (errorType === mpegts.ErrorTypes.MEDIA_ERROR) {
         handleStreamStopped('Media decode error in broadcast stream.', true);
+      } else {
+        handleStreamStopped(`Stream playback error: ${errorDetail || errorType}`, true);
       }
     });
 
     player.on(mpegts.Events.MEDIA_INFO, () => {
+      clearWatchdog();
       standbyOverlay.classList.add('hidden');
       updateHeaderTunerBadge();
       video.muted = false;
