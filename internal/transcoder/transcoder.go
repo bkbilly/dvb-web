@@ -22,9 +22,15 @@ const (
 	HW_V4L2M2M HardwareType = "v4l2m2m"
 )
 
+type hwStatus struct {
+	available bool
+	checkedAt time.Time
+}
+
 type Detector struct {
 	mu          sync.RWMutex
 	detectedHW  HardwareType
+	verifiedHW  map[HardwareType]hwStatus
 	vaapiDevice string
 	ffmpegPath  string
 }
@@ -38,6 +44,7 @@ func NewDetector() *Detector {
 	d := &Detector{
 		ffmpegPath:  ffmpegPath,
 		detectedHW:  HW_NONE,
+		verifiedHW:  make(map[HardwareType]hwStatus),
 		vaapiDevice: "/dev/dri/renderD128",
 	}
 	d.Detect()
@@ -48,31 +55,38 @@ func (d *Detector) Detect() HardwareType {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	if d.verifiedHW == nil {
+		d.verifiedHW = make(map[HardwareType]hwStatus)
+	}
+	now := time.Now()
+	d.verifiedHW[HW_NONE] = hwStatus{available: true, checkedAt: now}
+
 	// 1. Check NVIDIA NVENC (GeForce / Quadro / Tesla GPUs)
-	if d.checkFFmpegEncoder("h264_nvenc") && d.testEncoder("h264_nvenc", nil) {
+	if d.testHardwareLocked(HW_NVENC) {
 		d.detectedHW = HW_NVENC
+		d.verifiedHW[HW_NVENC] = hwStatus{available: true, checkedAt: now}
 		log.Printf("[Transcoder] Detected and verified NVIDIA NVENC hardware acceleration")
 		return HW_NVENC
 	}
+	d.verifiedHW[HW_NVENC] = hwStatus{available: false, checkedAt: now}
 
 	// 2. Check Intel/AMD VA-API with real device test
-	if _, err := os.Stat(d.vaapiDevice); err == nil {
-		vaapiArgs := []string{"-init_hw_device", fmt.Sprintf("vaapi=va:%s", d.vaapiDevice), "-filter_hw_device", "va"}
-		if d.checkFFmpegEncoder("h264_vaapi") && d.testEncoder("h264_vaapi", vaapiArgs) {
-			d.detectedHW = HW_VAAPI
-			log.Printf("[Transcoder] Detected and verified VA-API hardware acceleration at %s", d.vaapiDevice)
-			return HW_VAAPI
-		}
+	if d.testHardwareLocked(HW_VAAPI) {
+		d.detectedHW = HW_VAAPI
+		d.verifiedHW[HW_VAAPI] = hwStatus{available: true, checkedAt: now}
+		log.Printf("[Transcoder] Detected and verified VA-API hardware acceleration at %s", d.vaapiDevice)
+		return HW_VAAPI
 	}
+	d.verifiedHW[HW_VAAPI] = hwStatus{available: false, checkedAt: now}
 
 	// 3. Check Raspberry Pi / ARM V4L2 M2M
-	if _, err := os.Stat("/dev/video10"); err == nil {
-		if d.checkFFmpegEncoder("h264_v4l2m2m") {
-			d.detectedHW = HW_V4L2M2M
-			log.Printf("[Transcoder] Detected V4L2 M2M hardware acceleration")
-			return HW_V4L2M2M
-		}
+	if d.testHardwareLocked(HW_V4L2M2M) {
+		d.detectedHW = HW_V4L2M2M
+		d.verifiedHW[HW_V4L2M2M] = hwStatus{available: true, checkedAt: now}
+		log.Printf("[Transcoder] Detected V4L2 M2M hardware acceleration")
+		return HW_V4L2M2M
 	}
+	d.verifiedHW[HW_V4L2M2M] = hwStatus{available: false, checkedAt: now}
 
 	// 4. Fallback to CPU
 	d.detectedHW = HW_NONE
@@ -80,14 +94,93 @@ func (d *Detector) Detect() HardwareType {
 	return HW_NONE
 }
 
+func (d *Detector) testHardwareLocked(hw HardwareType) bool {
+	switch hw {
+	case HW_NVENC:
+		return d.checkFFmpegEncoder("h264_nvenc") && d.testEncoder("h264_nvenc", nil)
+	case HW_VAAPI:
+		if _, err := os.Stat(d.vaapiDevice); err != nil {
+			return false
+		}
+		if !d.checkFFmpegEncoder("h264_vaapi") {
+			return false
+		}
+		vaapiArgs := []string{"-init_hw_device", fmt.Sprintf("vaapi=va:%s", d.vaapiDevice), "-filter_hw_device", "va"}
+		return d.testEncoder("h264_vaapi", vaapiArgs)
+	case HW_V4L2M2M:
+		if _, err := os.Stat("/dev/video10"); err != nil {
+			return false
+		}
+		return d.checkFFmpegEncoder("h264_v4l2m2m") && d.testEncoder("h264_v4l2m2m", nil)
+	case HW_NONE, "":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Detector) IsHardwareAvailable(hw HardwareType) bool {
+	if hw == HW_NONE || hw == "" || hw == "auto" {
+		return true
+	}
+	d.mu.RLock()
+	if d.verifiedHW != nil {
+		if st, exists := d.verifiedHW[hw]; exists {
+			// If cached as available, expire after 60 seconds of idle to detect asleep/power-collapsed GPUs
+			if st.available && time.Since(st.checkedAt) < 60*time.Second {
+				d.mu.RUnlock()
+				return true
+			}
+			if !st.available {
+				d.mu.RUnlock()
+				return false
+			}
+		}
+	}
+	d.mu.RUnlock()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.verifiedHW == nil {
+		d.verifiedHW = make(map[HardwareType]hwStatus)
+	}
+	if st, exists := d.verifiedHW[hw]; exists {
+		if st.available && time.Since(st.checkedAt) < 60*time.Second {
+			return true
+		}
+		if !st.available {
+			return false
+		}
+	}
+	functional := d.testHardwareLocked(hw)
+	d.verifiedHW[hw] = hwStatus{available: functional, checkedAt: time.Now()}
+	return functional
+}
+
+func (d *Detector) DemoteHardware(hw HardwareType) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.verifiedHW == nil {
+		d.verifiedHW = make(map[HardwareType]hwStatus)
+	}
+	d.verifiedHW[hw] = hwStatus{available: false, checkedAt: time.Now()}
+	if d.detectedHW == hw {
+		d.detectedHW = HW_NONE
+		log.Printf("[Transcoder] Demoted active hardware acceleration (%s) to CPU fallback", hw)
+	}
+}
+
 func (d *Detector) testEncoder(encoderName string, extraArgs []string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
 	args := []string{"-hide_banner", "-loglevel", "error"}
 	if len(extraArgs) > 0 {
 		args = append(args, extraArgs...)
 	}
 	args = append(args, "-f", "lavfi", "-i", "nullsrc=s=320x240", "-frames:v", "1", "-c:v", encoderName, "-f", "null", "-")
 
-	cmd := exec.Command(d.ffmpegPath, args...)
+	cmd := exec.CommandContext(ctx, d.ffmpegPath, args...)
 	return cmd.Run() == nil
 }
 
@@ -159,10 +252,12 @@ type PipelineConfig struct {
 }
 
 type Pipeline struct {
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	stdout io.ReadCloser
-	stdin  io.WriteCloser
+	cmd       *exec.Cmd
+	cancel    context.CancelFunc
+	stdout    io.ReadCloser
+	stdin     io.WriteCloser
+	stderrBuf *safeBuffer
+	hwType    HardwareType
 }
 
 func (p *Pipeline) Stdout() io.ReadCloser {
@@ -173,12 +268,41 @@ func (p *Pipeline) Stdin() io.WriteCloser {
 	return p.stdin
 }
 
+func (p *Pipeline) HWType() HardwareType {
+	if p == nil {
+		return HW_NONE
+	}
+	return p.hwType
+}
+
+func (p *Pipeline) StderrText() string {
+	if p == nil || p.stderrBuf == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.stderrBuf.String())
+}
+
+func (p *Pipeline) ExitStatus() (bool, int) {
+	if p == nil {
+		return true, -1
+	}
+	return checkProcessExited(p.cmd)
+}
+
 func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	hw := cfg.HWType
 	if hw == "" || hw == "auto" {
 		hw = d.GetActiveHardware()
+	}
+
+	// Validate hardware acceleration before constructing pipeline; fallback immediately if unsupported
+	if hw != HW_NONE && !d.IsHardwareAvailable(hw) {
+		log.Printf("[Transcoder] Hardware encoding (%s) requested but not functional on this host. Falling back to CPU encoding (libx264)...", hw)
+		d.DemoteHardware(hw)
+		hw = HW_NONE
+		cfg.HWType = HW_NONE
 	}
 
 	bitrate := cfg.VideoBitrate
@@ -442,13 +566,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			log.Printf("[Transcoder] Hardware encoding (%s) failed during startup (exit %d): %s. Falling back to CPU encoding (libx264)...",
 				hw, exitCode, errText)
 
-			// Demote cached detected hardware so subsequent streams don't repeatedly fail on this broken device
-			d.mu.Lock()
-			if d.detectedHW == hw {
-				d.detectedHW = HW_NONE
-				log.Printf("[Transcoder] Demoted active hardware acceleration to CPU fallback")
-			}
-			d.mu.Unlock()
+			d.DemoteHardware(hw)
 
 			cfg.HWType = HW_NONE
 			return d.StartPipeline(cfg)
@@ -467,10 +585,12 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	log.Printf("[Transcoder] Started unified A/V MPEG-TS pipeline (HW: %s, ServiceID: %d)", hw, cfg.ServiceID)
 
 	return &Pipeline{
-		cmd:    cmd,
-		cancel: cancel,
-		stdout: stdout,
-		stdin:  stdin,
+		cmd:       cmd,
+		cancel:    cancel,
+		stdout:    stdout,
+		stdin:     stdin,
+		stderrBuf: stderrBuf,
+		hwType:    hw,
 	}, nil
 }
 

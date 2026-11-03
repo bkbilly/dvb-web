@@ -500,23 +500,31 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		subscribers: make(map[string]chan []byte),
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	cs.cancel = cancel
+
 	if !t.IsMock && cs.pipeWriter != nil {
 		cs.tsQueue = make(chan []byte, 2048)
 		go func() {
-			pw := cs.pipeWriter
-			defer pw.Close()
-			for chunk := range cs.tsQueue {
-				if _, err := pw.Write(chunk); err != nil {
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case chunk, ok := <-cs.tsQueue:
+					if !ok {
+						return
+					}
+					cs.mu.Lock()
+					pw := cs.pipeWriter
+					cs.mu.Unlock()
+					if pw != nil {
+						_, _ = pw.Write(chunk)
+					}
 				}
 			}
 		}()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cs.cancel = cancel
-
-	stdout := pipeline.Stdout()
 	go func() {
 		defer func() {
 			cancel()
@@ -539,6 +547,10 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		}()
 
 		buf := make([]byte, 32*1024)
+		activePipeline := pipeline
+		stdout := activePipeline.Stdout()
+		var totalBytesRead int64
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -548,12 +560,41 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 			n, err := stdout.Read(buf)
 			if err != nil {
+				// If reading failed and hardware encoding was in use without having produced valid stream output,
+				// attempt an in-flight fallback to CPU encoding (libx264) so the stream recovers for viewers.
+				if totalBytesRead == 0 && activePipeline.HWType() != transcoder.HW_NONE {
+					_, exitCode := activePipeline.ExitStatus()
+					log.Printf("[ChannelStream] Hardware encoding (%s) failed during stream startup (exit %d): %s. Falling back to CPU encoding (libx264)...",
+						activePipeline.HWType(), exitCode, activePipeline.StderrText())
+					p.transcoder.DemoteHardware(activePipeline.HWType())
+
+					// Stop the broken pipeline
+					activePipeline.Stop()
+
+					// Launch CPU pipeline
+					fallbackCfg := cfg
+					fallbackCfg.HWType = transcoder.HW_NONE
+					newPipeline, startErr := p.transcoder.StartPipeline(fallbackCfg)
+					if startErr == nil {
+						activePipeline = newPipeline
+						stdout = newPipeline.Stdout()
+						cs.mu.Lock()
+						cs.pipeline = newPipeline
+						cs.pipeWriter = newPipeline.Stdin()
+						cs.mu.Unlock()
+						log.Printf("[ChannelStream] Successfully recovered stream %s with CPU fallback pipeline", channel.Name)
+						continue
+					}
+					log.Printf("[ChannelStream] CPU fallback also failed: %v", startErr)
+				}
+
 				if err != io.EOF {
 					log.Printf("[ChannelStream] Transcoder stdout read error for %s: %v", channel.Name, err)
 				}
 				return
 			}
 			if n > 0 {
+				totalBytesRead += int64(n)
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
 

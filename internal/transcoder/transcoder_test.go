@@ -3,6 +3,7 @@ package transcoder
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSafeBuffer(t *testing.T) {
@@ -46,5 +47,75 @@ func TestDetectorFallbackOnFailedHW(t *testing.T) {
 	// Verify that detectedHW was demoted to HW_NONE
 	if d.GetActiveHardware() != HW_NONE {
 		t.Fatalf("expected active hardware to be demoted to HW_NONE, got %s", d.GetActiveHardware())
+	}
+}
+
+func TestDetectorFallbackOnFailedNVENC(t *testing.T) {
+	d := NewDetector()
+	// Mark NVENC as demoted/unavailable (as happens when Docker/host GPU sleeps or cuInit fails)
+	d.DemoteHardware(HW_NVENC)
+	d.mu.Lock()
+	d.detectedHW = HW_NVENC
+	d.mu.Unlock()
+
+	cfg := PipelineConfig{
+		IsMock:  true,
+		HWType:  HW_NVENC,
+		IsRadio: false,
+	}
+
+	p, err := d.StartPipeline(cfg)
+	if err != nil {
+		t.Fatalf("expected pipeline to fall back to CPU and succeed, but failed: %v", err)
+	}
+	defer p.Stop()
+
+	if p.HWType() != HW_NONE {
+		t.Fatalf("expected pipeline HWType to be HW_NONE (CPU), got %s", p.HWType())
+	}
+
+	if d.GetActiveHardware() != HW_NONE {
+		t.Fatalf("expected active hardware to be demoted to HW_NONE, got %s", d.GetActiveHardware())
+	}
+}
+
+func TestDetectorHardwareValidation(t *testing.T) {
+	d := NewDetector()
+	if !d.IsHardwareAvailable(HW_NONE) {
+		t.Fatalf("HW_NONE should always be available")
+	}
+
+	d.DemoteHardware(HW_NVENC)
+	if d.IsHardwareAvailable(HW_NVENC) {
+		t.Fatalf("HW_NVENC should not be available after demotion")
+	}
+}
+
+func TestDetectorCacheTTLExpiration(t *testing.T) {
+	d := NewDetector()
+	// Simulate an entry that was checked 2 hours ago (idle server)
+	d.mu.Lock()
+	if d.verifiedHW == nil {
+		d.verifiedHW = make(map[HardwareType]hwStatus)
+	}
+	d.verifiedHW[HW_NVENC] = hwStatus{
+		available: true,
+		checkedAt: time.Now().Add(-2 * time.Hour),
+	}
+	d.mu.Unlock()
+
+	// Calling IsHardwareAvailable will notice the cache is expired (>60s)
+	// and re-evaluate live using testHardwareLocked.
+	// Since testHardwareLocked checks real ffmpeg/nvenc, it correctly re-probes instead of using stale state.
+	avail := d.IsHardwareAvailable(HW_NVENC)
+	d.mu.RLock()
+	st := d.verifiedHW[HW_NVENC]
+	d.mu.RUnlock()
+
+	if time.Since(st.checkedAt) > 5*time.Second {
+		t.Fatalf("expected checkedAt to be refreshed recently, got %v", st.checkedAt)
+	}
+	if st.available != avail {
+		t.Fatalf("expected cached status to match return value")
 	}
 }
