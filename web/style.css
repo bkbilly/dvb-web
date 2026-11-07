@@ -4522,7 +4522,8 @@ input:checked + .slider:before {
   position: absolute;
   top: 1rem;
   right: 1rem;
-  width: min(380px, calc(100% - 2rem));
+  width: min(390px, calc(100% - 2rem));
+  box-sizing: border-box;
   background: rgba(15, 23, 42, 0.94);
   border: 1px solid rgba(59, 130, 246, 0.4);
   border-radius: var(--radius);
@@ -4532,6 +4533,11 @@ input:checked + .slider:before {
   z-index: 25;
   color: var(--text-main);
   animation: fadeIn 0.2s ease;
+  overflow: hidden;
+}
+
+.rf-analyzer-overlay * {
+  box-sizing: border-box;
 }
 
 .rf-analyzer-header {
@@ -4576,9 +4582,10 @@ input:checked + .slider:before {
 
 .rf-analyzer-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.65rem;
   margin-bottom: 0.75rem;
+  width: 100%;
 }
 
 .rf-metric-card {
@@ -4586,6 +4593,8 @@ input:checked + .slider:before {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
   padding: 0.45rem 0.6rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .rf-metric-label {
@@ -4657,6 +4666,9 @@ input:checked + .slider:before {
   text-align: center;
   padding-top: 0.4rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Real-Time Stream & Codec Analyzer HUD Overlay */
@@ -4664,7 +4676,8 @@ input:checked + .slider:before {
   position: absolute;
   top: 1rem;
   left: 1rem;
-  width: min(390px, calc(100% - 2rem));
+  width: min(440px, calc(100% - 2rem));
+  box-sizing: border-box;
   background: rgba(15, 23, 42, 0.94);
   border: 1px solid rgba(16, 185, 129, 0.4);
   border-radius: var(--radius);
@@ -4674,6 +4687,11 @@ input:checked + .slider:before {
   z-index: 25;
   color: var(--text-main);
   animation: fadeIn 0.2s ease;
+  overflow: hidden;
+}
+
+.stream-analyzer-overlay * {
+  box-sizing: border-box;
 }
 
 .sa-header {
@@ -4690,10 +4708,16 @@ input:checked + .slider:before {
   align-items: center;
   gap: 0.5rem;
   font-size: 0.95rem;
+  min-width: 0;
 }
 
 .sa-icon {
   font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.sa-title strong {
+  white-space: nowrap;
 }
 
 .sa-chip {
@@ -4703,6 +4727,8 @@ input:checked + .slider:before {
   border-radius: 4px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .sa-chip-direct {
@@ -4737,6 +4763,7 @@ input:checked + .slider:before {
   font-size: 1rem;
   padding: 0.1rem 0.3rem;
   border-radius: 4px;
+  flex-shrink: 0;
 }
 .sa-close-btn:hover {
   color: #fff;
@@ -4745,9 +4772,10 @@ input:checked + .slider:before {
 
 .sa-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.65rem;
   margin-bottom: 0.75rem;
+  width: 100%;
 }
 
 .sa-card {
@@ -4755,14 +4783,19 @@ input:checked + .slider:before {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
   padding: 0.45rem 0.6rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .sa-label {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   color: var(--text-muted);
   margin-bottom: 0.2rem;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sa-val {
@@ -4772,6 +4805,7 @@ input:checked + .slider:before {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .sa-subval {
@@ -4782,6 +4816,7 @@ input:checked + .slider:before {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .sa-footer-info {
@@ -4790,6 +4825,9 @@ input:checked + .slider:before {
   text-align: center;
   padding-top: 0.4rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .stream-analyzer-btn {
