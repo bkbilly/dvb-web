@@ -119,3 +119,46 @@ func TestDetectorCacheTTLExpiration(t *testing.T) {
 		t.Fatalf("expected cached status to match return value")
 	}
 }
+
+func TestDirectStreamFallbackWithSubtitles(t *testing.T) {
+	d := NewDetector()
+	cfg := PipelineConfig{
+		IsMock:        true,
+		HWType:        HW_DIRECT,
+		SubtitleTrack: 0,
+		IsRadio:       false,
+	}
+
+	p, err := d.StartPipeline(cfg)
+	if err != nil {
+		t.Fatalf("expected pipeline to start with fallback: %v", err)
+	}
+	defer p.Stop()
+
+	// Direct stream cannot burn subtitles; it must have fallen back to transcoding (not HW_DIRECT)
+	if p.HWType() == HW_DIRECT {
+		t.Fatalf("expected pipeline to fall back from HW_DIRECT when subtitles enabled, got HW_DIRECT")
+	}
+}
+
+func TestDirectStreamFallbackWithMPEG2(t *testing.T) {
+	d := NewDetector()
+	cfg := PipelineConfig{
+		IsMock:        true,
+		HWType:        HW_DIRECT,
+		SubtitleTrack: -1,
+		VideoCodec:    "mpeg2video",
+		IsRadio:       false,
+	}
+
+	p, err := d.StartPipeline(cfg)
+	if err != nil {
+		t.Fatalf("expected pipeline to start with fallback: %v", err)
+	}
+	defer p.Stop()
+
+	// Direct stream cannot output MPEG-2 to HTML5 MSE; it must have fallen back to transcoding
+	if p.HWType() == HW_DIRECT {
+		t.Fatalf("expected pipeline to fall back from HW_DIRECT for MPEG-2 video, got HW_DIRECT")
+	}
+}

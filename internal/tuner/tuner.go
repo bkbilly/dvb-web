@@ -24,14 +24,15 @@ var (
 )
 
 type ViewerSession struct {
-	ID          string      `json:"id"`
-	IP          string      `json:"ip"`
-	UserAgent   string      `json:"user_agent"`
-	ChannelID   int64       `json:"channel_id"`
-	ChannelName string      `json:"channel_name"`
-	StreamKey   string      `json:"stream_key,omitempty"`
-	ConnectedAt time.Time   `json:"connected_at"`
-	KickChan    chan string `json:"-"`
+	ID             string      `json:"id"`
+	IP             string      `json:"ip"`
+	UserAgent      string      `json:"user_agent"`
+	ChannelID      int64       `json:"channel_id"`
+	ChannelName    string      `json:"channel_name"`
+	StreamKey      string      `json:"stream_key,omitempty"`
+	TranscoderMode string      `json:"transcoder_mode,omitempty"`
+	ConnectedAt    time.Time   `json:"connected_at"`
+	KickChan       chan string `json:"-"`
 }
 
 type ActiveRecordingInfo struct {
@@ -53,6 +54,7 @@ type TrackInfo struct {
 }
 
 type ChannelTracks struct {
+	VideoCodec     string      `json:"video_codec,omitempty"`
 	AudioTracks    []TrackInfo `json:"audio_tracks"`
 	SubtitleTracks []TrackInfo `json:"subtitle_tracks"`
 	HasTeletext    bool        `json:"has_teletext"`
@@ -172,17 +174,31 @@ func (cs *ChannelStream) Stop() {
 }
 
 func GetStreamKey(channelID int64, audioTrack, subTrack, subOffset int) string {
+	return GetStreamKeyWithMode(channelID, audioTrack, subTrack, subOffset, "")
+}
+
+func GetStreamKeyWithMode(channelID int64, audioTrack, subTrack, subOffset int, mode string) string {
 	if audioTrack < 0 {
 		audioTrack = 0
 	}
+	base := ""
 	if subTrack < 0 {
-		return fmt.Sprintf("%d_a%d_s-1", channelID, audioTrack)
+		base = fmt.Sprintf("%d_a%d_s-1", channelID, audioTrack)
+	} else {
+		base = fmt.Sprintf("%d_a%d_s%d_o%d", channelID, audioTrack, subTrack, subOffset)
 	}
-	return fmt.Sprintf("%d_a%d_s%d_o%d", channelID, audioTrack, subTrack, subOffset)
+	if mode != "" && mode != "auto" {
+		return fmt.Sprintf("%s_m%s", base, mode)
+	}
+	return base
 }
 
 func getStreamKey(channelID int64, audioTrack, subTrack, subOffset int) string {
 	return GetStreamKey(channelID, audioTrack, subTrack, subOffset)
+}
+
+func getStreamKeyWithMode(channelID int64, audioTrack, subTrack, subOffset int, mode string) string {
+	return GetStreamKeyWithMode(channelID, audioTrack, subTrack, subOffset, mode)
 }
 
 type Tuner struct {
@@ -401,13 +417,21 @@ func (t *Tuner) Subscribe(channelID int64, sessionID string) chan []byte {
 }
 
 func (t *Tuner) SubscribeTrack(channelID int64, audioTrack, subTrack, subOffset int, sessionID string) chan []byte {
+	return t.SubscribeTrackWithMode(channelID, audioTrack, subTrack, subOffset, "", sessionID)
+}
+
+func (t *Tuner) SubscribeTrackWithMode(channelID int64, audioTrack, subTrack, subOffset int, mode string, sessionID string) chan []byte {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.channels == nil {
 		return nil
 	}
-	key := getStreamKey(channelID, audioTrack, subTrack, subOffset)
+	key := getStreamKeyWithMode(channelID, audioTrack, subTrack, subOffset, mode)
 	if cs, ok := t.channels[key]; ok {
+		return cs.Subscribe(sessionID)
+	}
+	plainKey := getStreamKey(channelID, audioTrack, subTrack, subOffset)
+	if cs, ok := t.channels[plainKey]; ok {
 		return cs.Subscribe(sessionID)
 	}
 	for _, cs := range t.channels {
@@ -490,7 +514,7 @@ func (p *Pool) scheduleIdleTunerTeardownLocked(t *Tuner) {
 	})
 }
 
-func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrack, subTrack, subOffset int) (*ChannelStream, error) {
+func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrack, subTrack, subOffset int, requestedMode string) (*ChannelStream, error) {
 	// Validate subtitle track existence to prevent FFmpeg error 234
 	if subTrack >= 0 && !t.IsMock {
 		if t.detectedTracks != nil {
@@ -504,18 +528,40 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		}
 	}
 
+	hwSetting := requestedMode
+	if hwSetting == "" {
+		hwSetting = p.db.GetSetting("transcoder_mode", "auto")
+	}
+
+	// Detect video codec if known from probe/cache
+	var videoCodec string
+	if t.detectedTracks != nil {
+		if det, ok := t.detectedTracks[channel.ServiceID]; ok {
+			videoCodec = det.VideoCodec
+		}
+	}
+	if videoCodec == "" {
+		tracksCacheMu.RLock()
+		if cached, ok := tracksCache[channel.ID]; ok {
+			videoCodec = cached.VideoCodec
+		}
+		tracksCacheMu.RUnlock()
+	}
+
 	cfg := transcoder.PipelineConfig{
 		InputPath:        t.DVRPath,
 		UseStdinPipe:     !t.IsMock,
 		IsMock:           t.IsMock,
 		IsRadio:          channel.IsRadio,
 		ServiceID:        channel.ServiceID,
+		ChannelName:      channel.Name,
+		VideoCodec:       videoCodec,
 		VideoUDPPort:     t.videoUDPPort,
 		AudioUDPPort:     t.audioUDPPort,
 		AudioTrackIdx:    audioTrack,
 		SubtitleTrack:    subTrack,
 		SubtitleOffsetMs: subOffset,
-		HWType:           transcoder.HardwareType(p.db.GetSetting("transcoder_mode", "auto")),
+		HWType:           transcoder.HardwareType(hwSetting),
 		VideoBitrate:     p.db.GetSetting("video_bitrate", "2500k"),
 		VideoPreset:      p.db.GetSetting("video_preset", "ultrafast"),
 		VideoResolution:  p.db.GetSetting("video_resolution", "original"),
@@ -578,7 +624,7 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 			// Remove stopped ChannelStream from tuner to prevent subsequent sessions connecting to dead pipeline
 			t.mu.Lock()
-			streamKey := getStreamKey(channel.ID, audioTrack, subTrack, subOffset)
+			streamKey := getStreamKeyWithMode(channel.ID, audioTrack, subTrack, subOffset, requestedMode)
 			if active, exists := t.channels[streamKey]; exists && active == cs {
 				delete(t.channels, streamKey)
 				log.Printf("[TunerPool] Removed stopped ChannelStream %s on Tuner %d", streamKey, t.ID)
@@ -605,13 +651,15 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 					return
 				}
 
-				// If reading failed and hardware encoding was in use without having produced valid stream output,
+				// If reading failed and direct stream or hardware encoding was in use without having produced valid stream output,
 				// attempt an in-flight fallback to CPU encoding (libx264) so the stream recovers for viewers.
 				if totalBytesRead == 0 && activePipeline.HWType() != transcoder.HW_NONE {
 					_, exitCode := activePipeline.ExitStatus()
-					log.Printf("[ChannelStream] Hardware encoding (%s) failed during stream startup (exit %d): %s. Falling back to CPU encoding (libx264)...",
+					log.Printf("[ChannelStream] Stream mode (%s) failed during stream startup (exit %d): %s. Falling back to CPU encoding (libx264)...",
 						activePipeline.HWType(), exitCode, activePipeline.StderrText())
-					p.transcoder.DemoteHardware(activePipeline.HWType())
+					if activePipeline.HWType() != transcoder.HW_DIRECT {
+						p.transcoder.DemoteHardware(activePipeline.HWType())
+					}
 
 					// Stop the broken pipeline
 					activePipeline.Stop()
@@ -885,7 +933,11 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 		}
 	}
 
-	streamKey := getStreamKey(channel.ID, audioTrack, subTrack, subOffset)
+	mode := ""
+	if session != nil && session.TranscoderMode != "" {
+		mode = session.TranscoderMode
+	}
+	streamKey := getStreamKeyWithMode(channel.ID, audioTrack, subTrack, subOffset, mode)
 
 	// 1. Check if a tuner is ALREADY active on this exact frequency (channel group / multiplex)!
 	for _, t := range p.tuners {
@@ -923,7 +975,7 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 
 			// Ensure this channel & track combination has an active ChannelStream on this multiplex!
 			if _, exists := t.channels[streamKey]; !exists {
-				cs, err := p.startChannelStreamLocked(t, channel, audioTrack, subTrack, subOffset)
+				cs, err := p.startChannelStreamLocked(t, channel, audioTrack, subTrack, subOffset, mode)
 				if err != nil {
 					delete(t.viewers, session.ID)
 					t.mu.Unlock()
@@ -1060,7 +1112,7 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 			}
 
 			// Start channel stream for this channel
-			cs, err := p.startChannelStreamLocked(t, channel, audioTrack, subTrack, subOffset)
+			cs, err := p.startChannelStreamLocked(t, channel, audioTrack, subTrack, subOffset, mode)
 			if err != nil {
 				t.stopHardwareLocked()
 				delete(t.viewers, session.ID)
@@ -1143,7 +1195,7 @@ func (p *Pool) AllocateRecording(channel *db.Channel, recInfo *ActiveRecordingIn
 			}
 
 			if _, exists := t.channels[streamKey]; !exists {
-				cs, err := p.startChannelStreamLocked(t, channel, 0, -1, 0)
+				cs, err := p.startChannelStreamLocked(t, channel, 0, -1, 0, "")
 				if err != nil {
 					t.activeRecording = nil
 					t.mu.Unlock()
@@ -1228,7 +1280,7 @@ func (p *Pool) AllocateRecording(channel *db.Channel, recInfo *ActiveRecordingIn
 				}
 			}
 
-			cs, err := p.startChannelStreamLocked(t, channel, 0, -1, 0)
+			cs, err := p.startChannelStreamLocked(t, channel, 0, -1, 0, "")
 			if err != nil {
 				t.stopHardwareLocked()
 				t.activeRecording = nil
@@ -1579,6 +1631,7 @@ func (t *Tuner) FeedPMTChunk(chunk []byte, channelMap map[int]int64) {
 
 			var audioTracks []TrackInfo
 			var subTracks []TrackInfo
+			var videoCodec string
 			hasTeletext := false
 			aIdx := 0
 			sIdx := 0
@@ -1600,6 +1653,12 @@ func (t *Tuner) FeedPMTChunk(chunk []byte, channelMap map[int]int64) {
 				subDesc := "DVB Subtitles"
 
 				switch streamType {
+				case 0x1B:
+					videoCodec = "h264"
+				case 0x24:
+					videoCodec = "hevc"
+				case 0x01, 0x02:
+					videoCodec = "mpeg2video"
 				case 0x03, 0x04:
 					isAudio = true
 				case 0x0F, 0x11:
@@ -1673,8 +1732,9 @@ func (t *Tuner) FeedPMTChunk(chunk []byte, channelMap map[int]int64) {
 				}
 			}
 
-			if len(audioTracks) > 0 || len(subTracks) > 0 {
+			if len(audioTracks) > 0 || len(subTracks) > 0 || videoCodec != "" {
 				dt := ChannelTracks{
+					VideoCodec:     videoCodec,
 					AudioTracks:    audioTracks,
 					SubtitleTracks: subTracks,
 					HasTeletext:    hasTeletext,
@@ -1707,11 +1767,15 @@ func parseProbeOutput(data []byte, serviceID int) ChannelTracks {
 
 	var audioList []TrackInfo
 	var subList []TrackInfo
+	var videoCodec string
 	aIdx := 0
 	sIdx := 0
 	hasTeletext := false
 
 	for _, s := range parsed.Streams {
+		if s.CodecType == "video" && videoCodec == "" {
+			videoCodec = s.CodecName
+		}
 		lang := s.Tags["language"]
 		if lang == "" {
 			lang = "und"
@@ -1762,6 +1826,7 @@ func parseProbeOutput(data []byte, serviceID int) ChannelTracks {
 	}
 
 	return ChannelTracks{
+		VideoCodec:     videoCodec,
 		AudioTracks:    audioList,
 		SubtitleTracks: subList,
 		HasTeletext:    hasTeletext,

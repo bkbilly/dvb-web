@@ -247,7 +247,7 @@ func (d *Database) migrate() error {
 	// Seed default settings if empty
 	defaults := map[string]string{
 		"preferred_language": "eng",
-		"transcoder_mode":    "auto", // auto, vaapi, nvenc, v4l2m2m, cpu
+		"transcoder_mode":    "auto", // auto, direct, vaapi, nvenc, v4l2m2m, cpu
 		"video_bitrate":      "4500k",
 		"video_preset":       "ultrafast",
 		"video_resolution":   "original", // original, 720p, 1080p

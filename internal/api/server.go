@@ -801,6 +801,12 @@ func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *
 		ConnectedAt: time.Now(),
 	}
 
+	if tm := r.URL.Query().Get("transcoder_mode"); tm != "" {
+		viewerSession.TranscoderMode = tm
+	} else if r.URL.Query().Get("direct") == "1" {
+		viewerSession.TranscoderMode = "direct"
+	}
+
 	audioTrack := 0
 	if at := r.URL.Query().Get("audio_track"); at != "" {
 		if v, err := strconv.Atoi(at); err == nil {
@@ -839,12 +845,12 @@ func (s *Server) streamChannel(w http.ResponseWriter, r *http.Request, channel *
 	}
 	s.BroadcastTuners(s.tunerPool.GetStatus())
 
-	ch := t.SubscribeTrack(channel.ID, audioTrack, actualSubTrack, subOffset, sessionID)
+	ch := t.SubscribeTrackWithMode(channel.ID, audioTrack, actualSubTrack, subOffset, viewerSession.TranscoderMode, sessionID)
 	if ch == nil {
 		http.Error(w, "stream unavailable", http.StatusInternalServerError)
 		return
 	}
-	streamKey := tuner.GetStreamKey(channel.ID, audioTrack, actualSubTrack, subOffset)
+	streamKey := tuner.GetStreamKeyWithMode(channel.ID, audioTrack, actualSubTrack, subOffset, viewerSession.TranscoderMode)
 	defer func() {
 		s.tunerPool.ReleaseStreamViewerTrack(t.ID, channel.ID, streamKey, sessionID)
 		s.BroadcastTuners(s.tunerPool.GetStatus())

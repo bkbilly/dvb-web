@@ -21,6 +21,7 @@ const (
 	HW_VAAPI   HardwareType = "vaapi"
 	HW_NVENC   HardwareType = "nvenc"
 	HW_V4L2M2M HardwareType = "v4l2m2m"
+	HW_DIRECT  HardwareType = "direct"
 )
 
 type hwStatus struct {
@@ -97,6 +98,8 @@ func (d *Detector) Detect() HardwareType {
 
 func (d *Detector) testHardwareLocked(hw HardwareType) bool {
 	switch hw {
+	case HW_DIRECT:
+		return true
 	case HW_NVENC:
 		return d.checkFFmpegEncoder("h264_nvenc") && d.testEncoder("h264_nvenc", nil)
 	case HW_VAAPI:
@@ -121,7 +124,7 @@ func (d *Detector) testHardwareLocked(hw HardwareType) bool {
 }
 
 func (d *Detector) IsHardwareAvailable(hw HardwareType) bool {
-	if hw == HW_NONE || hw == "" || hw == "auto" {
+	if hw == HW_DIRECT || hw == HW_NONE || hw == "" || hw == "auto" {
 		return true
 	}
 	d.mu.RLock()
@@ -239,6 +242,8 @@ type PipelineConfig struct {
 	IsMock           bool         // If mock, generates test pattern
 	IsRadio          bool         // True for audio-only radio channels (no video stream in DVB)
 	ServiceID        int          // DVB Program / Service ID
+	ChannelName      string       // Display name for logging
+	VideoCodec       string       // Broadcast video codec (e.g. "h264", "mpeg2video")
 	VideoUDPPort     int          // Local UDP port to stream RTP H.264
 	AudioUDPPort     int          // Local UDP port to stream RTP Opus
 	AudioTrackIdx    int          // Selected audio stream index (0, 1, 2...)
@@ -308,8 +313,33 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		hw = d.GetActiveHardware()
 	}
 
+	// Direct stream eligibility evaluation:
+	// Direct stream passes video through (-c:v copy). It requires H.264/compatible broadcast without subtitles.
+	if hw == HW_DIRECT {
+		name := cfg.ChannelName
+		if name == "" {
+			name = fmt.Sprintf("SID:%d", cfg.ServiceID)
+		}
+		if cfg.SubtitleTrack >= 0 {
+			log.Printf("[Transcoder] Direct stream requested on %s with subtitles enabled (track %d); falling back to transcoding to burn in subtitles", name, cfg.SubtitleTrack)
+			hw = d.GetActiveHardware()
+			cfg.HWType = hw
+		} else if cfg.IsRadio {
+			log.Printf("[Transcoder] Direct stream requested on radio channel %s; falling back to transcoding for synthetic background", name)
+			hw = d.GetActiveHardware()
+			cfg.HWType = hw
+		} else if cfg.VideoCodec != "" {
+			codec := strings.ToLower(cfg.VideoCodec)
+			if strings.Contains(codec, "mpeg2") || codec == "0x02" || codec == "0x01" {
+				log.Printf("[Transcoder] Channel %s uses MPEG-2 video (%s); Direct Stream not supported by browser player, falling back to transcoding", name, cfg.VideoCodec)
+				hw = d.GetActiveHardware()
+				cfg.HWType = hw
+			}
+		}
+	}
+
 	// Validate hardware acceleration before constructing pipeline; fallback immediately if unsupported
-	if hw != HW_NONE && !d.IsHardwareAvailable(hw) {
+	if hw != HW_NONE && hw != HW_DIRECT && !d.IsHardwareAvailable(hw) {
 		log.Printf("[Transcoder] Hardware encoding (%s) requested but not functional on this host. Falling back to CPU encoding (libx264)...", hw)
 		d.DemoteHardware(hw)
 		hw = HW_NONE
@@ -385,7 +415,34 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 
 	videoFilter := buildVideoFilter(cfg.VideoResolution)
 
-	if cfg.IsMock {
+	if hw == HW_DIRECT {
+		if cfg.IsMock {
+			// Mock synthetic sources cannot use stream copy (-c:v copy requires encoded packets)
+			args = append(args,
+				"-map", "0:v:0",
+				"-map", "1:a:0",
+				"-c:v", "libx264",
+				"-preset", "ultrafast",
+				"-tune", "zerolatency",
+				"-b:v", "1000k",
+			)
+		} else {
+			if cfg.ServiceID > 0 {
+				args = append(args,
+					"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
+					"-map", fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx),
+				)
+			} else {
+				args = append(args,
+					"-map", "0:v:0?",
+					"-map", fmt.Sprintf("0:a:%d?", audioIdx),
+				)
+			}
+			args = append(args,
+				"-c:v", "copy",
+			)
+		}
+	} else if cfg.IsMock {
 		if cfg.IsRadio {
 			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
 		} else if subIdx >= 0 {
@@ -478,72 +535,74 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		}
 	}
 
-	if cfg.IsRadio {
-		// Radio uses minimal CPU static frame encoding (10 fps, ~15 kbps)
-		args = append(args,
-			"-c:v", "libx264",
-			"-preset", "ultrafast",
-			"-tune", "stillimage",
-			"-threads", "2",
-			"-b:v", "64k",
-			"-g", "25",
-			"-bf", "0",
-			"-pix_fmt", "yuv420p",
-		)
-	} else {
-		switch hw {
-		case HW_NVENC:
-			args = append(args,
-				"-c:v", "h264_nvenc",
-				"-preset", "p1",
-				"-tune", "ull",
-				"-zerolatency", "1",
-				"-b:v", bitrate,
-				"-g", "15",
-				"-bf", "0",
-				"-pix_fmt", "yuv420p",
-			)
-		case HW_VAAPI:
-			args = append(args,
-				"-c:v", "h264_vaapi",
-				"-b:v", bitrate,
-				"-g", "15",
-				"-bf", "0",
-			)
-		case HW_V4L2M2M:
-			args = append(args,
-				"-c:v", "h264_v4l2m2m",
-				"-b:v", bitrate,
-				"-g", "15",
-			)
-		default:
-			// Universal CPU fallback with optimized preset and thread throttling
-			preset := cfg.VideoPreset
-			if preset == "" {
-				preset = "ultrafast"
-			}
-			cpuThreads := runtime.NumCPU()
-			if cpuThreads > 4 {
-				cpuThreads = 4
-			}
+	if hw != HW_DIRECT {
+		if cfg.IsRadio {
+			// Radio uses minimal CPU static frame encoding (10 fps, ~15 kbps)
 			args = append(args,
 				"-c:v", "libx264",
-				"-preset", preset,
-				"-tune", "zerolatency",
-				"-threads", fmt.Sprintf("%d", cpuThreads),
-				"-b:v", bitrate,
-				"-maxrate", bitrate,
-				"-bufsize", bitrate,
-				"-g", "15",
+				"-preset", "ultrafast",
+				"-tune", "stillimage",
+				"-threads", "2",
+				"-b:v", "64k",
+				"-g", "25",
 				"-bf", "0",
 				"-pix_fmt", "yuv420p",
 			)
+		} else {
+			switch hw {
+			case HW_NVENC:
+				args = append(args,
+					"-c:v", "h264_nvenc",
+					"-preset", "p1",
+					"-tune", "ull",
+					"-zerolatency", "1",
+					"-b:v", bitrate,
+					"-g", "15",
+					"-bf", "0",
+					"-pix_fmt", "yuv420p",
+				)
+			case HW_VAAPI:
+				args = append(args,
+					"-c:v", "h264_vaapi",
+					"-b:v", bitrate,
+					"-g", "15",
+					"-bf", "0",
+				)
+			case HW_V4L2M2M:
+				args = append(args,
+					"-c:v", "h264_v4l2m2m",
+					"-b:v", bitrate,
+					"-g", "15",
+				)
+			default:
+				// Universal CPU fallback with optimized preset and thread throttling
+				preset := cfg.VideoPreset
+				if preset == "" {
+					preset = "ultrafast"
+				}
+				cpuThreads := runtime.NumCPU()
+				if cpuThreads > 4 {
+					cpuThreads = 4
+				}
+				args = append(args,
+					"-c:v", "libx264",
+					"-preset", preset,
+					"-tune", "zerolatency",
+					"-threads", fmt.Sprintf("%d", cpuThreads),
+					"-b:v", bitrate,
+					"-maxrate", bitrate,
+					"-bufsize", bitrate,
+					"-g", "15",
+					"-bf", "0",
+					"-pix_fmt", "yuv420p",
+				)
+			}
 		}
 	}
 
 	audioBitrate := "128k"
-	if cfg.IsRadio {
-		audioBitrate = "192k" // Higher fidelity for radio music
+	if cfg.IsRadio || hw == HW_DIRECT {
+		audioBitrate = "192k" // Higher fidelity
 	}
 
 	// Unified MPEG-TS output with AAC stereo audio (natural PTS preserved for perfect A/V sync)
@@ -603,6 +662,14 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		}
 		_ = stdout.Close()
 		errText := strings.TrimSpace(stderrBuf.String())
+
+		// If direct stream was requested and exited immediately, fall back to CPU transcoding
+		if hw == HW_DIRECT {
+			log.Printf("[Transcoder] Direct stream passthrough exited immediately (exit %d): %s. Falling back to CPU encoding (libx264)...",
+				exitCode, errText)
+			cfg.HWType = HW_NONE
+			return d.StartPipeline(cfg)
+		}
 
 		// If hardware acceleration (NVENC, VAAPI, V4L2M2M) was requested and failed, fall back to CPU (libx264)
 		if hw != HW_NONE {

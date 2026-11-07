@@ -458,3 +458,59 @@ func TestAPIScanRegionsAndCustomScan(t *testing.T) {
 		t.Fatalf("Expected 200 OK from custom /api/scan, got %d: %s", scanW.Code, scanW.Body.String())
 	}
 }
+
+func TestAPIDirectStreamMode(t *testing.T) {
+	server, database, pool, rec, tmpDir := setupTestServer(t)
+	defer os.RemoveAll(tmpDir)
+	defer database.Close()
+	defer pool.StopAll()
+	defer rec.Stop()
+	_ = server
+
+	// 1. Verify stream allocation with direct=1 query parameter
+	ch, err := database.GetChannel(1)
+	if err != nil {
+		t.Fatalf("Failed to get channel 1: %v", err)
+	}
+
+	session := &tuner.ViewerSession{
+		ID:             "sess_direct_test",
+		IP:             "127.0.0.1",
+		UserAgent:      "GoTest",
+		TranscoderMode: "direct",
+	}
+
+	tunerDev, actualSub, err := pool.AllocateChannelTrack(ch, 0, -1, 0, session)
+	if err != nil {
+		t.Fatalf("Failed to allocate channel with direct stream: %v", err)
+	}
+	defer pool.ReleaseSession(session.ID)
+
+	if actualSub != -1 {
+		t.Errorf("Expected subTrack -1, got %d", actualSub)
+	}
+	if tunerDev == nil {
+		t.Fatalf("Expected allocated tuner, got nil")
+	}
+
+	// 2. Verify that requesting subtitles with direct mode falls back gracefully
+	sessionSub := &tuner.ViewerSession{
+		ID:             "sess_sub_test",
+		IP:             "127.0.0.1",
+		UserAgent:      "GoTest",
+		TranscoderMode: "direct",
+	}
+
+	tunerDev2, actualSub2, err := pool.AllocateChannelTrack(ch, 0, 0, 0, sessionSub)
+	if err != nil {
+		t.Fatalf("Failed to allocate channel with subtitles in direct mode: %v", err)
+	}
+	defer pool.ReleaseSession(sessionSub.ID)
+
+	if tunerDev2 == nil {
+		t.Fatalf("Expected allocated tuner for subtitles fallback, got nil")
+	}
+	if actualSub2 != 0 {
+		t.Errorf("Expected subTrack 0 to be accepted, got %d", actualSub2)
+	}
+}
