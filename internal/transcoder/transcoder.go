@@ -328,24 +328,20 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	}
 	args = append(args, "-loglevel", "warning")
 
-	// Hardware input initialization for VA-API and NVENC
-	if !cfg.IsMock {
-		if hw == HW_VAAPI {
-			if cfg.SubtitleTrack < 0 {
-				args = append(args,
-					"-hwaccel", "vaapi",
-					"-hwaccel_device", d.vaapiDevice,
-					"-hwaccel_output_format", "vaapi",
-				)
-			} else {
-				// When rendering subtitles, keep decoded frames in system memory for overlay filter
-				args = append(args,
-					"-hwaccel", "vaapi",
-					"-hwaccel_device", d.vaapiDevice,
-				)
-			}
-		} else if hw == HW_NVENC {
-			args = append(args, "-hwaccel", "cuda")
+	// Hardware input initialization for VA-API
+	if !cfg.IsMock && hw == HW_VAAPI {
+		if cfg.SubtitleTrack < 0 {
+			args = append(args,
+				"-hwaccel", "vaapi",
+				"-hwaccel_device", d.vaapiDevice,
+				"-hwaccel_output_format", "vaapi",
+			)
+		} else {
+			// When rendering subtitles, keep decoded frames in system memory for overlay filter
+			args = append(args,
+				"-hwaccel", "vaapi",
+				"-hwaccel_device", d.vaapiDevice,
+			)
 		}
 	}
 

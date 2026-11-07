@@ -600,6 +600,11 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 			n, err := stdout.Read(buf)
 			if err != nil {
+				// If the context was cancelled (e.g. channel stopped, viewer changed channel) or stream has no viewers, exit cleanly
+				if ctx.Err() != nil || cs.ViewerCount() == 0 {
+					return
+				}
+
 				// If reading failed and hardware encoding was in use without having produced valid stream output,
 				// attempt an in-flight fallback to CPU encoding (libx264) so the stream recovers for viewers.
 				if totalBytesRead == 0 && activePipeline.HWType() != transcoder.HW_NONE {
