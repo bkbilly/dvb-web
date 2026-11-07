@@ -98,17 +98,14 @@ func (r *Recorder) recoverDanglingRecordings() {
 func (r *Recorder) Stop() {
 	close(r.stopChan)
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var activeIDs []int64
+	for id := range r.jobs {
+		activeIDs = append(activeIDs, id)
+	}
+	r.mu.Unlock()
 
-	for id, job := range r.jobs {
-		job.cancel()
-		if job.File != nil {
-			_ = job.File.Close()
-		}
-		job.Recording.Status = "completed"
-		job.Recording.FileSize = job.BytesWritten
-		_ = r.db.UpdateRecording(job.Recording)
-		delete(r.jobs, id)
+	for _, id := range activeIDs {
+		_ = r.StopRecording(id)
 	}
 }
 
@@ -301,15 +298,19 @@ func (r *Recorder) finalizeJob(recID int64, targetStatus, errMsg string) {
 		recID, job.Recording.Title, job.BytesWritten, targetStatus)
 	r.notifyTunerChange()
 
-	// Remux to faststart MP4 for instant browser playback
+	// Remux to faststart MP4 for instant browser playback if TS file has data
 	if job.Recording.FilePath != "" && strings.HasSuffix(job.Recording.FilePath, ".ts") {
-		mp4Path := strings.TrimSuffix(job.Recording.FilePath, ".ts") + ".mp4"
-		go func(ts, mp4 string) {
-			cmd := exec.Command("ffmpeg", "-i", ts, "-c", "copy", "-movflags", "+faststart", mp4, "-y")
-			if err := cmd.Run(); err == nil {
-				log.Printf("[Recorder] Remuxed recording #%d to faststart MP4 for browser playback: %s", recID, mp4)
-			}
-		}(job.Recording.FilePath, mp4Path)
+		if fi, err := os.Stat(job.Recording.FilePath); err == nil && fi.Size() > 0 {
+			mp4Path := strings.TrimSuffix(job.Recording.FilePath, ".ts") + ".mp4"
+			go func(ts, mp4 string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "warning", "-i", ts, "-c", "copy", "-movflags", "+faststart", mp4, "-y")
+				if err := cmd.Run(); err == nil {
+					log.Printf("[Recorder] Remuxed recording #%d to faststart MP4 for browser playback: %s", recID, mp4)
+				}
+			}(job.Recording.FilePath, mp4Path)
+		}
 	}
 }
 

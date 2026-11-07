@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -452,6 +453,43 @@ func (p *Pool) StopAll() {
 	}
 }
 
+func (p *Pool) scheduleIdleTunerTeardownLocked(t *Tuner) {
+	if t.idleTimer != nil {
+		t.idleTimer.Stop()
+		t.idleTimer = nil
+	}
+	timeoutSec := 15
+	if s := p.db.GetSetting("idle_timeout_sec", "15"); s != "" {
+		if val, err := strconv.Atoi(s); err == nil && val >= 0 {
+			timeoutSec = val
+		}
+	}
+	if timeoutSec <= 0 {
+		log.Printf("[TunerPool] Tuner %d has 0 viewers and 0 recordings. Stopping pipeline immediately to conserve 100%% CPU.", t.ID)
+		t.stopHardwareLocked()
+		return
+	}
+
+	tunerID := t.ID
+	log.Printf("[TunerPool] Tuner %d idle (0 viewers, 0 recordings). Hardware teardown scheduled in %ds...", tunerID, timeoutSec)
+	t.idleTimer = time.AfterFunc(time.Duration(timeoutSec)*time.Second, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		for _, cur := range p.tuners {
+			if cur.ID == tunerID {
+				cur.mu.Lock()
+				defer cur.mu.Unlock()
+				if len(cur.viewers) == 0 && cur.activeRecording == nil && cur.status == "active" {
+					log.Printf("[TunerPool] Tuner %d idle timer (%ds) expired. Stopping pipeline to conserve 100%% CPU.", tunerID, timeoutSec)
+					cur.stopHardwareLocked()
+				}
+				cur.idleTimer = nil
+				break
+			}
+		}
+	})
+}
+
 func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrack, subTrack, subOffset int) (*ChannelStream, error) {
 	// Validate subtitle track existence to prevent FFmpeg error 234
 	if subTrack >= 0 && !t.IsMock {
@@ -479,6 +517,8 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		SubtitleOffsetMs: subOffset,
 		HWType:           transcoder.HardwareType(p.db.GetSetting("transcoder_mode", "auto")),
 		VideoBitrate:     p.db.GetSetting("video_bitrate", "2500k"),
+		VideoPreset:      p.db.GetSetting("video_preset", "ultrafast"),
+		VideoResolution:  p.db.GetSetting("video_resolution", "original"),
 	}
 
 	pipeline, err := p.transcoder.StartPipeline(cfg)
@@ -870,7 +910,7 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 						}
 					}
 					if len(other.viewers) == 0 && other.activeRecording == nil && other.status == "active" {
-						other.stopHardwareLocked()
+						p.scheduleIdleTunerTeardownLocked(other)
 					}
 					other.mu.Unlock()
 				}
@@ -911,7 +951,7 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 				}
 			}
 			if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
-				t.stopHardwareLocked()
+				p.scheduleIdleTunerTeardownLocked(t)
 			}
 		}
 		t.mu.Unlock()
@@ -924,7 +964,14 @@ func (p *Pool) AllocateChannelTrack(channel *db.Channel, audioTrack, subTrack, s
 			t.mu.Unlock()
 			continue
 		}
-		if t.status == "idle" {
+		if t.status == "idle" || (t.status == "active" && len(t.viewers) == 0 && t.activeRecording == nil) {
+			if t.idleTimer != nil {
+				t.idleTimer.Stop()
+				t.idleTimer = nil
+			}
+			if t.status == "active" {
+				t.stopHardwareLocked()
+			}
 			session.ChannelID = channel.ID
 			session.ChannelName = channel.Name
 			session.StreamKey = streamKey
@@ -1114,7 +1161,14 @@ func (p *Pool) AllocateRecording(channel *db.Channel, recInfo *ActiveRecordingIn
 			t.mu.Unlock()
 			continue
 		}
-		if t.status == "idle" {
+		if t.status == "idle" || (t.status == "active" && len(t.viewers) == 0 && t.activeRecording == nil) {
+			if t.idleTimer != nil {
+				t.idleTimer.Stop()
+				t.idleTimer = nil
+			}
+			if t.status == "active" {
+				t.stopHardwareLocked()
+			}
 			t.status = "active"
 			t.currentFrequency = channel.Frequency
 			t.currentChannelID = channel.ID
@@ -1214,8 +1268,7 @@ func (p *Pool) ReleaseRecording(tunerID int, channelID int64, recID int64) {
 				}
 			}
 			if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
-				log.Printf("[TunerPool] Tuner %d has 0 viewers and 0 recordings. Conserving 100%% CPU.", t.ID)
-				t.stopHardwareLocked()
+				p.scheduleIdleTunerTeardownLocked(t)
 			}
 			t.mu.Unlock()
 			break
@@ -1297,8 +1350,7 @@ func (p *Pool) ReleaseSession(sessionID string) {
 			}
 
 			if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
-				log.Printf("[TunerPool] Tuner %d has 0 viewers and 0 recordings. Stopping pipeline to conserve 100%% CPU.", t.ID)
-				t.stopHardwareLocked()
+				p.scheduleIdleTunerTeardownLocked(t)
 			}
 		}
 		t.mu.Unlock()
@@ -1361,8 +1413,7 @@ func (p *Pool) ReleaseStreamViewerTrack(tunerID int, channelID int64, streamKey,
 				log.Printf("[TunerPool] Session %s stream ended on Tuner %d (Channel %d). Remaining viewers: %d",
 					sessionID, t.ID, channelID, len(t.viewers))
 				if len(t.viewers) == 0 && t.activeRecording == nil && t.status == "active" {
-					log.Printf("[TunerPool] Tuner %d has 0 viewers and 0 recordings. Stopping pipeline to conserve 100%% CPU.", t.ID)
-					t.stopHardwareLocked()
+					p.scheduleIdleTunerTeardownLocked(t)
 				}
 			} else {
 				log.Printf("[TunerPool] Session %s already switched to channel %d on Tuner %d; keeping session active.",

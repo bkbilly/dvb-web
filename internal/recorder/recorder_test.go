@@ -130,10 +130,11 @@ func TestRecorderTunerConflictWhenAllTunersBusy(t *testing.T) {
 	defer rec.Stop()
 
 	// Start recording ch1 on the only tuner
-	_, err = rec.StartInstantRecording(ch1.ID, "Rec Ch1", 300)
+	recording, err := rec.StartInstantRecording(ch1.ID, "Rec Ch1", 300)
 	if err != nil {
 		t.Fatalf("StartInstantRecording failed: %v", err)
 	}
+	defer rec.StopRecording(recording.ID)
 
 	// Now try to allocate another channel on different frequency
 	viewerSession := &tuner.ViewerSession{

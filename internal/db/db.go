@@ -249,7 +249,8 @@ func (d *Database) migrate() error {
 		"preferred_language": "eng",
 		"transcoder_mode":    "auto", // auto, vaapi, nvenc, v4l2m2m, cpu
 		"video_bitrate":      "4500k",
-		"video_preset":       "veryfast",
+		"video_preset":       "ultrafast",
+		"video_resolution":   "original", // original, 720p, 1080p
 		"idle_timeout_sec":   "15",
 	}
 

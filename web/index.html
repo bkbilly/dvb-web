@@ -546,7 +546,7 @@
                   <option value="vaapi">Force Intel/AMD VA-API</option>
                   <option value="nvenc">Force NVIDIA NVENC</option>
                   <option value="v4l2m2m">Force Raspberry Pi V4L2 M2M</option>
-                  <option value="cpu">Force CPU (libx264 veryfast)</option>
+                  <option value="cpu">Force CPU (libx264 ultrafast)</option>
                 </select>
               </div>
               <div class="form-row">
@@ -557,6 +557,22 @@
                   <option value="4500k">4500 kbps (High Quality HD)</option>
                   <option value="6000k">6000 kbps (Very High Quality 1080p)</option>
                   <option value="8000k">8000 kbps (Maximum Quality 1080p)</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Max Video Resolution:</label>
+                <select id="cfg-video-resolution" class="form-select">
+                  <option value="original">Original (Keep Broadcast Quality)</option>
+                  <option value="720p">Cap at 720p (Saves CPU/Resources)</option>
+                  <option value="1080p">Cap at 1080p</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>CPU Encoding Speed / Preset:</label>
+                <select id="cfg-video-preset" class="form-select">
+                  <option value="ultrafast">Ultrafast (Lowest CPU, Recommended)</option>
+                  <option value="superfast">Superfast (Balanced)</option>
+                  <option value="veryfast">Veryfast (Higher CPU usage)</option>
                 </select>
               </div>
               <div class="form-row">

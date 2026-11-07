@@ -594,6 +594,8 @@
         preferred_language: 'eng',
         transcoder_mode: 'auto',
         video_bitrate: '4500k',
+        video_resolution: 'original',
+        video_preset: 'ultrafast',
         audio_codec: 'aac',
         rec_pre_padding: 2,
         rec_post_padding: 5

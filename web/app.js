@@ -4122,6 +4122,14 @@ async function loadInitialSettings() {
     if (cfg.video_bitrate) {
       document.getElementById('cfg-video-bitrate').value = cfg.video_bitrate;
     }
+    if (cfg.video_resolution) {
+      const el = document.getElementById('cfg-video-resolution');
+      if (el) el.value = cfg.video_resolution;
+    }
+    if (cfg.video_preset) {
+      const el = document.getElementById('cfg-video-preset');
+      if (el) el.value = cfg.video_preset;
+    }
     if (cfg.rec_pre_padding !== undefined) {
       const el = document.getElementById('cfg-rec-pre-padding');
       if (el) el.value = cfg.rec_pre_padding;
@@ -4848,6 +4856,8 @@ function setupSettingsUI() {
     const updates = {
       transcoder_mode: document.getElementById('cfg-transcoder-mode').value,
       video_bitrate: document.getElementById('cfg-video-bitrate').value,
+      video_resolution: document.getElementById('cfg-video-resolution') ? document.getElementById('cfg-video-resolution').value : 'original',
+      video_preset: document.getElementById('cfg-video-preset') ? document.getElementById('cfg-video-preset').value : 'ultrafast',
       rec_pre_padding: parseInt(document.getElementById('cfg-rec-pre-padding').value, 10),
       rec_post_padding: parseInt(document.getElementById('cfg-rec-post-padding').value, 10),
     };

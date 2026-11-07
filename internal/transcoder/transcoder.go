@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -126,14 +127,10 @@ func (d *Detector) IsHardwareAvailable(hw HardwareType) bool {
 	d.mu.RLock()
 	if d.verifiedHW != nil {
 		if st, exists := d.verifiedHW[hw]; exists {
-			// If cached as available, expire after 60 seconds of idle to detect asleep/power-collapsed GPUs
-			if st.available && time.Since(st.checkedAt) < 60*time.Second {
+			// Cache positive or negative status for 60 seconds (allows auto-recovery after cooldown)
+			if time.Since(st.checkedAt) < 60*time.Second {
 				d.mu.RUnlock()
-				return true
-			}
-			if !st.available {
-				d.mu.RUnlock()
-				return false
+				return st.available
 			}
 		}
 	}
@@ -145,15 +142,16 @@ func (d *Detector) IsHardwareAvailable(hw HardwareType) bool {
 		d.verifiedHW = make(map[HardwareType]hwStatus)
 	}
 	if st, exists := d.verifiedHW[hw]; exists {
-		if st.available && time.Since(st.checkedAt) < 60*time.Second {
-			return true
-		}
-		if !st.available {
-			return false
+		if time.Since(st.checkedAt) < 60*time.Second {
+			return st.available
 		}
 	}
 	functional := d.testHardwareLocked(hw)
 	d.verifiedHW[hw] = hwStatus{available: functional, checkedAt: time.Now()}
+	if functional && d.detectedHW == HW_NONE {
+		d.detectedHW = hw
+		log.Printf("[Transcoder] Re-detected and restored hardware acceleration: %s", hw)
+	}
 	return functional
 }
 
@@ -235,20 +233,33 @@ func (s *safeBuffer) String() string {
 
 // PipelineConfig contains the parameters needed to launch an FFmpeg transcode session
 type PipelineConfig struct {
-	InputPath      string       // e.g. "/dev/dvb/adapter0/dvr0" or pipe
-	InputPipe      io.Reader    // Piped TS reader (preferred for safe multi-consumer fanning)
-	UseStdinPipe   bool         // If true, creates stdin pipe for direct writing via Pipeline.Stdin()
-	IsMock         bool         // If mock, generates test pattern
-	IsRadio        bool         // True for audio-only radio channels (no video stream in DVB)
-	ServiceID      int          // DVB Program / Service ID
-	VideoUDPPort   int          // Local UDP port to stream RTP H.264
-	AudioUDPPort   int          // Local UDP port to stream RTP Opus
-	AudioTrackIdx  int          // Selected audio stream index (0, 1, 2...)
-	SubtitleTrack  int          // Selected subtitle stream index (-1 = off, 0, 1...)
-	SubtitleOffsetMs int        // Subtitle timestamp offset in milliseconds (negative advances subtitles)
-	HWType         HardwareType // Selected HW type (or auto)
-	VideoBitrate   string       // e.g. "2500k"
-	AVSyncOffsetMs int          // Calibrated audio delay to align with video pipeline
+	InputPath        string       // e.g. "/dev/dvb/adapter0/dvr0" or pipe
+	InputPipe        io.Reader    // Piped TS reader (preferred for safe multi-consumer fanning)
+	UseStdinPipe     bool         // If true, creates stdin pipe for direct writing via Pipeline.Stdin()
+	IsMock           bool         // If mock, generates test pattern
+	IsRadio          bool         // True for audio-only radio channels (no video stream in DVB)
+	ServiceID        int          // DVB Program / Service ID
+	VideoUDPPort     int          // Local UDP port to stream RTP H.264
+	AudioUDPPort     int          // Local UDP port to stream RTP Opus
+	AudioTrackIdx    int          // Selected audio stream index (0, 1, 2...)
+	SubtitleTrack    int          // Selected subtitle stream index (-1 = off, 0, 1...)
+	SubtitleOffsetMs int          // Subtitle timestamp offset in milliseconds (negative advances subtitles)
+	HWType           HardwareType // Selected HW type (or auto)
+	VideoBitrate     string       // e.g. "2500k"
+	VideoPreset      string       // e.g. "ultrafast", "veryfast"
+	VideoResolution  string       // e.g. "original", "720p", "1080p"
+	AVSyncOffsetMs   int          // Calibrated audio delay to align with video pipeline
+}
+
+func buildVideoFilter(resolution string) string {
+	scaleExpr := "scale=w=trunc(ih*dar/2)*2:h=ih:flags=bicubic,setsar=1"
+	if resolution == "720p" {
+		scaleExpr = "scale=w='trunc(min(ih*dar,1280)/2)*2':h='min(ih,720)':flags=bicubic,setsar=1"
+	} else if resolution == "1080p" {
+		scaleExpr = "scale=w='trunc(min(ih*dar,1920)/2)*2':h='min(ih,1080)':flags=bicubic,setsar=1"
+	}
+	// mode=0 outputs 1 frame per frame (25/30 fps) to conserve CPU/GPU and prevent buffering lags
+	return "bwdif=mode=0:parity=auto:deint=interlaced," + scaleExpr
 }
 
 type Pipeline struct {
@@ -317,13 +328,25 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	}
 	args = append(args, "-loglevel", "warning")
 
-	// Hardware input initialization for VA-API
-	if !cfg.IsMock && hw == HW_VAAPI {
-		args = append(args,
-			"-hwaccel", "vaapi",
-			"-hwaccel_device", d.vaapiDevice,
-			"-hwaccel_output_format", "vaapi",
-		)
+	// Hardware input initialization for VA-API and NVENC
+	if !cfg.IsMock {
+		if hw == HW_VAAPI {
+			if cfg.SubtitleTrack < 0 {
+				args = append(args,
+					"-hwaccel", "vaapi",
+					"-hwaccel_device", d.vaapiDevice,
+					"-hwaccel_output_format", "vaapi",
+				)
+			} else {
+				// When rendering subtitles, keep decoded frames in system memory for overlay filter
+				args = append(args,
+					"-hwaccel", "vaapi",
+					"-hwaccel_device", d.vaapiDevice,
+				)
+			}
+		} else if hw == HW_NVENC {
+			args = append(args, "-hwaccel", "cuda")
+		}
 	}
 
 	// Live MPEG-TS input options to ensure PAT/PMT program maps are properly discovered
@@ -364,6 +387,8 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	}
 	subIdx := cfg.SubtitleTrack
 
+	videoFilter := buildVideoFilter(cfg.VideoResolution)
+
 	if cfg.IsMock {
 		if cfg.IsRadio {
 			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
@@ -397,10 +422,10 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
 			}
 			filter := fmt.Sprintf(
-				"[0:p:%d:v:0]bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1[main];"+
+				"[0:p:%d:v:0]%s[main];"+
 					"[0:p:%d:s:%d]%sformat=yuva420p[sub];"+
 					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
-				cfg.ServiceID, cfg.ServiceID, subIdx, subPtsChain,
+				cfg.ServiceID, videoFilter, cfg.ServiceID, subIdx, subPtsChain,
 			)
 			args = append(args,
 				"-filter_complex", filter,
@@ -408,8 +433,14 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				"-map", audioMap,
 			)
 		} else {
-			if hw != HW_VAAPI {
-				args = append(args, "-vf", "bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1")
+			if hw == HW_VAAPI {
+				if cfg.VideoResolution == "720p" {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1,scale_vaapi=w=-2:h=720")
+				} else {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1")
+				}
+			} else {
+				args = append(args, "-vf", videoFilter)
 			}
 			args = append(args,
 				"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
@@ -424,10 +455,10 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
 			}
 			filter := fmt.Sprintf(
-				"[0:v:0]bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1[main];"+
+				"[0:v:0]%s[main];"+
 					"[0:s:%d]%sformat=yuva420p[sub];"+
 					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
-				subIdx, subPtsChain,
+				videoFilter, subIdx, subPtsChain,
 			)
 			args = append(args,
 				"-filter_complex", filter,
@@ -435,8 +466,14 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
 			)
 		} else {
-			if hw != HW_VAAPI {
-				args = append(args, "-vf", "bwdif=mode=1:parity=auto:deint=interlaced,scale=w=trunc(ih*dar/2)*2:h=ih:flags=lanczos,setsar=1")
+			if hw == HW_VAAPI {
+				if cfg.VideoResolution == "720p" {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1,scale_vaapi=w=-2:h=720")
+				} else {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1")
+				}
+			} else {
+				args = append(args, "-vf", videoFilter)
 			}
 			args = append(args,
 				"-map", "0:v:0?",
@@ -451,6 +488,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 			"-c:v", "libx264",
 			"-preset", "ultrafast",
 			"-tune", "stillimage",
+			"-threads", "2",
 			"-b:v", "64k",
 			"-g", "25",
 			"-bf", "0",
@@ -483,11 +521,20 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 				"-g", "15",
 			)
 		default:
-			// Universal CPU fallback
+			// Universal CPU fallback with optimized preset and thread throttling
+			preset := cfg.VideoPreset
+			if preset == "" {
+				preset = "ultrafast"
+			}
+			cpuThreads := runtime.NumCPU()
+			if cpuThreads > 4 {
+				cpuThreads = 4
+			}
 			args = append(args,
 				"-c:v", "libx264",
-				"-preset", "veryfast",
+				"-preset", preset,
 				"-tune", "zerolatency",
+				"-threads", fmt.Sprintf("%d", cpuThreads),
 				"-b:v", bitrate,
 				"-maxrate", bitrate,
 				"-bufsize", bitrate,
