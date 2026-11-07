@@ -4830,17 +4830,6 @@ input:checked + .slider:before {
   text-overflow: ellipsis;
 }
 
-.stream-analyzer-btn {
-  font-weight: 600;
-  background: rgba(16, 185, 129, 0.12);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.35);
-}
-.stream-analyzer-btn:hover {
-  background: rgba(16, 185, 129, 0.25);
-  color: #fff;
-}
-
 /* Retro Teletext CRT Screen Overlay */
 .teletext-overlay {
   position: absolute;
