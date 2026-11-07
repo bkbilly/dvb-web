@@ -169,6 +169,56 @@
               </div>
             </div>
 
+            <!-- Real-Time Stream & Codec Analyzer HUD Overlay (Toggle with 'D') -->
+            <div id="stream-analyzer-overlay" class="stream-analyzer-overlay hidden">
+              <div class="sa-header">
+                <div class="sa-title">
+                  <span class="sa-icon">⚡</span>
+                  <strong>Stream & Codec Analyzer</strong>
+                  <span id="sa-mode-chip" class="sa-chip sa-chip-direct">Direct Stream</span>
+                </div>
+                <button class="sa-close-btn" onclick="toggleStreamAnalyzer(false)" title="Close (D or Esc)">✕</button>
+              </div>
+              <div class="sa-grid">
+                <div class="sa-card">
+                  <div class="sa-label">Pipeline Mode</div>
+                  <div class="sa-val" id="sa-val-mode">Direct (Passthrough)</div>
+                  <div class="sa-subval" id="sa-val-hw">GPU Bypassed (0% GPU/CPU)</div>
+                </div>
+                <div class="sa-card">
+                  <div class="sa-label">Video Broadcast / Filter</div>
+                  <div class="sa-val" id="sa-val-vcodec">H.264 (AVC)</div>
+                  <div class="sa-subval" id="sa-val-vfilter">Deint: None (Original Copy)</div>
+                </div>
+                <div class="sa-card">
+                  <div class="sa-label">Resolution & Framerate</div>
+                  <div class="sa-val" id="sa-val-res">1920x1080</div>
+                  <div class="sa-subval" id="sa-val-fps">Display: --x--</div>
+                </div>
+                <div class="sa-card">
+                  <div class="sa-label">Audio Codec & Track</div>
+                  <div class="sa-val" id="sa-val-acodec">AAC Stereo (2.0)</div>
+                  <div class="sa-subval" id="sa-val-atrack">Track 1 • 48 kHz</div>
+                </div>
+                <div class="sa-card">
+                  <div class="sa-label">Network Bitrate & Speed</div>
+                  <div class="sa-val" id="sa-val-bitrate">-- kbps</div>
+                  <div class="sa-subval" id="sa-val-speed">-- KB/s</div>
+                </div>
+                <div class="sa-card">
+                  <div class="sa-label">Dropped / Decoded Frames</div>
+                  <div class="sa-val" id="sa-val-frames">0 / 0 (0.0%)</div>
+                  <div class="sa-subval" id="sa-val-buffer">Buffer Ahead: 0.0s</div>
+                </div>
+              </div>
+              <div class="sa-footer-info">
+                <span id="sa-footer-channel">No Channel</span> •
+                <span id="sa-footer-tuner">Tuner 0</span> •
+                <span id="sa-footer-mux">-- MHz</span> •
+                <span id="sa-footer-client">HTML5 MSE</span>
+              </div>
+            </div>
+
             <!-- Retro Teletext Viewer Overlay (Toggle with 'T') -->
             <div id="teletext-overlay" class="teletext-overlay hidden">
               <div class="teletext-window">
@@ -260,6 +310,9 @@
                 <button id="btn-aspect-ratio" class="ctrl-btn aspect-btn" title="Select Aspect Ratio">16:9</button>
                 <div id="aspect-ratio-menu" class="track-menu hidden"></div>
               </div>
+
+              <!-- Stream & Codec Analyzer HUD Button -->
+              <button id="btn-stream-analyzer" class="ctrl-btn stream-analyzer-btn" title="Stream & Codec Analyzer HUD (D)" onclick="toggleStreamAnalyzer()">⚡ Stats</button>
 
               <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
             </div>
@@ -898,6 +951,7 @@
         <div class="shortcuts-section">
           <h4>🔍 Tools, Diagnostics & Features</h4>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>S</kbd></span><span class="shortcut-desc">Real-Time RF Signal Analyzer HUD</span></div>
+          <div class="shortcut-item"><span class="shortcut-keys"><kbd>D</kbd></span><span class="shortcut-desc">Stream & Codec Analyzer HUD</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>T</kbd></span><span class="shortcut-desc">Teletext Screen Viewer & Subtitles</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>[</kbd> / <kbd>]</kbd></span><span class="shortcut-desc">Adjust Subtitle Sync (-0.5s / +0.5s)</span></div>
           <div class="shortcut-item"><span class="shortcut-keys"><kbd>H</kbd></span><span class="shortcut-desc">HbbTV Interactive Broadcast Portal</span></div>

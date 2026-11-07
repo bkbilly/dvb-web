@@ -2509,6 +2509,197 @@ function toggleRFAnalyzer(force) {
 window.toggleRFAnalyzer = toggleRFAnalyzer;
 
 // ==========================================================
+// REAL-TIME STREAM & CODEC ANALYZER HUD
+// ==========================================================
+let streamAnalyzerTimer = null;
+
+function renderStreamAnalyzer() {
+  const overlay = document.getElementById('stream-analyzer-overlay');
+  if (!overlay || overlay.classList.contains('hidden')) return;
+
+  const ch = activeChannel;
+  const video = document.getElementById('tv-video');
+  const chip = document.getElementById('sa-mode-chip');
+  const valMode = document.getElementById('sa-val-mode');
+  const valHw = document.getElementById('sa-val-hw');
+  const valVcodec = document.getElementById('sa-val-vcodec');
+  const valVfilter = document.getElementById('sa-val-vfilter');
+  const valRes = document.getElementById('sa-val-res');
+  const valFps = document.getElementById('sa-val-fps');
+  const valAcodec = document.getElementById('sa-val-acodec');
+  const valAtrack = document.getElementById('sa-val-atrack');
+  const valBitrate = document.getElementById('sa-val-bitrate');
+  const valSpeed = document.getElementById('sa-val-speed');
+  const valFrames = document.getElementById('sa-val-frames');
+  const valBuffer = document.getElementById('sa-val-buffer');
+  const footerChannel = document.getElementById('sa-footer-channel');
+  const footerTuner = document.getElementById('sa-footer-tuner');
+  const footerMux = document.getElementById('sa-footer-mux');
+  const footerClient = document.getElementById('sa-footer-client');
+
+  let activeStream = null;
+  let activeTuner = null;
+  if (currentTuners && ch) {
+    for (const t of currentTuners) {
+      if (t.active_streams) {
+        const found = t.active_streams.find(s => s.channel_id === ch.id);
+        if (found) {
+          activeStream = found;
+          activeTuner = t;
+          break;
+        }
+      }
+      if (!activeTuner && t.status === 'active' && t.current_frequency === ch.frequency) {
+        activeTuner = t;
+      }
+    }
+  }
+
+  // 1. Pipeline Mode & Hardware Chip
+  const hwType = (activeStream && activeStream.hw_type) ? activeStream.hw_type.toLowerCase() : 'auto';
+  if (chip) {
+    chip.className = 'sa-chip';
+    if (hwType === 'direct') {
+      chip.classList.add('sa-chip-direct');
+      chip.textContent = 'Direct Stream';
+    } else if (hwType === 'nvenc') {
+      chip.classList.add('sa-chip-nvenc');
+      chip.textContent = 'NVIDIA NVENC';
+    } else if (hwType === 'vaapi') {
+      chip.classList.add('sa-chip-vaapi');
+      chip.textContent = 'Intel VA-API';
+    } else {
+      chip.classList.add('sa-chip-cpu');
+      chip.textContent = 'CPU (libx264)';
+    }
+  }
+
+  if (valMode) {
+    if (hwType === 'direct') {
+      valMode.textContent = 'Direct (Passthrough)';
+    } else if (hwType === 'nvenc') {
+      valMode.textContent = 'Hardware (NVENC)';
+    } else if (hwType === 'vaapi') {
+      valMode.textContent = 'Hardware (VA-API)';
+    } else {
+      valMode.textContent = 'Software (libx264)';
+    }
+  }
+
+  if (valHw) {
+    if (hwType === 'direct') {
+      valHw.textContent = 'GPU/CPU: Bypassed (~0% CPU)';
+    } else if (hwType === 'nvenc') {
+      valHw.textContent = 'GPU: NVIDIA NVENC (p1 zerolatency)';
+    } else if (hwType === 'vaapi') {
+      valHw.textContent = 'GPU: Intel/AMD VA-API (HW deint)';
+    } else {
+      valHw.textContent = 'CPU: Ultrafast (4 threads capped)';
+    }
+  }
+
+  // 2. Video Broadcast & Filter
+  const vcodec = (activeStream && activeStream.video_codec) ? activeStream.video_codec.toUpperCase() : 'H.264 (AVC)';
+  if (valVcodec) valVcodec.textContent = vcodec;
+  if (valVfilter) {
+    if (hwType === 'direct') {
+      valVfilter.textContent = 'Deint: None (Direct Copy)';
+    } else if (hwType === 'vaapi') {
+      valVfilter.textContent = 'Deint: deinterlace_vaapi';
+    } else {
+      valVfilter.textContent = 'Deint: bwdif (25 fps), bicubic';
+    }
+  }
+
+  // 3. Resolution & Display
+  if (video && video.videoWidth > 0) {
+    if (valRes) valRes.textContent = `${video.videoWidth}x${video.videoHeight}`;
+    if (valFps) valFps.textContent = `Display: ${video.clientWidth}x${video.clientHeight}`;
+  } else {
+    if (valRes) valRes.textContent = '1920x1080 (HD)';
+    if (valFps) valFps.textContent = video ? `Display: ${video.clientWidth}x${video.clientHeight}` : '--x--';
+  }
+
+  // 4. Audio Codec & Track
+  const aIdx = (activeStream && activeStream.audio_track !== undefined) ? activeStream.audio_track : currentAudioTrack;
+  const aTracks = (availableChannelTracks && availableChannelTracks.audio_tracks) ? availableChannelTracks.audio_tracks : [];
+  const curTrack = aTracks.find(t => t.index === aIdx) || aTracks[0];
+  const langStr = curTrack ? curTrack.language.toUpperCase() : 'DEF';
+  if (valAcodec) valAcodec.textContent = 'AAC Stereo (2.0)';
+  if (valAtrack) valAtrack.textContent = `Track ${aIdx + 1} (${langStr}) • 48 kHz`;
+
+  // 5. Network Bitrate & Speed (from mpegts statistics)
+  let speedText = '-- KB/s';
+  let bitrateText = '-- kbps';
+  if (player && player.statisticsInfo) {
+    if (player.statisticsInfo.speed > 0) {
+      speedText = `${player.statisticsInfo.speed.toFixed(1)} KB/s`;
+    }
+    if (player.statisticsInfo.currentBitrate > 0) {
+      bitrateText = `${player.statisticsInfo.currentBitrate.toFixed(0)} kbps`;
+    }
+  }
+  if (valBitrate) valBitrate.textContent = bitrateText;
+  if (valSpeed) valSpeed.textContent = speedText;
+
+  // 6. Dropped / Decoded Frames & Buffer
+  if (video) {
+    let dropped = 0;
+    let total = 0;
+    if (typeof video.getVideoPlaybackQuality === 'function') {
+      const q = video.getVideoPlaybackQuality();
+      dropped = q.droppedVideoFrames || 0;
+      total = q.totalVideoFrames || 0;
+    } else {
+      dropped = video.webkitDroppedFrameCount || 0;
+      total = video.webkitDecodedFrameCount || 0;
+    }
+    const dropPct = total > 0 ? ((dropped / total) * 100).toFixed(2) : '0.00';
+    if (valFrames) valFrames.textContent = `${dropped} / ${total} (${dropPct}%)`;
+
+    let bufferAhead = 0;
+    if (video.buffered && video.buffered.length > 0) {
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= video.currentTime && video.currentTime <= video.buffered.end(i)) {
+          bufferAhead = Math.max(0, video.buffered.end(i) - video.currentTime).toFixed(1);
+          break;
+        }
+      }
+    }
+    if (valBuffer) valBuffer.textContent = `Buffer Ahead: ${bufferAhead}s`;
+  }
+
+  // 7. Footer
+  if (footerChannel) footerChannel.textContent = ch ? `${ch.number}. ${ch.name}` : 'No Channel';
+  if (footerTuner) footerTuner.textContent = activeTuner ? activeTuner.name : 'Tuner 0';
+  if (footerMux) footerMux.textContent = ch ? `${(ch.frequency / 1000000).toFixed(1)} MHz` : '-- MHz';
+  if (footerClient) footerClient.textContent = 'HTML5 MSE (mpegts.js)';
+}
+
+function toggleStreamAnalyzer(force) {
+  const el = document.getElementById('stream-analyzer-overlay');
+  if (!el) return;
+  const wrapper = document.getElementById('video-wrapper');
+  if (wrapper && el.parentElement !== wrapper) {
+    wrapper.appendChild(el);
+  }
+  const show = typeof force === 'boolean' ? force : el.classList.contains('hidden');
+  el.classList.toggle('hidden', !show);
+
+  if (streamAnalyzerTimer) {
+    clearInterval(streamAnalyzerTimer);
+    streamAnalyzerTimer = null;
+  }
+
+  if (show) {
+    renderStreamAnalyzer();
+    streamAnalyzerTimer = setInterval(renderStreamAnalyzer, 1000);
+  }
+}
+window.toggleStreamAnalyzer = toggleStreamAnalyzer;
+window.renderStreamAnalyzer = renderStreamAnalyzer;
+
+// ==========================================================
 // TELETEXT VIEWER & SUBTITLES
 // ==========================================================
 let currentTeletextPage = 100;
@@ -2903,6 +3094,11 @@ function setupKeybindings() {
         toggleRFAnalyzer(false);
         return;
       }
+      const saOverlay = document.getElementById('stream-analyzer-overlay');
+      if (saOverlay && !saOverlay.classList.contains('hidden')) {
+        toggleStreamAnalyzer(false);
+        return;
+      }
       const manualSched = document.getElementById('manual-schedule-modal');
       if (manualSched && !manualSched.classList.contains('hidden')) {
         closeManualScheduleModal();
@@ -2968,6 +3164,9 @@ function setupKeybindings() {
     } else if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       toggleRFAnalyzer();
+    } else if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleStreamAnalyzer();
     } else if ((e.key === 't' || e.key === 'T') && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       toggleTeletext();

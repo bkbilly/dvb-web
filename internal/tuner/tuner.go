@@ -69,12 +69,28 @@ type TunerStatus struct {
 	CurrentFrequency int64                `json:"current_frequency"`
 	CurrentChannel   string               `json:"current_channel"`
 	ActiveChannels   []string             `json:"active_channels,omitempty"`
+	ActiveStreams    []ActiveStreamInfo   `json:"active_streams,omitempty"`
 	Enabled          bool                 `json:"enabled"`
 	Viewers          []*ViewerSession     `json:"viewers"`
 	IsMock           bool                 `json:"is_mock"`
 	IsBDA            bool                 `json:"is_bda,omitempty"`
 	Signal           *SignalInfo          `json:"signal,omitempty"`
 	ActiveRecording  *ActiveRecordingInfo `json:"active_recording,omitempty"`
+}
+
+type ActiveStreamInfo struct {
+	StreamKey       string `json:"stream_key"`
+	ChannelID       int64  `json:"channel_id"`
+	ChannelName     string `json:"channel_name"`
+	ServiceID       int    `json:"service_id"`
+	HWType          string `json:"hw_type"` // "direct", "nvenc", "vaapi", "v4l2m2m", "cpu"
+	VideoCodec      string `json:"video_codec,omitempty"`
+	VideoBitrate    string `json:"video_bitrate,omitempty"`
+	VideoPreset     string `json:"video_preset,omitempty"`
+	VideoResolution string `json:"video_resolution,omitempty"`
+	AudioTrack      int    `json:"audio_track"`
+	SubtitleTrack   int    `json:"subtitle_track"`
+	ViewerCount     int    `json:"viewer_count"`
 }
 
 type TunerConflictError struct {
@@ -92,15 +108,22 @@ func (e *TunerConflictError) Error() string {
 
 // ChannelStream represents an active transcoded stream for a specific channel within a multiplex
 type ChannelStream struct {
-	ChannelID   int64
-	ServiceID   int
-	ChannelName string
-	pipeline    *transcoder.Pipeline
-	pipeWriter  io.WriteCloser
-	tsQueue     chan []byte
-	subscribers map[string]chan []byte
-	cancel      context.CancelFunc
-	mu          sync.Mutex
+	ChannelID       int64
+	ServiceID       int
+	ChannelName     string
+	AudioTrack      int
+	SubtitleTrack   int
+	HWType          string
+	VideoCodec      string
+	VideoBitrate    string
+	VideoPreset     string
+	VideoResolution string
+	pipeline        *transcoder.Pipeline
+	pipeWriter      io.WriteCloser
+	tsQueue         chan []byte
+	subscribers     map[string]chan []byte
+	cancel          context.CancelFunc
+	mu              sync.Mutex
 }
 
 func (cs *ChannelStream) WriteTS(chunk []byte) {
@@ -341,6 +364,30 @@ func (p *Pool) GetStatus() []TunerStatus {
 			recCopy = &c
 		}
 
+		var activeStreams []ActiveStreamInfo
+		for key, cs := range t.channels {
+			cs.mu.Lock()
+			hw := cs.HWType
+			if cs.pipeline != nil {
+				hw = string(cs.pipeline.HWType())
+			}
+			activeStreams = append(activeStreams, ActiveStreamInfo{
+				StreamKey:       key,
+				ChannelID:       cs.ChannelID,
+				ChannelName:     cs.ChannelName,
+				ServiceID:       cs.ServiceID,
+				HWType:          hw,
+				VideoCodec:      cs.VideoCodec,
+				VideoBitrate:    cs.VideoBitrate,
+				VideoPreset:     cs.VideoPreset,
+				VideoResolution: cs.VideoResolution,
+				AudioTrack:      cs.AudioTrack,
+				SubtitleTrack:   cs.SubtitleTrack,
+				ViewerCount:     len(cs.subscribers),
+			})
+			cs.mu.Unlock()
+		}
+
 		statuses = append(statuses, TunerStatus{
 			ID:               t.ID,
 			Name:             t.Name,
@@ -349,6 +396,7 @@ func (p *Pool) GetStatus() []TunerStatus {
 			CurrentFrequency: t.currentFrequency,
 			CurrentChannel:   chDisplay,
 			ActiveChannels:   activeChNames,
+			ActiveStreams:    activeStreams,
 			Enabled:          t.Enabled,
 			Viewers:          viewersList,
 			IsMock:           t.IsMock,
@@ -578,12 +626,19 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 	}
 
 	cs := &ChannelStream{
-		ChannelID:   channel.ID,
-		ServiceID:   channel.ServiceID,
-		ChannelName: channel.Name,
-		pipeline:    pipeline,
-		pipeWriter:  pipeline.Stdin(),
-		subscribers: make(map[string]chan []byte),
+		ChannelID:       channel.ID,
+		ServiceID:       channel.ServiceID,
+		ChannelName:     channel.Name,
+		AudioTrack:      audioTrack,
+		SubtitleTrack:   subTrack,
+		HWType:          string(pipeline.HWType()),
+		VideoCodec:      videoCodec,
+		VideoBitrate:    cfg.VideoBitrate,
+		VideoPreset:     cfg.VideoPreset,
+		VideoResolution: cfg.VideoResolution,
+		pipeline:        pipeline,
+		pipeWriter:      pipeline.Stdin(),
+		subscribers:     make(map[string]chan []byte),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
