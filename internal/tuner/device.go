@@ -83,7 +83,7 @@ func pollAndReadDVR(ctx context.Context, dvrFD int, buf []byte) (int, error) {
 
 	n, err := syscall.Read(dvrFD, buf)
 	if err != nil {
-		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || err == syscall.EINTR {
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || err == syscall.EINTR || err == syscall.EOVERFLOW {
 			return 0, nil
 		}
 		return 0, err

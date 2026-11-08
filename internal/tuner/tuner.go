@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"dvb-web/internal/db"
@@ -918,6 +919,19 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 		go func() {
 			defer close(tsQueue)
 			defer close(parseQueue)
+
+			// Drain any stale/overflowed packets that accumulated while FFmpeg/NVENC was initializing
+			drainBuf := make([]byte, 64*1024)
+			for {
+				n, err := syscall.Read(dvrFD, drainBuf)
+				if n <= 0 {
+					if err == syscall.EOVERFLOW {
+						continue
+					}
+					break
+				}
+			}
+
 			readBuf := make([]byte, 188*256) // 48KB chunk
 			var leftover []byte
 
@@ -930,7 +944,16 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 
 				n, err := pollAndReadDVR(tsCtx, dvrFD, readBuf)
 				if err != nil {
-					return
+					if tsCtx.Err() != nil {
+						return
+					}
+					if err == syscall.EBADF || err == syscall.ENODEV {
+						log.Printf("[TunerPool] Tuner %d DVR device closed: %v", t.ID, err)
+						return
+					}
+					log.Printf("[TunerPool] Tuner %d DVR read error: %v (retrying...)", t.ID, err)
+					time.Sleep(20 * time.Millisecond)
+					continue
 				}
 				if n <= 0 {
 					continue

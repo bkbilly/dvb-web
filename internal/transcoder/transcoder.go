@@ -378,8 +378,9 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	// Live MPEG-TS input options to ensure PAT/PMT program maps are properly discovered
 	if !cfg.IsMock {
 		args = append(args,
-			"-analyzeduration", "1500000",
-			"-probesize", "2500000",
+			"-f", "mpegts",
+			"-analyzeduration", "3000000",
+			"-probesize", "5000000",
 			"-fpsprobesize", "0",
 			"-err_detect", "ignore_err",
 			"-fflags", "+genpts+nobuffer",

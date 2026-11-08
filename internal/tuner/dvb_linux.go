@@ -404,7 +404,7 @@ func readChannelsFromTS(dvrFD int, freq int64, deliverySys string, nextNum *int)
 	for time.Now().Before(deadline) {
 		n, err := syscall.Read(dvrFD, buf)
 		if err != nil {
-			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || err == syscall.EINTR || err == syscall.EOVERFLOW {
 				time.Sleep(20 * time.Millisecond)
 				continue
 			}

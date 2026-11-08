@@ -1139,7 +1139,33 @@ function startStream(channel) {
     video.src = hlsUrl;
     video.muted = false;
     video.load();
-    video.play().catch(e => console.log('[Player] HLS autoplay notice:', e));
+    const p = video.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(e => {
+        if (e.name === 'NotAllowedError') {
+          console.warn('[Player] HLS autoplay blocked, muting to allow playback');
+          video.muted = true;
+          video.play().catch(err => console.error('[Player] Muted HLS playback failed:', err));
+          showToast('🔇 Audio muted by browser autoplay policy. Click volume to unmute.', 'info');
+        } else {
+          console.log('[Player] HLS autoplay notice:', e);
+        }
+      });
+    }
+
+    let hlsWatchdog = setTimeout(() => {
+      if (activeChannel && activeChannel.id === channel.id && !hasStartedPlaying) {
+        console.warn('[Player] HLS buffering timed out (12s)');
+        handleStreamStopped('HLS stream tuning timed out. Broadcast stream unavailable.', true);
+      }
+    }, 12000);
+    const clearHlsWatchdog = () => {
+      if (hlsWatchdog) {
+        clearTimeout(hlsWatchdog);
+        hlsWatchdog = null;
+      }
+    };
+    video.addEventListener('playing', clearHlsWatchdog, { once: true });
   };
 
   // Direct native HLS for iOS / iPadOS Safari (which stutters or drops audio on continuous MSE MPEG-TS)
@@ -1168,8 +1194,19 @@ function startStream(channel) {
     player.attachMediaElement(video);
     player.load();
 
+    let hasStartedPlaying = false;
+    const markPlaying = () => {
+      hasStartedPlaying = true;
+      if (streamWatchdog) {
+        clearTimeout(streamWatchdog);
+        streamWatchdog = null;
+      }
+    };
+
+    video.addEventListener('playing', markPlaying, { once: true });
+
     let streamWatchdog = setTimeout(() => {
-      if (player && activeChannel && activeChannel.id === channel.id && video.paused && (!video.buffered || video.buffered.length === 0)) {
+      if (player && activeChannel && activeChannel.id === channel.id && !hasStartedPlaying) {
         console.warn('[Player] Initial stream buffering timed out (12s)');
         if (canPlayHLS) {
           showToast('⚠️ Stream buffering stalled; switching to HLS fallback...', 'info');
@@ -1213,20 +1250,40 @@ function startStream(channel) {
     });
 
     player.on(mpegts.Events.MEDIA_INFO, () => {
-      clearWatchdog();
       standbyOverlay.classList.add('hidden');
       updateHeaderTunerBadge();
       video.muted = false;
-      video.play().catch(e => console.log('[Player] Autoplay error:', e));
+      const p = video.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(e => {
+          if (e.name === 'NotAllowedError') {
+            console.warn('[Player] Autoplay blocked, muting to allow playback');
+            video.muted = true;
+            video.play().catch(err => console.error('[Player] Muted playback failed:', err));
+            showToast('🔇 Audio muted by browser autoplay policy. Click volume to unmute.', 'info');
+          } else {
+            console.log('[Player] Autoplay error:', e);
+          }
+        });
+      }
     });
 
-    player.play().catch(e => {
-      console.log('[Player] Play error:', e);
-    });
+    const p = player.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(e => {
+        if (e.name === 'NotAllowedError') {
+          console.warn('[Player] Autoplay blocked, muting video');
+          video.muted = true;
+          player.play().catch(err => console.error('[Player] Muted player.play failed:', err));
+        } else {
+          console.log('[Player] Play error:', e);
+        }
+      });
+    }
 
     if (currentSubTrack >= 0) {
       setTimeout(() => {
-        if (player && currentSubTrack >= 0 && video.paused && (!video.buffered || video.buffered.length === 0)) {
+        if (player && currentSubTrack >= 0 && !hasStartedPlaying) {
           showToast('⚠️ Subtitle stream timed out; switching to live stream', 'warning');
           currentSubTrack = -1;
           renderTrackMenus();
