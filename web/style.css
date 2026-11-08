@@ -1899,15 +1899,21 @@ body {
 /* ========================================================== */
 /* TAB 3: SETTINGS                                            */
 /* ========================================================== */
+#tab-settings {
+  overflow-x: hidden;
+  width: 100%;
+}
+
 .settings-container {
   flex: 1;
   padding: 1.5rem 2rem;
   overflow-y: auto;
+  overflow-x: hidden;
   max-width: 1360px;
   width: 100%;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 1.5rem;
   align-items: start;
 }
@@ -1916,10 +1922,12 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  min-width: 0;
 }
 
 .settings-col.full-width {
   grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .channel-manager-card .channel-admin-table {
@@ -1933,6 +1941,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 1.25rem;
+  min-width: 0;
 }
 
 .card-header {
@@ -2111,6 +2120,8 @@ input:checked + .slider:before {
   border: 1px solid var(--border);
   transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
   user-select: none;
+  min-width: 0;
+  gap: 0.5rem;
 }
 
 .admin-channel-row.dragging {
@@ -2131,27 +2142,294 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  min-width: 0;
+  flex: 1;
 }
 
 .admin-ch-info {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  flex: 1;
 }
 
 .admin-ch-name {
   font-size: 0.9rem;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .admin-ch-sub {
   font-size: 0.75rem;
   color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-ch-logo-wrap {
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.admin-ch-logo-wrap:hover {
+  border-color: var(--accent);
+  transform: scale(1.06);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.4);
+}
+
+.admin-ch-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 2px;
+}
+
+.admin-ch-no-logo {
+  font-size: 1.1rem;
+  opacity: 0.45;
+  user-select: none;
+}
+
+.admin-ch-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.admin-logo-upload-btn {
+  margin: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+.btn-danger-hover:hover {
+  background-color: var(--danger) !important;
+  border-color: var(--danger) !important;
+  color: #fff !important;
+}
+
+/* Logo Search Modal (tv-logo integration) */
+.logo-search-modal-card {
+  max-width: 650px;
+  width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.logo-search-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overflow-y: auto;
+  max-height: 58vh;
+  padding: 0.25rem 0;
+}
+
+.logo-modal-top-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  flex-wrap: wrap;
+}
+
+.logo-modal-preview-box {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.logo-modal-preview-img-wrap {
+  width: 46px;
+  height: 46px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.logo-modal-preview-img-wrap img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  padding: 2px;
+}
+
+.logo-modal-preview-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.logo-modal-ch-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.logo-modal-status-text {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.logo-modal-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.logo-modal-upload-btn {
+  margin: 0;
+  cursor: pointer;
+}
+
+.logo-modal-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0.1rem 0;
+}
+
+.logo-modal-divider::before,
+.logo-modal-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px solid var(--border);
+}
+
+.logo-modal-divider span {
+  padding: 0 0.75rem;
+}
+
+.logo-search-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+  padding-bottom: 0.5rem;
+  z-index: 2;
+}
+
+.logo-search-input {
+  flex: 1;
+}
+
+.logo-country-select {
+  width: 140px;
+}
+
+.logo-search-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 0.75rem;
+  min-height: 100px;
+}
+
+.logo-card-item {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.logo-card-item:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.logo-card-img-wrap {
+  width: 64px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.5rem;
+}
+
+.logo-card-img-wrap img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.logo-card-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.2;
+}
+
+.logo-card-country {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+.logo-search-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: 2rem 1rem;
+}
+
+.logo-search-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--text-muted);
+  padding: 2rem 1rem;
+  font-size: 0.9rem;
 }
 
 /* External Players & Media Servers Integration */
 .integration-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 1.25rem;
   margin-top: 1rem;
 }
@@ -2161,6 +2439,7 @@ input:checked + .slider:before {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 0.85rem 1rem;
+  min-width: 0;
 }
 
 .integration-title {
@@ -2186,7 +2465,7 @@ input:checked + .slider:before {
 
 .copy-input-group .form-input {
   flex: 1;
-  min-width: 240px;
+  min-width: 0;
 }
 
 .code-font {
@@ -2429,18 +2708,14 @@ input:checked + .slider:before {
 
 .scan-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 1rem;
 }
 
 .scan-form-grid-3 {
-  grid-template-columns: 1fr 1fr 1fr;
-}
-
-@media (max-width: 640px) {
-  .scan-form-grid, .scan-form-grid-3 {
-    grid-template-columns: 1fr;
-  }
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 1rem;
 }
 
 .scan-form-group {
@@ -2978,6 +3253,17 @@ input:checked + .slider:before {
     margin-left: 0;
     padding: 0.25rem 0 0.1rem 0;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  /* Settings Tab: Switch to single column on tablet/narrower screens */
+  .settings-container {
+    grid-template-columns: 1fr;
+    padding: 1rem 1.25rem;
+    gap: 1.25rem;
+  }
+
+  .settings-col.full-width {
+    grid-column: 1;
   }
 }
 

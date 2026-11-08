@@ -28,6 +28,7 @@ import (
 	"dvb-web/internal/db"
 	"dvb-web/internal/epg"
 	"dvb-web/internal/hls"
+	"dvb-web/internal/logos"
 	"dvb-web/internal/recorder"
 	"dvb-web/internal/transcoder"
 	"dvb-web/internal/tuner"
@@ -47,6 +48,7 @@ type Server struct {
 	epgParser  *epg.Parser
 	recorder   *recorder.Recorder
 	hlsMgr     *hls.Manager
+	logosSvc   *logos.Service
 	wsClients  map[*wsClient]bool
 	wsMu       sync.RWMutex
 }
@@ -79,6 +81,7 @@ func NewServer(database *db.Database, pool *tuner.Pool, detector *transcoder.Det
 		epgParser:  epgP,
 		recorder:   rec,
 		hlsMgr:     hls.NewManager(pool, database),
+		logosSvc:   logos.NewService(database.DataDir()),
 		wsClients:  make(map[*wsClient]bool),
 	}
 	s.startSignalMonitor()
@@ -101,6 +104,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/tuners/", s.handleTunerAction)
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
+	mux.HandleFunc("/api/logos/search", s.handleLogoSearch)
+	mux.HandleFunc("/api/logos/countries", s.handleLogoCountries)
+	mux.HandleFunc("/api/channels/logos/autofind", s.handleBatchAutoFindLogos)
 	mux.HandleFunc("/api/logos/", s.handleLogoStatic)
 	mux.HandleFunc("/api/hbbtv/", s.handleHbbtvProxy)
 	mux.HandleFunc("/api/hbbtv/proxy", s.handleHbbtvProxy)
@@ -244,10 +250,26 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle Logo Upload: POST /api/channels/{id}/logo
-	if len(parts) > 1 && parts[1] == "logo" && r.Method == http.MethodPost {
-		s.handleLogoUpload(w, r, id)
-		return
+	// Handle Logo Routes: /api/channels/{id}/logo...
+	if len(parts) > 1 && parts[1] == "logo" {
+		if len(parts) > 2 {
+			if parts[2] == "set" && r.Method == http.MethodPost {
+				s.handleSetChannelLogo(w, r, id)
+				return
+			}
+			if parts[2] == "autofind" && r.Method == http.MethodPost {
+				s.handleChannelAutoFindLogo(w, r, id)
+				return
+			}
+		}
+		if r.Method == http.MethodPost {
+			s.handleLogoUpload(w, r, id)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			s.handleClearChannelLogo(w, r, id)
+			return
+		}
 	}
 
 	// Handle Channel Tracks: GET /api/channels/{id}/tracks
@@ -278,6 +300,7 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogoUpload(w http.ResponseWriter, r *http.Request, channelID int64) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	err := r.ParseMultipartForm(10 << 20) // 10 MB max
 	if err != nil {
 		jsonError(w, "file too large or invalid multipart", http.StatusBadRequest)
@@ -321,7 +344,230 @@ func (s *Server) handleLogoUpload(w http.ResponseWriter, r *http.Request, channe
 	jsonResponse(w, http.StatusOK, map[string]string{"logo_url": logoURL})
 }
 
+func (s *Server) handleClearChannelLogo(w http.ResponseWriter, r *http.Request, channelID int64) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := s.db.UpdateChannelLogo(channelID, ""); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "logo cleared", "logo_url": ""})
+}
+
+func (s *Server) handleSetChannelLogo(w http.ResponseWriter, r *http.Request, channelID int64) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Source   string `json:"source"`
+		Download bool   `json:"download"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	logoURL := strings.TrimSpace(req.Source)
+	if logoURL == "" {
+		if err := s.db.UpdateChannelLogo(channelID, ""); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"logo_url": ""})
+		return
+	}
+
+	// Always download remote or tv-logo images locally for Plex/Jellyfin LAN reliability
+	if req.Download || !strings.HasPrefix(logoURL, "/api/logos/") {
+		localURL, err := s.logosSvc.DownloadAndSaveLogo(r.Context(), channelID, logoURL)
+		if err != nil {
+			jsonError(w, "failed to download and save logo: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		logoURL = localURL
+	}
+
+	if err := s.db.UpdateChannelLogo(channelID, logoURL); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{"logo_url": logoURL})
+}
+
+func (s *Server) handleChannelAutoFindLogo(w http.ResponseWriter, r *http.Request, channelID int64) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	ch, err := s.db.GetChannel(channelID)
+	if err != nil {
+		jsonError(w, "channel not found", http.StatusNotFound)
+		return
+	}
+
+	countryHint := r.URL.Query().Get("country")
+	if countryHint == "" {
+		countryHint = "greece"
+	}
+
+	match, err := s.logosSvc.AutoFindBestLogo(r.Context(), ch.Name, countryHint)
+	if err != nil {
+		jsonError(w, "autofind failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if match == nil {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"found":   false,
+			"message": "No matching logo found",
+		})
+		return
+	}
+
+	localURL, err := s.logosSvc.DownloadAndSaveLogo(r.Context(), channelID, match.RawURL)
+	if err != nil {
+		jsonError(w, "failed to download matched logo: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.db.UpdateChannelLogo(channelID, localURL); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"found":    true,
+		"logo_url": localURL,
+		"match":    match,
+	})
+}
+
+func (s *Server) handleBatchAutoFindLogos(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	channels, err := s.db.ListChannels()
+	if err != nil {
+		jsonError(w, "failed to list channels", http.StatusInternalServerError)
+		return
+	}
+
+	countryHint := r.URL.Query().Get("country")
+	if countryHint == "" {
+		countryHint = "greece"
+	}
+	force := r.URL.Query().Get("force") == "true"
+
+	matchedCount := 0
+	skippedCount := 0
+	failedCount := 0
+
+	type resultItem struct {
+		ChannelID   int64  `json:"channel_id"`
+		ChannelName string `json:"channel_name"`
+		LogoURL     string `json:"logo_url,omitempty"`
+		Found       bool   `json:"found"`
+	}
+	var results []resultItem
+
+	for _, ch := range channels {
+		if ch.LogoURL != "" && !force {
+			skippedCount++
+			continue
+		}
+
+		match, err := s.logosSvc.AutoFindBestLogo(r.Context(), ch.Name, countryHint)
+		if err != nil || match == nil {
+			failedCount++
+			results = append(results, resultItem{
+				ChannelID:   ch.ID,
+				ChannelName: ch.Name,
+				Found:       false,
+			})
+			continue
+		}
+
+		localURL, err := s.logosSvc.DownloadAndSaveLogo(r.Context(), ch.ID, match.RawURL)
+		if err != nil {
+			failedCount++
+			results = append(results, resultItem{
+				ChannelID:   ch.ID,
+				ChannelName: ch.Name,
+				Found:       false,
+			})
+			continue
+		}
+
+		if err := s.db.UpdateChannelLogo(ch.ID, localURL); err != nil {
+			failedCount++
+			continue
+		}
+
+		matchedCount++
+		results = append(results, resultItem{
+			ChannelID:   ch.ID,
+			ChannelName: ch.Name,
+			LogoURL:     localURL,
+			Found:       true,
+		})
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"matched": matchedCount,
+		"skipped": skippedCount,
+		"failed":  failedCount,
+		"results": results,
+	})
+}
+
+func (s *Server) handleLogoSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	query := r.URL.Query().Get("q")
+	country := r.URL.Query().Get("country")
+
+	results, err := s.logosSvc.Search(r.Context(), query, country, 40)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, results)
+}
+
+func (s *Server) handleLogoCountries(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	countries, err := s.logosSvc.GetCountries(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, countries)
+}
+
 func (s *Server) handleLogoStatic(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.URL.Path == "/api/logos/search" {
+		s.handleLogoSearch(w, r)
+		return
+	}
+	if r.URL.Path == "/api/logos/countries" {
+		s.handleLogoCountries(w, r)
+		return
+	}
 	filename := strings.TrimPrefix(r.URL.Path, "/api/logos/")
 	filePath := filepath.Join(s.db.DataDir(), "logos", filepath.Clean(filename))
 	http.ServeFile(w, r, filePath)

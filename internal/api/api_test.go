@@ -514,3 +514,61 @@ func TestAPIDirectStreamMode(t *testing.T) {
 		t.Errorf("Expected subTrack 0 to be accepted, got %d", actualSub2)
 	}
 }
+
+func TestLogoAPIEndpoints(t *testing.T) {
+	server, database, _, _, tmpDir := setupTestServer(t)
+	defer os.RemoveAll(tmpDir)
+
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux, "")
+
+	// 1. Set channel logo via /api/channels/1/logo/set with a local path
+	setBody := `{"source": "/api/logos/test-logo.png", "download": false}`
+	req := httptest.NewRequest(http.MethodPost, "/api/channels/1/logo/set", bytes.NewBufferString(setBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from logo set, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify database was updated
+	ch, err := database.GetChannel(1)
+	if err != nil {
+		t.Fatalf("Failed to get channel 1: %v", err)
+	}
+	if ch.LogoURL != "/api/logos/test-logo.png" {
+		t.Errorf("Expected logo_url to be /api/logos/test-logo.png, got %s", ch.LogoURL)
+	}
+
+	// 2. Verify M3U playlist contains tvg-logo
+	m3uReq := httptest.NewRequest(http.MethodGet, "/api/playlist.m3u", nil)
+	m3uW := httptest.NewRecorder()
+	mux.ServeHTTP(m3uW, m3uReq)
+
+	if m3uW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from M3U playlist, got %d", m3uW.Code)
+	}
+	m3uContent := m3uW.Body.String()
+	if !bytes.Contains([]byte(m3uContent), []byte("tvg-logo=\"http://example.com/api/logos/test-logo.png\"")) {
+		t.Errorf("Expected M3U to contain tvg-logo with base URL, got:\n%s", m3uContent)
+	}
+
+	// 3. Clear logo via DELETE /api/channels/1/logo
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/channels/1/logo", nil)
+	delW := httptest.NewRecorder()
+	mux.ServeHTTP(delW, delReq)
+
+	if delW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from logo delete, got %d: %s", delW.Code, delW.Body.String())
+	}
+
+	chCleared, err := database.GetChannel(1)
+	if err != nil {
+		t.Fatalf("Failed to get channel 1: %v", err)
+	}
+	if chCleared.LogoURL != "" {
+		t.Errorf("Expected logo_url to be cleared, got %s", chCleared.LogoURL)
+	}
+}

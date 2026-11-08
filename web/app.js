@@ -1393,7 +1393,7 @@ let isMouseOverOSD = false;
 function isOverlayOrModalOpen() {
   const isFsChannelsOpen = !!document.fullscreenElement && !!document.getElementById('video-wrapper')?.classList.contains('fs-channels-open');
   if (isFsChannelsOpen) return true;
-  const ids = ['shortcuts-modal', 'hbbtv-modal', 'teletext-overlay', 'rf-analyzer-overlay', 'epg-modal', 'conflict-modal'];
+  const ids = ['shortcuts-modal', 'hbbtv-modal', 'teletext-overlay', 'rf-analyzer-overlay', 'epg-modal', 'conflict-modal', 'logo-search-modal'];
   return ids.some(id => {
     const el = document.getElementById(id);
     return el && !el.classList.contains('hidden');
@@ -3363,6 +3363,11 @@ function setupKeybindings() {
         closeRecordingPlayer();
         return;
       }
+      const logoModal = document.getElementById('logo-search-modal');
+      if (logoModal && !logoModal.classList.contains('hidden')) {
+        closeLogoSearchModal();
+        return;
+      }
       closeEPGModal();
       closeConflictModal();
       return;
@@ -5132,12 +5137,19 @@ function renderAdminChannelList() {
     row.dataset.channelId = c.id;
     row.dataset.index = index;
 
+    const logoHtml = c.logo_url ?
+      `<img src="${escapeHtml(c.logo_url)}" alt="${escapeHtml(c.name)}" class="admin-ch-logo" title="Channel Logo">` :
+      `<div class="admin-ch-no-logo" title="No logo assigned">🖼️</div>`;
+
     row.innerHTML = `
       <div class="admin-ch-left">
         <span class="drag-handle" title="Drag to reorder">☰</span>
+        <div class="admin-ch-logo-wrap" onclick="openLogoSearchModal(${c.id})" title="Click to search / change logo">
+          ${logoHtml}
+        </div>
         <span class="badge ch-badge">${c.number}</span>
         <div class="admin-ch-info">
-          <strong class="admin-ch-name">${c.name}</strong>
+          <strong class="admin-ch-name">${escapeHtml(c.name)}</strong>
           <div class="admin-ch-sub">${(c.frequency / 1000000).toFixed(1)} MHz (SID: ${c.service_id})</div>
         </div>
       </div>
@@ -5278,6 +5290,258 @@ window.deleteChannel = async function(channelId) {
   await loadChannels();
 };
 
+let currentLogoSearchChannelId = null;
+let logoSearchCountriesLoaded = false;
+
+window.updateLogoModalPreview = function(channelId) {
+  const ch = channels.find(c => c.id === channelId);
+  const previewWrap = document.getElementById('logo-modal-preview-img-wrap');
+  const chNameEl = document.getElementById('logo-modal-ch-name');
+  const statusEl = document.getElementById('logo-modal-status-text');
+  const removeBtn = document.getElementById('btn-modal-remove');
+  if (!chNameEl || !statusEl) return;
+
+  chNameEl.textContent = ch ? ch.name : 'Channel';
+
+  if (ch && ch.logo_url) {
+    if (previewWrap) {
+      previewWrap.innerHTML = `<img src="${escapeHtml(ch.logo_url)}" alt="${escapeHtml(ch.name)}">`;
+    }
+    statusEl.textContent = 'Assigned (cached locally)';
+    if (removeBtn) removeBtn.classList.remove('hidden');
+  } else {
+    if (previewWrap) {
+      previewWrap.innerHTML = '<span style="font-size:1.4rem; opacity:0.4;">🖼️</span>';
+    }
+    statusEl.textContent = 'No logo assigned';
+    if (removeBtn) removeBtn.classList.add('hidden');
+  }
+};
+
+window.loadLogoSearchCountries = async function() {
+  if (logoSearchCountriesLoaded) return;
+  const select = document.getElementById('logo-search-country');
+  if (!select) return;
+
+  try {
+    const res = await fetch('/api/logos/countries');
+    if (res.ok) {
+      const countries = await res.json() || [];
+      if (countries.length > 0) {
+        select.innerHTML = '<option value="all">🌐 All Countries</option>';
+        countries.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c;
+          let label = c.replace(/[-_]/g, ' ');
+          label = label.charAt(0).toUpperCase() + label.slice(1);
+          if (c === 'greece') label = '🇬🇷 Greece';
+          else if (c === 'united-kingdom') label = '🇬🇧 United Kingdom';
+          else if (c === 'united-states') label = '🇺🇸 United States';
+          else if (c === 'germany') label = '🇩🇪 Germany';
+          else if (c === 'france') label = '🇫🇷 France';
+          else if (c === 'italy') label = '🇮🇹 Italy';
+          else if (c === 'spain') label = '🇪🇸 Spain';
+          opt.textContent = label;
+          if (c === 'greece') opt.selected = true;
+          select.appendChild(opt);
+        });
+        logoSearchCountriesLoaded = true;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load logo countries:', err);
+  }
+};
+
+window.openLogoSearchModal = function(channelId) {
+  currentLogoSearchChannelId = channelId;
+  const modal = document.getElementById('logo-search-modal');
+  const title = document.getElementById('logo-search-modal-title');
+  const input = document.getElementById('logo-search-input');
+  const fileInput = document.getElementById('logo-modal-file-input');
+  const resultsContainer = document.getElementById('logo-search-results');
+  if (!modal || !input) return;
+
+  if (fileInput) fileInput.value = '';
+
+  const ch = channels.find(c => c.id === channelId);
+  if (ch) {
+    title.textContent = `🖼️ Channel Logo — ${ch.name}`;
+    input.value = ch.name.replace(/\b(HD|SD|UHD|4K|FHD|TV|BEYOND)\b/gi, '').trim() || ch.name;
+  } else {
+    title.textContent = '🖼️ Channel Logo';
+    input.value = '';
+  }
+
+  window.updateLogoModalPreview(channelId);
+
+  if (resultsContainer) resultsContainer.innerHTML = '';
+  modal.classList.remove('hidden');
+  window.loadLogoSearchCountries();
+
+  input.focus();
+  input.select();
+
+  window.executeLogoSearch();
+};
+
+window.closeLogoSearchModal = function() {
+  const modal = document.getElementById('logo-search-modal');
+  if (modal) modal.classList.add('hidden');
+  currentLogoSearchChannelId = null;
+};
+
+window.executeLogoSearch = async function() {
+  const input = document.getElementById('logo-search-input');
+  const countrySelect = document.getElementById('logo-search-country');
+  const resultsContainer = document.getElementById('logo-search-results');
+  const loading = document.getElementById('logo-search-loading');
+  if (!input || !resultsContainer) return;
+
+  const q = input.value.trim();
+  const country = countrySelect ? countrySelect.value : 'all';
+
+  if (!q) {
+    resultsContainer.innerHTML = '<div class="logo-search-empty">Please enter a channel name to search.</div>';
+    return;
+  }
+
+  if (loading) loading.classList.remove('hidden');
+  resultsContainer.innerHTML = '';
+
+  try {
+    const res = await fetch(`/api/logos/search?q=${encodeURIComponent(q)}&country=${encodeURIComponent(country)}`);
+    if (!res.ok) throw new Error('Search failed');
+    const items = await res.json() || [];
+
+    if (items.length === 0) {
+      resultsContainer.innerHTML = `<div class="logo-search-empty">No logos found for "${escapeHtml(q)}" in ${country === 'all' ? 'any country' : escapeHtml(country)}. Try changing country or keywords.</div>`;
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    items.forEach(item => {
+      const card = document.createElement('div');
+      card.className = 'logo-card-item';
+      card.title = `Apply ${item.name} (${item.country_display})`;
+      card.onclick = () => window.selectLogoFromSearch(currentLogoSearchChannelId, item.raw_url || item.path);
+
+      card.innerHTML = `
+        <div class="logo-card-img-wrap">
+          <img src="${escapeHtml(item.preview_url)}" alt="${escapeHtml(item.name)}" loading="lazy" onerror="this.onerror=null; this.src='${escapeHtml(item.raw_url)}';">
+        </div>
+        <div class="logo-card-name">${escapeHtml(item.name)}</div>
+        <div class="logo-card-country">${escapeHtml(item.country_display)}</div>
+      `;
+      fragment.appendChild(card);
+    });
+    resultsContainer.appendChild(fragment);
+  } catch (err) {
+    resultsContainer.innerHTML = `<div class="logo-search-empty">⚠️ Error searching logos: ${escapeHtml(err.message)}</div>`;
+  } finally {
+    if (loading) loading.classList.add('hidden');
+  }
+};
+
+window.selectLogoFromSearch = async function(channelId, source) {
+  if (!channelId || !source) return;
+  try {
+    const res = await fetch(`/api/channels/${channelId}/logo/set`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: source, download: true })
+    });
+    if (res.ok) {
+      showToast('Logo assigned and cached successfully!', 'success');
+      await loadChannels();
+      window.updateLogoModalPreview(channelId);
+      if (activeChannel && activeChannel.id === channelId) {
+        showOSD(activeChannel);
+      }
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast('⚠️ Failed to save logo: ' + (data.error || 'Server error'), 'error');
+    }
+  } catch (err) {
+    showToast('⚠️ Logo error: ' + err.message, 'error');
+  }
+};
+
+window.autoFindSingleChannelLogo = async function(channelId) {
+  const ch = channels.find(c => c.id === channelId);
+  const btn = document.getElementById('btn-modal-autofind');
+  if (btn) btn.disabled = true;
+
+  try {
+    const res = await fetch(`/api/channels/${channelId}/logo/autofind?country=greece`, {
+      method: 'POST'
+    });
+    const data = await res.json() || {};
+    if (res.ok && data.found) {
+      showToast(`⚡ Found & assigned logo for ${ch ? ch.name : 'channel'}!`, 'success');
+      await loadChannels();
+      window.updateLogoModalPreview(channelId);
+      if (activeChannel && activeChannel.id === channelId) {
+        showOSD(activeChannel);
+      }
+    } else {
+      showToast(`No exact logo match found for ${ch ? ch.name : 'channel'}. Try searching keywords below.`, 'info');
+    }
+  } catch (err) {
+    showToast('⚠️ Auto-find error: ' + err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+};
+
+window.autoFindAllChannelLogos = async function() {
+  const btn = document.getElementById('btn-autofind-all-logos');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Auto-finding logos...';
+  }
+
+  try {
+    const res = await fetch('/api/channels/logos/autofind?country=greece&force=false', {
+      method: 'POST'
+    });
+    const data = await res.json() || {};
+    if (res.ok) {
+      showToast(`⚡ Auto-find complete: ${data.matched} logos assigned, ${data.skipped} existing skipped.`, 'success');
+      await loadChannels();
+      if (currentLogoSearchChannelId) {
+        window.updateLogoModalPreview(currentLogoSearchChannelId);
+      }
+    } else {
+      showToast('⚠️ Auto-find failed: ' + (data.error || 'Server error'), 'error');
+    }
+  } catch (err) {
+    showToast('⚠️ Auto-find failed: ' + err.message, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '⚡ Auto-Find All Logos';
+    }
+  }
+};
+
+window.removeChannelLogo = async function(channelId) {
+  try {
+    const res = await fetch(`/api/channels/${channelId}/logo`, {
+      method: 'DELETE'
+    });
+    if (res.ok) {
+      showToast('Logo removed.', 'info');
+      await loadChannels();
+      window.updateLogoModalPreview(channelId);
+    } else {
+      showToast('⚠️ Failed to remove logo.', 'error');
+    }
+  } catch (err) {
+    showToast('⚠️ Error: ' + err.message, 'error');
+  }
+};
+
 // External Players (Jellyfin, Plex, Kodi, VLC) Integration URLs
 function setupIntegrationCard() {
   const origin = window.location.origin;
@@ -5335,6 +5599,63 @@ function setupSettingsUI() {
     });
     showToast('Settings updated successfully!', 'success');
   };
+
+  const btnAutoFindAll = document.getElementById('btn-autofind-all-logos');
+  if (btnAutoFindAll) {
+    btnAutoFindAll.onclick = window.autoFindAllChannelLogos;
+  }
+  const btnCloseLogoSearch = document.getElementById('btn-close-logo-search');
+  if (btnCloseLogoSearch) {
+    btnCloseLogoSearch.onclick = window.closeLogoSearchModal;
+  }
+  const btnCancelLogoSearch = document.getElementById('btn-cancel-logo-search');
+  if (btnCancelLogoSearch) {
+    btnCancelLogoSearch.onclick = window.closeLogoSearchModal;
+  }
+  const btnRunLogoSearch = document.getElementById('btn-run-logo-search');
+  if (btnRunLogoSearch) {
+    btnRunLogoSearch.onclick = window.executeLogoSearch;
+  }
+  const logoSearchInput = document.getElementById('logo-search-input');
+  if (logoSearchInput) {
+    logoSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        window.executeLogoSearch();
+      }
+    });
+  }
+  const logoSearchCountry = document.getElementById('logo-search-country');
+  if (logoSearchCountry) {
+    logoSearchCountry.addEventListener('change', () => {
+      window.executeLogoSearch();
+    });
+  }
+
+  const logoModalFileInput = document.getElementById('logo-modal-file-input');
+  if (logoModalFileInput) {
+    logoModalFileInput.addEventListener('change', async (e) => {
+      if (!currentLogoSearchChannelId || !e.target.files || !e.target.files[0]) return;
+      await window.uploadLogo(currentLogoSearchChannelId, e.target);
+      window.updateLogoModalPreview(currentLogoSearchChannelId);
+    });
+  }
+
+  const btnModalAutoFind = document.getElementById('btn-modal-autofind');
+  if (btnModalAutoFind) {
+    btnModalAutoFind.onclick = async () => {
+      if (!currentLogoSearchChannelId) return;
+      await window.autoFindSingleChannelLogo(currentLogoSearchChannelId);
+    };
+  }
+
+  const btnModalRemove = document.getElementById('btn-modal-remove');
+  if (btnModalRemove) {
+    btnModalRemove.onclick = async () => {
+      if (!currentLogoSearchChannelId) return;
+      await window.removeChannelLogo(currentLogoSearchChannelId);
+    };
+  }
 }
 
 // ==========================================================

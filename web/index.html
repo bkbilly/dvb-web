@@ -659,10 +659,13 @@
         <div class="settings-col">
           <!-- Channel Manager & Order Card -->
           <div class="settings-card channel-manager-card">
-            <div class="card-header">
+            <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
               <h3>📋 Channel Manager & Order</h3>
+              <div class="card-header-actions">
+                <button id="btn-autofind-all-logos" class="btn btn-secondary btn-sm" title="Automatically match and download logos for all channels from tv-logo">⚡ Auto-Find All Logos</button>
+              </div>
             </div>
-            <p class="card-desc">Drag and drop channels (☰) to change their order. The new order immediately reflects across Live TV and the TV Guide without interrupting the stream.</p>
+            <p class="card-desc">Drag and drop channels (☰) to change their order, or manage channel logos for Plex & Jellyfin M3U playlists.</p>
             <div id="channel-admin-table" class="channel-admin-table">
               <!-- Populated by JS -->
             </div>
@@ -1025,6 +1028,62 @@
       <div class="modal-actions" style="margin-top: 1rem;">
         <button id="btn-confirm-cancel" class="btn btn-secondary">Cancel</button>
         <button id="btn-confirm-ok" class="btn btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logo Manager & Search Modal (tv-logo/tv-logos integration) -->
+  <div id="logo-search-modal" class="modal hidden">
+    <div class="modal-card logo-search-modal-card">
+      <div class="modal-header">
+        <h3 id="logo-search-modal-title">🖼️ Channel Logo</h3>
+        <button id="btn-close-logo-search" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body logo-search-modal-body">
+        <!-- Top Panel: Current Logo & Direct Actions -->
+        <div class="logo-modal-top-panel">
+          <div class="logo-modal-preview-box">
+            <div id="logo-modal-preview-img-wrap" class="logo-modal-preview-img-wrap">
+              <!-- Populated by JS -->
+            </div>
+            <div class="logo-modal-preview-info">
+              <span id="logo-modal-ch-name" class="logo-modal-ch-name">Channel Name</span>
+              <span id="logo-modal-status-text" class="logo-modal-status-text">No logo assigned</span>
+            </div>
+          </div>
+          <div class="logo-modal-actions-bar">
+            <label class="btn btn-secondary btn-sm logo-modal-upload-btn" title="Choose image file from your computer">
+              📁 Upload from Computer
+              <input type="file" id="logo-modal-file-input" accept="image/png,image/jpeg,image/svg+xml,image/webp" class="hidden">
+            </label>
+            <button id="btn-modal-autofind" class="btn btn-secondary btn-sm" title="Automatically find matching logo in tv-logo repository">⚡ Auto-Detect</button>
+            <button id="btn-modal-remove" class="btn btn-danger btn-sm hidden" title="Remove current logo">✕ Remove</button>
+          </div>
+        </div>
+
+        <div class="logo-modal-divider">
+          <span>or search in tv-logo repository</span>
+        </div>
+
+        <!-- Search Controls -->
+        <div class="logo-search-controls">
+          <input type="text" id="logo-search-input" class="form-input logo-search-input" placeholder="Type channel name (e.g. MEGA, BBC, ERT)..." autocomplete="off" />
+          <select id="logo-search-country" class="form-select logo-country-select">
+            <option value="all">🌐 All Countries</option>
+            <option value="greece" selected>🇬🇷 Greece</option>
+          </select>
+          <button id="btn-run-logo-search" class="btn btn-primary btn-sm">Search</button>
+        </div>
+        <div id="logo-search-loading" class="logo-search-status hidden">
+          <div class="spinner"></div> Searching tv-logos repository...
+        </div>
+        <div id="logo-search-results" class="logo-search-grid">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+      <div class="modal-actions" style="margin-top: 1rem; display: flex; justify-content: space-between; align-items: center;">
+        <span class="text-muted" style="font-size: 0.8rem;">Repository: <a href="https://github.com/tv-logo/tv-logos" target="_blank" rel="noopener" style="color:var(--accent); text-decoration: underline;">tv-logo/tv-logos</a></span>
+        <button id="btn-cancel-logo-search" class="btn btn-secondary">Close</button>
       </div>
     </div>
   </div>
