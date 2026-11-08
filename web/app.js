@@ -300,6 +300,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   setupLanguagePicker();
   setupPlayerControls();
+
+  const closeSidebarBtn = document.getElementById('btn-close-channel-sidebar');
+  if (closeSidebarBtn) {
+    closeSidebarBtn.onclick = (e) => {
+      e.stopPropagation();
+      toggleFullscreenChannelDrawer(false);
+    };
+  }
+
   setupSettingsUI();
   setupKeybindings();
   setupRouting();
@@ -578,7 +587,8 @@ function renderChannelList(filterText = '', forceReorder = false) {
 
   filtered.forEach(c => {
     let card = container.querySelector(`[data-channel-id="${c.id}"]`);
-    const isActive = activeChannel && activeChannel.id === c.id;
+    const currentTarget = pendingZapChannel || activeChannel;
+    const isActive = currentTarget && currentTarget.id === c.id;
     const isRadio = !!c.is_radio;
     const conflict = getChannelConflict(c);
     const recTuner = (currentTuners || []).find(t => t.active_recording && t.active_recording.channel_id === c.id);
@@ -1305,6 +1315,13 @@ function startStream(channel) {
 function zapToChannel(channel) {
   if (!channel) return;
 
+  // Cancel any pending debounced zap timer
+  if (zapDebounceTimer) {
+    clearTimeout(zapDebounceTimer);
+    zapDebounceTimer = null;
+  }
+  pendingZapChannel = null;
+
   const conflict = getChannelConflict(channel);
   if (conflict) {
     // There are not enough tuners available!
@@ -1349,7 +1366,8 @@ function zapToChannel(channel) {
   // Show Quick Zap Number
   zapIndicator.textContent = channel.number;
   zapIndicator.classList.remove('hidden');
-  setTimeout(() => zapIndicator.classList.add('hidden'), 1200);
+  if (zapIndicatorTimer) clearTimeout(zapIndicatorTimer);
+  zapIndicatorTimer = setTimeout(() => zapIndicator.classList.add('hidden'), 1200);
 
   // Update UI and OSD
   showOSD(channel);
@@ -1373,6 +1391,8 @@ let isMouseOverControls = false;
 let isMouseOverOSD = false;
 
 function isOverlayOrModalOpen() {
+  const isFsChannelsOpen = !!document.fullscreenElement && !!document.getElementById('video-wrapper')?.classList.contains('fs-channels-open');
+  if (isFsChannelsOpen) return true;
   const ids = ['shortcuts-modal', 'hbbtv-modal', 'teletext-overlay', 'rf-analyzer-overlay', 'epg-modal', 'conflict-modal'];
   return ids.some(id => {
     const el = document.getElementById(id);
@@ -1954,6 +1974,39 @@ function toggleFullscreen() {
   }
 }
 
+function toggleFullscreenChannelDrawer(show) {
+  const videoWrapper = document.getElementById('video-wrapper');
+  const btn = document.getElementById('btn-fs-channels');
+  if (!videoWrapper) return;
+
+  const isFullscreen = !!document.fullscreenElement;
+  const shouldOpen = typeof show === 'boolean' ? show : !videoWrapper.classList.contains('fs-channels-open');
+
+  if (shouldOpen && !isFullscreen) {
+    videoWrapper.classList.remove('fs-channels-open');
+    if (btn) btn.classList.remove('active');
+    return;
+  }
+
+  if (shouldOpen) {
+    videoWrapper.classList.add('fs-channels-open');
+    if (btn) btn.classList.add('active');
+    const searchInput = document.getElementById('channel-search');
+    if (searchInput && document.activeElement === searchInput) {
+      searchInput.blur();
+    }
+    setTimeout(() => {
+      const activeCard = document.querySelector('#channel-list .channel-card.active');
+      if (activeCard) {
+        activeCard.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }, 100);
+  } else {
+    videoWrapper.classList.remove('fs-channels-open');
+    if (btn) btn.classList.remove('active');
+  }
+}
+
 function setupPlayerControls() {
   setupAspectRatioControl();
 
@@ -2016,6 +2069,13 @@ function setupPlayerControls() {
 
   // Fullscreen button & double-click video to fullscreen
   document.getElementById('btn-fullscreen').onclick = toggleFullscreen;
+  const btnFsChannels = document.getElementById('btn-fs-channels');
+  if (btnFsChannels) {
+    btnFsChannels.onclick = (e) => {
+      e.stopPropagation();
+      toggleFullscreenChannelDrawer();
+    };
+  }
   video.addEventListener('dblclick', (e) => {
     e.preventDefault();
     toggleFullscreen();
@@ -3091,7 +3151,24 @@ function setupInteractiveFeatures() {
   // Keep player overlays inside #video-wrapper, and keep global modals/toasts inside fullscreen element when active
   document.addEventListener('fullscreenchange', () => {
     const videoWrapper = document.getElementById('video-wrapper');
+    const channelSidebar = document.querySelector('.channel-sidebar');
+    const tvLayout = document.querySelector('.tv-layout');
     const isFullscreen = !!document.fullscreenElement;
+
+    if (channelSidebar && videoWrapper && tvLayout) {
+      if (isFullscreen) {
+        if (channelSidebar.parentElement !== videoWrapper) {
+          videoWrapper.appendChild(channelSidebar);
+        }
+      } else {
+        videoWrapper.classList.remove('fs-channels-open');
+        const btn = document.getElementById('btn-fs-channels');
+        if (btn) btn.classList.remove('active');
+        if (channelSidebar.parentElement !== tvLayout) {
+          tvLayout.appendChild(channelSidebar);
+        }
+      }
+    }
 
     // Player HUD overlays MUST always reside inside the video surface container
     const videoTarget = document.getElementById('video-screen') || videoWrapper;
@@ -3113,15 +3190,120 @@ function setupInteractiveFeatures() {
   });
 }
 
-function zapDelta(delta) {
-  if (channels.length === 0) return;
-  if (!activeChannel) {
-    zapToChannel(channels[0]);
+let pendingZapChannel = null;
+let zapDebounceTimer = null;
+let zapIndicatorTimer = null;
+const ZAP_DEBOUNCE_DELAY = 400; // ms grace period for rapid channel changes
+
+function cancelPendingZap() {
+  if (zapDebounceTimer) {
+    clearTimeout(zapDebounceTimer);
+    zapDebounceTimer = null;
+  }
+  if (pendingZapChannel) {
+    pendingZapChannel = null;
+    if (activeChannel) {
+      showOSD(activeChannel);
+      updateChannelListSelection(activeChannel);
+    }
+  }
+}
+
+function commitPendingZap() {
+  if (zapDebounceTimer) {
+    clearTimeout(zapDebounceTimer);
+    zapDebounceTimer = null;
+  }
+  if (!pendingZapChannel) return;
+  const target = pendingZapChannel;
+  pendingZapChannel = null;
+
+  if (activeChannel && activeChannel.id === target.id) {
+    showOSD(activeChannel);
+    updateChannelListSelection(activeChannel);
     return;
   }
-  const idx = channels.findIndex(c => c.id === activeChannel.id);
-  const nextIdx = (idx + delta + channels.length) % channels.length;
-  zapToChannel(channels[nextIdx]);
+  zapToChannel(target);
+}
+
+function updateChannelListSelection(selectedChannel) {
+  const container = document.getElementById('channel-list');
+  if (!container || !selectedChannel) return;
+  const cards = container.querySelectorAll('.channel-card');
+  cards.forEach(card => {
+    if (card.dataset.channelId === String(selectedChannel.id)) {
+      card.classList.add('active');
+      card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    } else {
+      card.classList.remove('active');
+    }
+  });
+}
+
+function getActiveChannelPool() {
+  const searchInput = document.getElementById('channel-search');
+  const hasSearch = searchInput && searchInput.value.trim() !== '';
+  const hasTypeFilter = channelFilterType && channelFilterType !== 'all';
+  if (hasSearch || hasTypeFilter) {
+    const qNorm = normalizeSearchText(hasSearch ? searchInput.value : '');
+    const qTokens = qNorm.split(/\s+/).filter(Boolean);
+    const filtered = channels.filter(c => {
+      if (qTokens.length > 0) {
+        const cNorm = normalizeSearchText(`${c.name} ${c.number}`);
+        if (!qTokens.every(tok => cNorm.includes(tok))) return false;
+      }
+      if (channelFilterType === 'tv') return !c.is_radio;
+      if (channelFilterType === 'radio') return !!c.is_radio;
+      return true;
+    });
+    if (filtered.length > 0) return filtered;
+  }
+  return channels;
+}
+
+function zapDelta(delta) {
+  const pool = getActiveChannelPool();
+  if (!pool || pool.length === 0) return;
+
+  const current = pendingZapChannel || activeChannel;
+  let nextIdx = 0;
+  if (current) {
+    const idx = pool.findIndex(c => c.id === current.id);
+    if (idx !== -1) {
+      nextIdx = (idx + delta + pool.length) % pool.length;
+    } else {
+      nextIdx = delta > 0 ? 0 : pool.length - 1;
+    }
+  } else {
+    nextIdx = delta > 0 ? 0 : pool.length - 1;
+  }
+
+  const targetChannel = pool[nextIdx];
+  if (!targetChannel) return;
+
+  pendingZapChannel = targetChannel;
+
+  // Immediate visual feedback: Quick Zap indicator
+  zapIndicator.textContent = targetChannel.number;
+  zapIndicator.classList.remove('hidden');
+  if (zapIndicatorTimer) clearTimeout(zapIndicatorTimer);
+  zapIndicatorTimer = setTimeout(() => {
+    zapIndicator.classList.add('hidden');
+  }, 1200);
+
+  // Immediate visual feedback: Show OSD with target channel information
+  showOSD(targetChannel);
+
+  // Immediate visual feedback: Highlight card in sidebar and scroll nearest
+  updateChannelListSelection(targetChannel);
+
+  // Grace period debounce before executing the tune
+  if (zapDebounceTimer) {
+    clearTimeout(zapDebounceTimer);
+  }
+  zapDebounceTimer = setTimeout(() => {
+    commitPendingZap();
+  }, ZAP_DEBOUNCE_DELAY);
 }
 
 // Keyboard Navigation (TV Remote simulation)
@@ -3131,6 +3313,21 @@ function setupKeybindings() {
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (digitBuffer) {
+        digitBuffer = '';
+        clearTimeout(digitTimer);
+        zapIndicator.classList.add('hidden');
+        return;
+      }
+      if (pendingZapChannel) {
+        cancelPendingZap();
+        return;
+      }
+      const videoWrapper = document.getElementById('video-wrapper');
+      if (document.fullscreenElement && videoWrapper && videoWrapper.classList.contains('fs-channels-open')) {
+        toggleFullscreenChannelDrawer(false);
+        return;
+      }
       const shortcutsModal = document.getElementById('shortcuts-modal');
       if (shortcutsModal && !shortcutsModal.classList.contains('hidden')) {
         toggleShortcutsModal(false);
@@ -3230,6 +3427,11 @@ function setupKeybindings() {
     } else if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       toggleHbbTV();
+    } else if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (document.fullscreenElement) {
+        e.preventDefault();
+        toggleFullscreenChannelDrawer();
+      }
     } else if (e.code === 'Space' || ((e.key === 'k' || e.key === 'K') && !e.ctrlKey && !e.metaKey && !e.altKey)) {
       e.preventDefault();
       toggleTimeshiftPlayPause();
@@ -3261,9 +3463,17 @@ function setupKeybindings() {
       e.preventDefault();
       cycleAspectRatio();
     } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+      e.preventDefault();
       zapDelta(-1);
     } else if (e.key === 'ArrowDown' || e.key === 'PageDown') {
+      e.preventDefault();
       zapDelta(1);
+    } else if (e.key === 'Enter') {
+      if (pendingZapChannel) {
+        e.preventDefault();
+        commitPendingZap();
+        return;
+      }
     } else if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       document.getElementById('btn-fullscreen').click();
     } else if ((e.key === 'i' || e.key === 'I') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
@@ -3285,6 +3495,7 @@ function setupKeybindings() {
       zapIndicator.textContent = digitBuffer;
       zapIndicator.classList.remove('hidden');
 
+      if (zapIndicatorTimer) clearTimeout(zapIndicatorTimer);
       clearTimeout(digitTimer);
       digitTimer = setTimeout(() => {
         const num = parseInt(digitBuffer, 10);
@@ -5655,11 +5866,22 @@ if (btnSubSelect && subTracksMenu) {
   };
 }
 
-document.addEventListener('click', () => {
+document.addEventListener('click', (e) => {
   if (audioTracksMenu) audioTracksMenu.classList.add('hidden');
   if (subTracksMenu) subTracksMenu.classList.add('hidden');
   const arMenu = document.getElementById('aspect-ratio-menu');
   if (arMenu) arMenu.classList.add('hidden');
+
+  const videoWrapper = document.getElementById('video-wrapper');
+  if (document.fullscreenElement && videoWrapper && videoWrapper.classList.contains('fs-channels-open') && e) {
+    const sidebar = document.querySelector('.channel-sidebar');
+    const fsBtn = document.getElementById('btn-fs-channels');
+    const bottomBar = document.getElementById('player-bottom-bar');
+    const playerControls = document.querySelector('.player-controls');
+    if (sidebar && !sidebar.contains(e.target) && !fsBtn?.contains(e.target) && !bottomBar?.contains(e.target) && !playerControls?.contains(e.target)) {
+      toggleFullscreenChannelDrawer(false);
+    }
+  }
 });
 
 // ==========================================================

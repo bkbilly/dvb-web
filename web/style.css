@@ -5217,3 +5217,90 @@ input:checked + .slider:before {
   min-width: 44px;
   text-align: center;
 }
+
+/* ==========================================================
+   FULLSCREEN-ONLY BUTTONS & SIDEBAR OVERLAY DRAWER
+   ========================================================== */
+.fs-only-btn {
+  display: none !important;
+}
+
+:fullscreen .fs-only-btn,
+#video-wrapper:fullscreen .fs-only-btn,
+#video-wrapper.is-fullscreen .fs-only-btn {
+  display: inline-flex !important;
+}
+
+#btn-fs-channels.active {
+  background: rgba(59, 130, 246, 0.35);
+  border-color: #3b82f6;
+  color: #93c5fd;
+}
+
+.sidebar-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-title-row h3 {
+  margin-bottom: 0.5rem;
+}
+
+.fs-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  line-height: 1;
+  transition: all 0.15s ease;
+}
+
+.fs-close-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+/* Fullscreen Channel Sidebar Drawer Over Video */
+#video-wrapper:fullscreen .channel-sidebar {
+  display: none;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(380px, 86vw);
+  background: rgba(13, 20, 38, 0.95);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: none;
+  box-shadow: -12px 0 36px rgba(0, 0, 0, 0.65);
+  z-index: 50;
+  flex-direction: column;
+  animation: slideDrawerIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: auto;
+}
+
+#video-wrapper:fullscreen.fs-channels-open .channel-sidebar {
+  display: flex !important;
+}
+
+#video-wrapper:fullscreen .channel-sidebar .channel-list {
+  flex: 1;
+  overflow-y: auto;
+  max-height: none;
+}
+
+@keyframes slideDrawerIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0.5;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
