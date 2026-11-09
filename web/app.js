@@ -1164,19 +1164,30 @@ function startStream(channel) {
       });
     }
 
+    let hlsStarted = false;
     let hlsWatchdog = setTimeout(() => {
-      if (activeChannel && activeChannel.id === channel.id && !hasStartedPlaying) {
-        console.warn('[Player] HLS buffering timed out (12s)');
+      if (activeChannel && activeChannel.id === channel.id && !hlsStarted) {
+        if (video.buffered && video.buffered.length > 0 && video.buffered.end(0) > 0) {
+          hlsStarted = true;
+          return;
+        }
+        console.warn('[Player] HLS buffering timed out (20s)');
         handleStreamStopped('HLS stream tuning timed out. Broadcast stream unavailable.', true);
       }
-    }, 12000);
+    }, 20000);
     const clearHlsWatchdog = () => {
+      hlsStarted = true;
       if (hlsWatchdog) {
         clearTimeout(hlsWatchdog);
         hlsWatchdog = null;
       }
     };
     video.addEventListener('playing', clearHlsWatchdog, { once: true });
+    video.addEventListener('canplay', clearHlsWatchdog, { once: true });
+    video.addEventListener('loadeddata', clearHlsWatchdog, { once: true });
+    video.addEventListener('timeupdate', () => {
+      if (video.currentTime > 0) clearHlsWatchdog();
+    });
   };
 
   // Direct native HLS for iOS / iPadOS Safari (which stutters or drops audio on continuous MSE MPEG-TS)
@@ -1215,10 +1226,20 @@ function startStream(channel) {
     };
 
     video.addEventListener('playing', markPlaying, { once: true });
+    video.addEventListener('canplay', markPlaying, { once: true });
+    video.addEventListener('loadeddata', markPlaying, { once: true });
+    video.addEventListener('timeupdate', () => {
+      if (video.currentTime > 0) markPlaying();
+    });
 
     let streamWatchdog = setTimeout(() => {
       if (player && activeChannel && activeChannel.id === channel.id && !hasStartedPlaying) {
-        console.warn('[Player] Initial stream buffering timed out (12s)');
+        if (video.buffered && video.buffered.length > 0 && video.buffered.end(0) > 0) {
+          console.log('[Player] Watchdog notice: video buffered, awaiting presentation');
+          markPlaying();
+          return;
+        }
+        console.warn('[Player] Initial stream buffering timed out (18s)');
         if (canPlayHLS) {
           showToast('⚠️ Stream buffering stalled; switching to HLS fallback...', 'info');
           playHLS();
@@ -1226,7 +1247,7 @@ function startStream(channel) {
           handleStreamStopped('Stream tuning timed out. No broadcast data received from server.', true);
         }
       }
-    }, 12000);
+    }, 18000);
 
     const clearWatchdog = () => {
       if (streamWatchdog) {
@@ -1261,9 +1282,10 @@ function startStream(channel) {
     });
 
     player.on(mpegts.Events.MEDIA_INFO, () => {
+      clearWatchdog();
+      hasStartedPlaying = true;
       standbyOverlay.classList.add('hidden');
       updateHeaderTunerBadge();
-      video.muted = false;
       const p = video.play();
       if (p && typeof p.catch === 'function') {
         p.catch(e => {

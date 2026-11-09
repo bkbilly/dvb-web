@@ -379,8 +379,8 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	if !cfg.IsMock {
 		args = append(args,
 			"-f", "mpegts",
-			"-analyzeduration", "3000000",
-			"-probesize", "5000000",
+			"-analyzeduration", "2000000",
+			"-probesize", "2500000",
 			"-fpsprobesize", "0",
 			"-err_detect", "ignore_err",
 			"-fflags", "+genpts+nobuffer",
@@ -720,5 +720,10 @@ func (p *Pipeline) Stop() {
 		_ = p.cmd.Process.Kill()
 		_ = p.cmd.Wait()
 	}
-	log.Printf("[Transcoder] Pipeline stopped")
+	errText := p.StderrText()
+	if errText != "" {
+		log.Printf("[Transcoder] Pipeline stopped (last stderr: %s)", errText)
+	} else {
+		log.Printf("[Transcoder] Pipeline stopped")
+	}
 }

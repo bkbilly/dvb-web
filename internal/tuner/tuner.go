@@ -692,6 +692,7 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		activePipeline := pipeline
 		stdout := activePipeline.Stdout()
 		var totalBytesRead int64
+		var firstChunkLogged bool
 
 		for {
 			select {
@@ -702,8 +703,8 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 			n, err := stdout.Read(buf)
 			if err != nil {
-				// If the context was cancelled (e.g. channel stopped, viewer changed channel) or stream has no viewers, exit cleanly
-				if ctx.Err() != nil || cs.ViewerCount() == 0 {
+				// If the context was cancelled (e.g. channel stopped, viewer changed channel), exit cleanly
+				if ctx.Err() != nil {
 					return
 				}
 
@@ -743,6 +744,10 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 				return
 			}
 			if n > 0 {
+				if !firstChunkLogged {
+					firstChunkLogged = true
+					log.Printf("[ChannelStream] First output chunk delivered for channel %s (%d bytes)", cs.ChannelName, n)
+				}
 				totalBytesRead += int64(n)
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
@@ -932,6 +937,7 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 				}
 			}
 
+			var firstDVRChunkLogged bool
 			readBuf := make([]byte, 188*256) // 48KB chunk
 			var leftover []byte
 
@@ -964,6 +970,11 @@ func (p *Pool) startHardwareTSPumpLocked(t *Tuner) {
 
 				if len(cleanData) == 0 {
 					continue
+				}
+
+				if !firstDVRChunkLogged {
+					firstDVRChunkLogged = true
+					log.Printf("[TunerPool] Tuner %d receiving raw TS packets from DVR device (%d bytes clean)", t.ID, len(cleanData))
 				}
 
 				select {
