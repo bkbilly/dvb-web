@@ -212,6 +212,7 @@ func (d *Database) migrate() error {
 	}
 
 	// Ensure newer columns exist for existing installations
+	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN enabled INTEGER DEFAULT 1;")
 	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN is_radio INTEGER DEFAULT 0;")
 	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN hbbtv_url TEXT DEFAULT '';")
 	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN has_teletext INTEGER DEFAULT 0;")
