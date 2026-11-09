@@ -404,7 +404,7 @@
         <!-- Left Column: Tuners & Hardware Configuration -->
         <div class="settings-col">
           <!-- Available Tuners Card -->
-          <div class="settings-card">
+          <div class="settings-card tuners-card">
             <div class="card-header">
               <h3>📡 Available Tuners</h3>
               <button id="btn-refresh-tuners" class="btn btn-secondary">Refresh</button>
@@ -584,7 +584,7 @@
           </div>
 
           <!-- Global Settings Card: Video & Hardware Preferences -->
-          <div class="settings-card">
+          <div class="settings-card video-prefs-card">
             <div class="card-header">
               <h3>⚙️ Video & Hardware Preferences</h3>
             </div>
@@ -673,9 +673,9 @@
         </div>
 
         <!-- Full-Width Bottom Row: External Integrations -->
-        <div class="settings-col full-width">
+        <div class="settings-col full-width integrations-col">
           <!-- External Players & Media Servers Card (Jellyfin, Plex, Kodi, VLC) -->
-          <div class="settings-card">
+          <div class="settings-card integrations-card">
             <div class="card-header">
               <h3>🍿 External Players & Media Servers (Jellyfin, Plex, Kodi, VLC)</h3>
             </div>
@@ -1067,7 +1067,7 @@
 
         <!-- Search Controls -->
         <div class="logo-search-controls">
-          <input type="text" id="logo-search-input" class="form-input logo-search-input" placeholder="Type channel name (e.g. MEGA, BBC, ERT)..." autocomplete="off" />
+          <input type="text" id="logo-search-input" class="form-input logo-search-input" placeholder="Search channel name..." autocomplete="off" />
           <select id="logo-search-country" class="form-select logo-country-select">
             <option value="all">🌐 All Countries</option>
             <option value="greece" selected>🇬🇷 Greece</option>

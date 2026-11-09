@@ -635,7 +635,7 @@ function renderChannelList(filterText = '', forceReorder = false) {
       card.innerHTML = `
         <div class="ch-meta">
           <div class="ch-top-row">
-            <span class="badge ch-number-badge">${c.number}</span>
+            <span class="badge ch-badge ch-number-badge">${c.number}</span>
             <span class="ch-name">${c.name}</span>
             ${radioBadgeHtml}
             <span class="ch-status-wrap">${statusBadgeHtml}</span>
@@ -656,7 +656,7 @@ function renderChannelList(filterText = '', forceReorder = false) {
         container.appendChild(card);
       }
 
-      const numBadge = card.querySelector('.ch-number-badge') || card.querySelector('.badge');
+      const numBadge = card.querySelector('.ch-number-badge') || card.querySelector('.ch-badge') || card.querySelector('.badge');
       if (numBadge && numBadge.textContent !== String(c.number)) {
         numBadge.textContent = c.number;
       }
@@ -1801,6 +1801,92 @@ document.getElementById('btn-force-kick').onclick = () => {
   }
 };
 
+// Device & Orientation Detection
+function isMobileDevice() {
+  const ua = navigator.userAgent || '';
+  const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+  const isTouch = (navigator.maxTouchPoints > 0) || ('ontouchstart' in window);
+  const isIPad = /Macintosh/i.test(ua) && isTouch && Math.max(window.screen.width, window.screen.height) <= 1366;
+  return isMobileUA || isIPad || (isTouch && window.matchMedia('(pointer: coarse)').matches && Math.min(window.screen.width, window.screen.height) <= 1024);
+}
+
+function lockLandscapeOrientation() {
+  try {
+    if (screen.orientation && typeof screen.orientation.lock === 'function') {
+      screen.orientation.lock('landscape').catch(() => {});
+    } else if (screen.lockOrientation) {
+      screen.lockOrientation('landscape');
+    } else if (screen.mozLockOrientation) {
+      screen.mozLockOrientation('landscape');
+    } else if (screen.msLockOrientation) {
+      screen.msLockOrientation('landscape');
+    }
+  } catch (_) {}
+}
+
+function unlockScreenOrientation() {
+  try {
+    if (screen.orientation && typeof screen.orientation.unlock === 'function') {
+      screen.orientation.unlock();
+    } else if (screen.unlockOrientation) {
+      screen.unlockOrientation();
+    } else if (screen.mozUnlockOrientation) {
+      screen.mozUnlockOrientation();
+    } else if (screen.msUnlockOrientation) {
+      screen.msUnlockOrientation();
+    }
+  } catch (_) {}
+}
+
+// Track Menu Dynamic Boundary Clamping (Prevents menus extending past screen edges on small devices)
+function positionTrackMenu(menu) {
+  if (!menu || menu.classList.contains('hidden')) return;
+
+  const update = () => {
+    if (!menu || menu.classList.contains('hidden')) return;
+    menu.style.transform = '';
+
+    const rect = menu.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    const wrapper = document.getElementById('video-wrapper') || document.body;
+    const wrapRect = wrapper.getBoundingClientRect();
+    const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+
+    const minLeft = isFs ? 8 : Math.max(8, wrapRect.left + 8);
+    const maxRight = isFs ? (window.innerWidth - 8) : Math.min(window.innerWidth - 8, wrapRect.right - 8);
+
+    let shiftX = 0;
+    if (rect.left < minLeft) {
+      shiftX = minLeft - rect.left;
+    } else if (rect.right > maxRight) {
+      shiftX = maxRight - rect.right;
+    }
+
+    if (rect.left + shiftX < minLeft) {
+      shiftX = minLeft - rect.left;
+    }
+
+    if (Math.abs(shiftX) >= 1) {
+      menu.style.transform = `translateX(${Math.round(shiftX)}px)`;
+    } else {
+      menu.style.transform = '';
+    }
+  };
+
+  update();
+  requestAnimationFrame(update);
+}
+
+function repositionAllVisibleTrackMenus() {
+  ['audio-tracks-menu', 'sub-tracks-menu', 'aspect-ratio-menu'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && !el.classList.contains('hidden')) {
+      positionTrackMenu(el);
+    }
+  });
+}
+
 // Aspect Ratio Options
 const ASPECT_RATIOS = [
   { id: 'auto', label: 'Auto', className: 'ar-auto', desc: 'Auto (Original Broadcast)' },
@@ -1831,6 +1917,9 @@ function setupAspectRatioControl() {
     if (audioMenu) audioMenu.classList.add('hidden');
     if (subMenu) subMenu.classList.add('hidden');
     menu.classList.toggle('hidden');
+    if (!menu.classList.contains('hidden')) {
+      positionTrackMenu(menu);
+    }
     showPlayerUI();
   };
 
@@ -1861,6 +1950,10 @@ function renderAspectRatioMenu() {
     };
     menu.appendChild(item);
   });
+
+  if (!menu.classList.contains('hidden')) {
+    positionTrackMenu(menu);
+  }
 }
 
 // Dynamic mobile video container height so it expands when video can get bigger (e.g. 4:3, tall screens, landscape)
@@ -1963,14 +2056,32 @@ function isOSDOverVideo() {
 
 function toggleFullscreen() {
   const wrapper = document.getElementById('video-wrapper');
-  if (!document.fullscreenElement) {
-    if (wrapper.requestFullscreen) {
-      wrapper.requestFullscreen().catch(err => console.log(err));
+  const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (!isFs) {
+    const req = wrapper.requestFullscreen || wrapper.webkitRequestFullscreen || wrapper.mozRequestFullScreen || wrapper.msRequestFullscreen;
+    if (req) {
+      const p = req.call(wrapper);
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          if (isMobileDevice()) {
+            lockLandscapeOrientation();
+          }
+        }).catch(err => {
+          console.log('[Fullscreen] requestFullscreen failed, attempting video fallback:', err);
+          if (video && video.webkitEnterFullscreen) {
+            try { video.webkitEnterFullscreen(); } catch (_) {}
+          }
+        });
+      }
+    } else if (video && video.webkitEnterFullscreen) {
+      try { video.webkitEnterFullscreen(); } catch (_) {}
     }
   } else {
-    if (document.exitFullscreen) {
-      document.exitFullscreen().catch(err => console.log(err));
+    const exit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+    if (exit) {
+      exit.call(document).catch(err => console.log(err));
     }
+    unlockScreenOrientation();
   }
 }
 
@@ -2149,7 +2260,7 @@ function setupPlayerControls() {
   // Scrollwheel on live TV to change volume
   wrapper.addEventListener('wheel', (e) => {
     if (isOverlayOrModalOpen()) return;
-    if (e.target.closest('.aspect-ratio-menu') || e.target.closest('.audio-tracks-menu') || e.target.closest('.subtitles-menu')) return;
+    if (e.target.closest('.track-menu') || e.target.closest('.aspect-ratio-menu') || e.target.closest('.audio-tracks-menu') || e.target.closest('.subtitles-menu')) return;
     e.preventDefault();
     const step = 0.05;
     const delta = e.deltaY < 0 ? step : -step;
@@ -2158,6 +2269,7 @@ function setupPlayerControls() {
   }, { passive: false });
   window.addEventListener('resize', () => {
     updateMobileVideoHeight();
+    repositionAllVisibleTrackMenus();
     // Never show OSD on window resize! Only ensure controls stay visible if in dark letterbox space
     const playerControls = document.querySelector('.player-controls');
     if (!isControlsOverVideo() && playerControls) {
@@ -2173,6 +2285,20 @@ function setupPlayerControls() {
     }
     updateEPGActiveDay();
   });
+  window.addEventListener('orientationchange', () => {
+    setTimeout(() => {
+      updateMobileVideoHeight();
+      repositionAllVisibleTrackMenus();
+    }, 120);
+  });
+  if (screen.orientation && screen.orientation.addEventListener) {
+    screen.orientation.addEventListener('change', () => {
+      setTimeout(() => {
+        updateMobileVideoHeight();
+        repositionAllVisibleTrackMenus();
+      }, 120);
+    });
+  }
   video.addEventListener('loadedmetadata', () => {
     updateMobileVideoHeight();
     const playerControls = document.querySelector('.player-controls');
@@ -3148,12 +3274,20 @@ function setupInteractiveFeatures() {
     };
   }
 
-  // Keep player overlays inside #video-wrapper, and keep global modals/toasts inside fullscreen element when active
-  document.addEventListener('fullscreenchange', () => {
+  // Keep player overlays inside #video-wrapper, lock mobile landscape orientation on fullscreen, and keep global modals/toasts inside fullscreen element when active
+  const handleFullscreenChange = () => {
     const videoWrapper = document.getElementById('video-wrapper');
     const channelSidebar = document.querySelector('.channel-sidebar');
     const tvLayout = document.querySelector('.tv-layout');
-    const isFullscreen = !!document.fullscreenElement;
+    const isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+
+    if (isFullscreen) {
+      if (isMobileDevice()) {
+        lockLandscapeOrientation();
+      }
+    } else {
+      unlockScreenOrientation();
+    }
 
     if (channelSidebar && videoWrapper && tvLayout) {
       if (isFullscreen) {
@@ -3187,7 +3321,21 @@ function setupInteractiveFeatures() {
         modalTarget.appendChild(el);
       }
     });
-  });
+
+    repositionAllVisibleTrackMenus();
+  };
+
+  document.addEventListener('fullscreenchange', handleFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+
+  if (video) {
+    video.addEventListener('webkitbeginfullscreen', () => {
+      if (isMobileDevice()) lockLandscapeOrientation();
+    });
+    video.addEventListener('webkitendfullscreen', () => {
+      unlockScreenOrientation();
+    });
+  }
 }
 
 let pendingZapChannel = null;
@@ -4675,7 +4823,7 @@ async function refreshTunerStatus() {
 
       const signalHtml = t.signal && (t.signal.has_lock || t.signal.signal_quality > 0) ? `
         <div class="tuner-signal-meter">
-          📶 Signal: <strong>${t.signal.signal_strength}%</strong> | Quality: <strong>${t.signal.signal_quality}%</strong>${t.signal.snr_db ? ' (SNR: ' + t.signal.snr_db.toFixed(1) + ' dB)' : ''}${t.signal.has_lock ? ' <span class="badge" style="background:var(--success); font-size:0.7rem; padding:1px 4px;">Locked</span>' : ''}
+          📶 Signal: <strong>${t.signal.signal_strength}%</strong> | Quality: <strong>${t.signal.signal_quality}%</strong>${t.signal.snr_db ? ' (SNR: ' + t.signal.snr_db.toFixed(1) + ' dB)' : ''}${t.signal.has_lock ? ' <span class="tuner-lock-badge">Locked</span>' : ''}
         </div>
       ` : '';
 
@@ -5154,7 +5302,9 @@ function renderAdminChannelList() {
         </div>
       </div>
       <div class="admin-ch-actions">
-        <button class="btn btn-danger btn-sm" onclick="deleteChannel(${c.id})">Delete</button>
+        <button class="btn btn-danger btn-sm admin-ch-del-btn" onclick="deleteChannel(${c.id})" title="Delete Channel">
+          <span class="del-icon">🗑️</span><span class="del-text"> Delete</span>
+        </button>
       </div>
     `;
 
@@ -5612,6 +5762,14 @@ function setupSettingsUI() {
   if (btnCancelLogoSearch) {
     btnCancelLogoSearch.onclick = window.closeLogoSearchModal;
   }
+  const logoSearchModal = document.getElementById('logo-search-modal');
+  if (logoSearchModal) {
+    logoSearchModal.onclick = (e) => {
+      if (e.target.id === 'logo-search-modal') {
+        window.closeLogoSearchModal();
+      }
+    };
+  }
   const btnRunLogoSearch = document.getElementById('btn-run-logo-search');
   if (btnRunLogoSearch) {
     btnRunLogoSearch.onclick = window.executeLogoSearch;
@@ -5897,6 +6055,13 @@ function renderTrackMenus() {
       }
     }
   }
+
+  if (audioMenu && !audioMenu.classList.contains('hidden')) {
+    positionTrackMenu(audioMenu);
+  }
+  if (subMenu && !subMenu.classList.contains('hidden')) {
+    positionTrackMenu(subMenu);
+  }
 }
 
 function reloadCurrentStream() {
@@ -6174,6 +6339,9 @@ if (btnAudioSelect && audioTracksMenu) {
     if (arMenu) arMenu.classList.add('hidden');
     if (subTracksMenu) subTracksMenu.classList.add('hidden');
     audioTracksMenu.classList.toggle('hidden');
+    if (!audioTracksMenu.classList.contains('hidden')) {
+      positionTrackMenu(audioTracksMenu);
+    }
   };
 }
 
@@ -6184,6 +6352,9 @@ if (btnSubSelect && subTracksMenu) {
     if (arMenu) arMenu.classList.add('hidden');
     if (audioTracksMenu) audioTracksMenu.classList.add('hidden');
     subTracksMenu.classList.toggle('hidden');
+    if (!subTracksMenu.classList.contains('hidden')) {
+      positionTrackMenu(subTracksMenu);
+    }
   };
 }
 
