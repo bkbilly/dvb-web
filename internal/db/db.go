@@ -462,6 +462,7 @@ func (d *Database) ProcessScanResults(scanned []Channel) (*ScanDiff, error) {
 			if s.LogoURL == "" {
 				s.LogoURL = match.LogoURL
 			}
+			s.Enabled = match.Enabled
 			_ = d.SaveChannel(&s)
 			diff.UpdatedChannels = append(diff.UpdatedChannels, s)
 		} else {
@@ -728,7 +729,7 @@ func (d *Database) SearchEPG(query string, limit int) ([]EPGSearchResult, error)
 		       c.name, c.number, c.logo_url, c.is_radio
 		FROM epg_events e
 		JOIN channels c ON e.channel_id = c.id
-		WHERE e.end_time >= ? AND e.start_time <= ?
+		WHERE c.enabled = 1 AND e.end_time >= ? AND e.start_time <= ?
 		ORDER BY e.start_time ASC
 	`, nowStr, maxFutureStr)
 	if err != nil {
@@ -1129,4 +1130,132 @@ func (d *Database) ClearFailedRecordings() (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// Backup & Restore
+type BackupData struct {
+	Version    string            `json:"version"`
+	CreatedAt  time.Time         `json:"created_at"`
+	Server     string            `json:"server"`
+	Settings   map[string]string `json:"settings"`
+	Channels   []Channel         `json:"channels"`
+	Recordings []Recording       `json:"recordings,omitempty"`
+}
+
+func (d *Database) CreateBackupData() (*BackupData, error) {
+	settings, err := d.GetAllSettings()
+	if err != nil {
+		settings = make(map[string]string)
+	}
+
+	channels, err := d.ListChannels()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list channels: %w", err)
+	}
+
+	recordings, err := d.ListRecordings()
+	if err != nil {
+		recordings = []Recording{}
+	}
+
+	return &BackupData{
+		Version:    "1.0",
+		CreatedAt:  time.Now().UTC(),
+		Server:     "dvb-web",
+		Settings:   settings,
+		Channels:   channels,
+		Recordings: recordings,
+	}, nil
+}
+
+func (d *Database) RestoreBackup(b *BackupData) (channelsRestored, settingsRestored, recordingsRestored int, err error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+
+	// 1. Restore Settings
+	for k, v := range b.Settings {
+		_, err := tx.Exec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v)
+		if err == nil {
+			settingsRestored++
+		}
+	}
+
+	// 2. Restore Channels
+	var backupIDs []int64
+	for _, c := range b.Channels {
+		backupIDs = append(backupIDs, c.ID)
+		enabledInt := 0
+		if c.Enabled {
+			enabledInt = 1
+		}
+		isRadioInt := 0
+		if c.IsRadio {
+			isRadioInt = 1
+		}
+		hasTxtInt := 0
+		if c.HasTeletext {
+			hasTxtInt = 1
+		}
+
+		res, err := tx.Exec(`
+			INSERT INTO channels (id, name, number, logo_url, frequency, bandwidth, delivery_system, service_id, video_pid, audio_pid, extra_params, enabled, is_radio, hbbtv_url, has_teletext, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				name=excluded.name, number=excluded.number, logo_url=excluded.logo_url,
+				frequency=excluded.frequency, bandwidth=excluded.bandwidth, delivery_system=excluded.delivery_system,
+				service_id=excluded.service_id, video_pid=excluded.video_pid, audio_pid=excluded.audio_pid,
+				extra_params=excluded.extra_params, enabled=excluded.enabled, is_radio=excluded.is_radio,
+				hbbtv_url=excluded.hbbtv_url, has_teletext=excluded.has_teletext, updated_at=excluded.updated_at
+		`, c.ID, c.Name, c.Number, c.LogoURL, c.Frequency, c.Bandwidth, c.DeliverySystem, c.ServiceID, c.VideoPID, c.AudioPID, c.ExtraParams, enabledInt, isRadioInt, c.HbbtvURL, hasTxtInt, now, now)
+
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				channelsRestored++
+			}
+		}
+	}
+
+	// Remove obsolete channels that are not in backup AND have no active recordings referencing them
+	if len(backupIDs) > 0 {
+		placeholders := make([]string, len(backupIDs))
+		args := make([]interface{}, len(backupIDs))
+		for i, id := range backupIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		pruneQuery := fmt.Sprintf(`
+			DELETE FROM channels 
+			WHERE id NOT IN (%s) 
+			  AND id NOT IN (SELECT DISTINCT channel_id FROM recordings)
+		`, strings.Join(placeholders, ","))
+		_, _ = tx.Exec(pruneQuery, args...)
+	}
+
+	// 3. Restore Scheduled Recordings
+	for _, r := range b.Recordings {
+		if r.Status == "scheduled" {
+			var exists int
+			_ = tx.QueryRow("SELECT COUNT(*) FROM recordings WHERE channel_id = ? AND start_time = ?", r.ChannelID, r.StartTime).Scan(&exists)
+			if exists == 0 {
+				_, err := tx.Exec(`
+					INSERT INTO recordings (channel_id, event_id, title, description, start_time, end_time, duration, pre_padding, post_padding, file_path, status, created_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)
+				`, r.ChannelID, r.EventID, r.Title, r.Description, r.StartTime, r.EndTime, r.Duration, r.PrePadding, r.PostPadding, r.FilePath, now)
+				if err == nil {
+					recordingsRestored++
+				}
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, err
+	}
+
+	return channelsRestored, settingsRestored, recordingsRestored, nil
 }

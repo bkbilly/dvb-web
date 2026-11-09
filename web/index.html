@@ -665,7 +665,17 @@
                 <button id="btn-autofind-all-logos" class="btn btn-secondary btn-sm" title="Automatically match and download logos for all channels from tv-logo">⚡ Auto-Find All Logos</button>
               </div>
             </div>
-            <p class="card-desc">Drag and drop channels (☰) to change their order, or manage channel logos for Plex & Jellyfin M3U playlists.</p>
+            <p class="card-desc">Drag and drop channels (☰) to change their order, click 👁️ to hide/disable channels you don't watch, or assign channel logos.</p>
+            <div class="admin-ch-toolbar">
+              <div class="admin-ch-filter-chips">
+                <button type="button" class="btn btn-sm admin-ch-filter-btn active" data-filter="all">All (<span id="admin-count-all">0</span>)</button>
+                <button type="button" class="btn btn-sm admin-ch-filter-btn" data-filter="visible">Visible (<span id="admin-count-visible">0</span>)</button>
+                <button type="button" class="btn btn-sm admin-ch-filter-btn" data-filter="hidden">Hidden (<span id="admin-count-hidden">0</span>)</button>
+              </div>
+              <div class="admin-ch-search-wrap">
+                <input type="text" id="admin-ch-search" class="form-input form-input-sm" placeholder="Search channels..." autocomplete="off">
+              </div>
+            </div>
             <div id="channel-admin-table" class="channel-admin-table">
               <!-- Populated by JS -->
             </div>
@@ -715,6 +725,44 @@
                   <input type="text" id="int-epg-url" readonly class="form-input readonly code-font">
                   <button type="button" class="btn btn-outline btn-copy" data-target="int-epg-url">📋 Copy</button>
                   <a id="int-epg-download" href="/epg.xml" download class="btn btn-outline">⬇️ Download XML</a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Full-Width Bottom Row: Backup & Restore -->
+        <div class="settings-col full-width backup-restore-col">
+          <div class="settings-card backup-restore-card">
+            <div class="card-header">
+              <h3>💾 Backup & Restore</h3>
+            </div>
+            <p class="card-desc">Export or import a complete backup of your channel lineup, ordering, settings, custom logos, and recording schedules.</p>
+            
+            <div class="backup-restore-grid">
+              <div class="backup-item">
+                <div class="backup-item-title">
+                  <strong>📦 Export System Backup</strong>
+                </div>
+                <p class="backup-item-desc">Download a complete <code>.zip</code> archive containing all your channels, frequencies, preferences, custom logos, and schedules.</p>
+                <div class="backup-actions">
+                  <a href="/api/backup" download class="btn btn-primary" id="btn-download-backup">
+                    ⬇️ Download Backup (.zip)
+                  </a>
+                </div>
+              </div>
+
+              <div class="backup-item">
+                <div class="backup-item-title">
+                  <strong>🔄 Restore from Backup</strong>
+                </div>
+                <p class="backup-item-desc">Upload a previously exported <code>.zip</code> or <code>.json</code> backup archive to restore your channels, logos, and settings.</p>
+                <div class="backup-actions">
+                  <input type="file" id="backup-file-input" accept=".zip,.json,application/zip,application/json" class="hidden">
+                  <button type="button" class="btn btn-secondary" id="btn-restore-backup" onclick="document.getElementById('backup-file-input').click()">
+                    ⬆️ Choose Backup File & Restore...
+                  </button>
+                  <span id="backup-restore-status" class="backup-status-text"></span>
                 </div>
               </div>
             </div>

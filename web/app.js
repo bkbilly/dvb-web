@@ -542,8 +542,8 @@ function renderChannelList(filterText = '', forceReorder = false) {
 
   // Only show the category selection if both TV and Radio channels exist
   const filterContainer = document.querySelector('.channel-type-filters');
-  const hasTV = channels.some(c => !c.is_radio);
-  const hasRadio = channels.some(c => !!c.is_radio);
+  const hasTV = channels.some(c => c.enabled !== false && !c.is_radio);
+  const hasRadio = channels.some(c => c.enabled !== false && !!c.is_radio);
 
   if (filterContainer) {
     if (hasTV && hasRadio) {
@@ -561,6 +561,7 @@ function renderChannelList(filterText = '', forceReorder = false) {
   const qTokens = qNorm.split(/\s+/).filter(Boolean);
 
   const filtered = channels.filter(c => {
+    if (c.enabled === false) return false;
     if (qTokens.length > 0) {
       const cNorm = normalizeSearchText(`${c.name} ${c.number}`);
       const matchesSearch = qTokens.every(tok => cNorm.includes(tok));
@@ -3396,6 +3397,7 @@ function getActiveChannelPool() {
     const qNorm = normalizeSearchText(hasSearch ? searchInput.value : '');
     const qTokens = qNorm.split(/\s+/).filter(Boolean);
     const filtered = channels.filter(c => {
+      if (c.enabled === false) return false;
       if (qTokens.length > 0) {
         const cNorm = normalizeSearchText(`${c.name} ${c.number}`);
         if (!qTokens.every(tok => cNorm.includes(tok))) return false;
@@ -3406,7 +3408,7 @@ function getActiveChannelPool() {
     });
     if (filtered.length > 0) return filtered;
   }
-  return channels;
+  return channels.filter(c => c.enabled !== false);
 }
 
 function zapDelta(delta) {
@@ -3652,7 +3654,7 @@ function setupKeybindings() {
       clearTimeout(digitTimer);
       digitTimer = setTimeout(() => {
         const num = parseInt(digitBuffer, 10);
-        const match = channels.find(c => c.number === num);
+        const match = channels.find(c => c.number === num && c.enabled !== false);
         if (match) {
           zapToChannel(match);
         }
@@ -4083,7 +4085,8 @@ function renderChannelsColumn() {
   col.innerHTML = '';
   const fragment = document.createDocumentFragment();
 
-  channels.forEach(c => {
+  const visibleChannels = channels.filter(c => c.enabled !== false);
+  visibleChannels.forEach(c => {
     const cell = document.createElement('div');
     cell.dataset.channelId = c.id;
     const conflict = getChannelConflict(c);
@@ -4186,7 +4189,8 @@ async function renderProgramRows(startTime, endTime, prefetchedEvents = null) {
   const nowMs = Date.now();
   const fragment = document.createDocumentFragment();
 
-  for (const c of channels) {
+  const visibleChannels = channels.filter(c => c.enabled !== false);
+  for (const c of visibleChannels) {
     const row = document.createElement('div');
     row.dataset.channelId = c.id;
     const isPlaying = activeChannel && activeChannel.id === c.id;
@@ -4984,7 +4988,7 @@ function renderScanResultsCards() {
         </div>
       </div>
       <div class="scan-ch-badges">
-        ${isNew ? '<span class="badge-new">✨ NEW</span>' : ''}
+        ${isNew ? '<span class="badge-new">✨ NEW</span>' : (c.enabled === false ? '<span class="badge badge-hidden" title="Channel is currently hidden">👁️‍🗨️ Hidden</span>' : '')}
         <span class="badge-tag">${c.is_radio ? '📻 Radio' : '📺 TV'}</span>
         ${(c.name && c.name.toUpperCase().includes('HD')) ? '<span class="badge-tag" style="color:#60a5fa;border-color:rgba(59,130,246,0.3);">HD</span>' : ''}
       </div>
@@ -5273,14 +5277,73 @@ document.getElementById('btn-prune-missing').onclick = async () => {
 };
 
 // Channel Manager & Drag-and-Drop Reordering
+let adminChannelFilter = 'all'; // 'all' | 'visible' | 'hidden'
+let adminChannelSearch = '';
+let adminChannelFilterHandlersInitialized = false;
+
+function setupAdminChannelFilterHandlers() {
+  if (adminChannelFilterHandlersInitialized) return;
+  adminChannelFilterHandlersInitialized = true;
+
+  const filterBtns = document.querySelectorAll('.admin-ch-filter-btn');
+  filterBtns.forEach(btn => {
+    btn.onclick = () => {
+      filterBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      adminChannelFilter = btn.dataset.filter || 'all';
+      renderAdminChannelList();
+    };
+  });
+
+  const searchInput = document.getElementById('admin-ch-search');
+  if (searchInput) {
+    searchInput.oninput = (e) => {
+      adminChannelSearch = e.target.value;
+      renderAdminChannelList();
+    };
+  }
+}
+
 function renderAdminChannelList() {
   const container = document.getElementById('channel-admin-table');
   if (!container) return;
   container.innerHTML = '';
 
-  channels.forEach((c, index) => {
+  const totalCount = channels.length;
+  const visibleCount = channels.filter(c => c.enabled !== false).length;
+  const hiddenCount = channels.filter(c => c.enabled === false).length;
+
+  const cntAll = document.getElementById('admin-count-all');
+  if (cntAll) cntAll.textContent = totalCount;
+  const cntVis = document.getElementById('admin-count-visible');
+  if (cntVis) cntVis.textContent = visibleCount;
+  const cntHid = document.getElementById('admin-count-hidden');
+  if (cntHid) cntHid.textContent = hiddenCount;
+
+  const q = normalizeSearchText(adminChannelSearch.trim());
+  const displayChannels = channels.filter(c => {
+    if (adminChannelFilter === 'visible' && c.enabled === false) return false;
+    if (adminChannelFilter === 'hidden' && c.enabled !== false) return false;
+    if (q) {
+      const cText = normalizeSearchText(`${c.name} ${c.number}`);
+      if (!cText.includes(q)) return false;
+    }
+    return true;
+  });
+
+  if (displayChannels.length === 0) {
+    container.innerHTML = `<div style="padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.88rem;">
+      ${adminChannelFilter === 'hidden' ? '🎉 No channels are currently hidden.' : 
+        adminChannelFilter === 'visible' ? 'No visible channels match the query.' : 
+        'No channels match the current filter.'}
+    </div>`;
+    return;
+  }
+
+  displayChannels.forEach((c, index) => {
+    const isHidden = c.enabled === false;
     const row = document.createElement('div');
-    row.className = 'admin-channel-row';
+    row.className = 'admin-channel-row' + (isHidden ? ' is-hidden' : '');
     row.draggable = true;
     row.dataset.channelId = c.id;
     row.dataset.index = index;
@@ -5297,11 +5360,20 @@ function renderAdminChannelList() {
         </div>
         <span class="badge ch-badge">${c.number}</span>
         <div class="admin-ch-info">
-          <strong class="admin-ch-name">${escapeHtml(c.name)}</strong>
+          <div class="admin-ch-name-wrap">
+            <strong class="admin-ch-name">${escapeHtml(c.name)}</strong>
+            ${isHidden ? '<span class="badge ch-hidden-badge" title="Hidden from Live TV and TV Guide">Hidden</span>' : ''}
+          </div>
           <div class="admin-ch-sub">${(c.frequency / 1000000).toFixed(1)} MHz (SID: ${c.service_id})</div>
         </div>
       </div>
       <div class="admin-ch-actions">
+        <button class="btn btn-sm admin-ch-toggle-btn ${isHidden ? 'btn-outline-warning' : 'btn-secondary'}" 
+                onclick="toggleChannelEnabled(${c.id})" 
+                title="${isHidden ? 'Click to show in Live TV & TV Guide' : 'Click to hide/disable channel'}">
+          <span class="toggle-icon">${isHidden ? '👁️‍🗨️' : '👁️'}</span>
+          <span class="toggle-text">${isHidden ? ' Show' : ' Hide'}</span>
+        </button>
         <button class="btn btn-danger btn-sm admin-ch-del-btn" onclick="deleteChannel(${c.id})" title="Delete Channel">
           <span class="del-icon">🗑️</span><span class="del-text"> Delete</span>
         </button>
@@ -5438,6 +5510,35 @@ window.deleteChannel = async function(channelId) {
   if (!confirmed) return;
   await fetch(`/api/channels/${channelId}`, { method: 'DELETE' });
   await loadChannels();
+};
+
+window.toggleChannelEnabled = async function(channelId) {
+  const ch = channels.find(c => c.id === channelId);
+  if (!ch) return;
+  const newEnabled = ch.enabled === false;
+  try {
+    const res = await fetch(`/api/channels/${channelId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled })
+    });
+    if (res.ok) {
+      ch.enabled = newEnabled;
+      showToast(newEnabled ? `👁️ Channel "${ch.name}" is now visible` : `👁️‍🗨️ Channel "${ch.name}" is now hidden`, 'info');
+      renderAdminChannelList();
+      renderChannelList();
+      const epgTab = document.getElementById('tab-epg');
+      if (epgTab && timelineStartTime && timelineEndTime) {
+        renderChannelsColumn();
+        renderProgramRows(timelineStartTime, timelineEndTime);
+      }
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast('⚠️ Failed to update channel: ' + (data.error || 'Server error'), 'error');
+    }
+  } catch (err) {
+    showToast('⚠️ Error: ' + err.message, 'error');
+  }
 };
 
 let currentLogoSearchChannelId = null;
@@ -5731,6 +5832,8 @@ function setupIntegrationCard() {
 // Save Global Settings
 function setupSettingsUI() {
   setupIntegrationCard();
+  setupAdminChannelFilterHandlers();
+  setupBackupRestore();
 
   document.getElementById('global-settings-form').onsubmit = async (e) => {
     e.preventDefault();
@@ -5814,6 +5917,68 @@ function setupSettingsUI() {
       await window.removeChannelLogo(currentLogoSearchChannelId);
     };
   }
+}
+
+function setupBackupRestore() {
+  const fileInput = document.getElementById('backup-file-input');
+  const statusEl = document.getElementById('backup-restore-status');
+  if (!fileInput) return;
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    const confirmed = await showConfirm(
+      `Are you sure you want to restore from "${file.name}"? This will update your channels, settings, and logos.`,
+      'Restore Backup',
+      'Restore',
+      false
+    );
+
+    if (!confirmed) {
+      fileInput.value = '';
+      return;
+    }
+
+    if (statusEl) statusEl.textContent = 'Restoring backup...';
+    showToast('⏳ Uploading and restoring backup...', 'info');
+
+    try {
+      const formData = new FormData();
+      formData.append('backup', file);
+
+      const res = await fetch('/api/restore', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok) {
+        const msg = `✅ Restore complete: ${data.channels_restored ?? 0} channels, ${data.settings_restored ?? 0} settings, ${data.logos_restored ?? 0} logos.`;
+        if (statusEl) statusEl.textContent = msg;
+        showToast(msg, 'success');
+
+        await loadInitialSettings();
+        await loadChannels();
+
+        const epgTab = document.getElementById('tab-epg');
+        if (epgTab && timelineStartTime && timelineEndTime) {
+          renderChannelsColumn();
+          renderProgramRows(timelineStartTime, timelineEndTime);
+        }
+      } else {
+        const errText = data.error || 'Failed to restore backup';
+        if (statusEl) statusEl.textContent = '⚠️ ' + errText;
+        showToast('⚠️ Restore failed: ' + errText, 'error');
+      }
+    } catch (err) {
+      if (statusEl) statusEl.textContent = '⚠️ Error: ' + err.message;
+      showToast('⚠️ Restore error: ' + err.message, 'error');
+    } finally {
+      fileInput.value = '';
+    }
+  });
 }
 
 // ==========================================================
@@ -7009,7 +7174,7 @@ if (btnOpenSchedModal) {
     const select = document.getElementById('sched-channel-select');
     if (select) {
       select.innerHTML = '';
-      channels.forEach(c => {
+      channels.filter(c => c.enabled !== false).forEach(c => {
         const opt = document.createElement('option');
         opt.value = c.id;
         opt.textContent = `${c.number}. ${c.name}`;

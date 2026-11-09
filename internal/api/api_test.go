@@ -3,9 +3,12 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -570,5 +573,154 @@ func TestLogoAPIEndpoints(t *testing.T) {
 	}
 	if chCleared.LogoURL != "" {
 		t.Errorf("Expected logo_url to be cleared, got %s", chCleared.LogoURL)
+	}
+}
+
+func TestChannelToggleAndHideAPI(t *testing.T) {
+	server, database, _, _, tmpDir := setupTestServer(t)
+	defer os.RemoveAll(tmpDir)
+
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux, "")
+
+	// Verify channel 1 is initially enabled
+	ch1, err := database.GetChannel(1)
+	if err != nil || !ch1.Enabled {
+		t.Fatalf("Channel 1 should initially be enabled")
+	}
+
+	// 1. Toggle channel 1 via POST /api/channels/1/toggle
+	toggleReq := httptest.NewRequest(http.MethodPost, "/api/channels/1/toggle", nil)
+	toggleW := httptest.NewRecorder()
+	mux.ServeHTTP(toggleW, toggleReq)
+
+	if toggleW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from toggle, got %d", toggleW.Code)
+	}
+
+	var toggled db.Channel
+	if err := json.NewDecoder(toggleW.Body).Decode(&toggled); err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	if toggled.Enabled {
+		t.Errorf("Expected channel to be disabled after toggle, but was enabled")
+	}
+
+	// 2. Verify GET /api/channels?enabled=true excludes disabled channel 1
+	enabledReq := httptest.NewRequest(http.MethodGet, "/api/channels?enabled=true", nil)
+	enabledW := httptest.NewRecorder()
+	mux.ServeHTTP(enabledW, enabledReq)
+
+	var enabledList []db.Channel
+	_ = json.NewDecoder(enabledW.Body).Decode(&enabledList)
+	for _, c := range enabledList {
+		if c.ID == 1 {
+			t.Errorf("Expected channel 1 to be omitted from ?enabled=true, but it was found")
+		}
+	}
+
+	// 3. Re-enable channel 1 via PATCH /api/channels/1 with {"enabled": true}
+	patchBody := strings.NewReader(`{"enabled": true}`)
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/channels/1", patchBody)
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchW := httptest.NewRecorder()
+	mux.ServeHTTP(patchW, patchReq)
+
+	if patchW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from PATCH, got %d: %s", patchW.Code, patchW.Body.String())
+	}
+
+	chReEnabled, err := database.GetChannel(1)
+	if err != nil || !chReEnabled.Enabled {
+		t.Errorf("Expected channel 1 to be re-enabled, but got err=%v, enabled=%v", err, chReEnabled.Enabled)
+	}
+}
+
+func TestBackupAndRestoreAPI(t *testing.T) {
+	server, database, _, _, tmpDir := setupTestServer(t)
+	defer os.RemoveAll(tmpDir)
+
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux, "")
+
+	// 1. Set custom settings and channel info
+	_ = database.SetSetting("transcoder_mode", "vaapi")
+	_ = database.SetSetting("video_bitrate", "4500k")
+
+	logosDir := filepath.Join(database.DataDir(), "logos")
+	_ = os.MkdirAll(logosDir, 0755)
+	testLogoData := []byte("fake-png-logo-bytes")
+	_ = os.WriteFile(filepath.Join(logosDir, "ch_1.png"), testLogoData, 0644)
+	_ = database.UpdateChannelLogo(1, "/api/logos/ch_1.png")
+
+	// 2. Export backup via GET /api/backup
+	backupReq := httptest.NewRequest(http.MethodGet, "/api/backup", nil)
+	backupW := httptest.NewRecorder()
+	mux.ServeHTTP(backupW, backupReq)
+
+	if backupW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from /api/backup, got %d", backupW.Code)
+	}
+	if backupW.Header().Get("Content-Type") != "application/zip" {
+		t.Errorf("Expected application/zip content type, got %s", backupW.Header().Get("Content-Type"))
+	}
+	zipBytes := backupW.Body.Bytes()
+	if len(zipBytes) < 50 {
+		t.Fatalf("Zip archive is unexpectedly small: %d bytes", len(zipBytes))
+	}
+
+	// 3. Mutate current database and delete logo to simulate a wipe or change
+	_ = database.SetSetting("transcoder_mode", "cpu")
+	_ = database.SetSetting("video_bitrate", "1000k")
+	_ = os.Remove(filepath.Join(logosDir, "ch_1.png"))
+	_ = database.UpdateChannelLogo(1, "")
+
+	chBefore, _ := database.GetChannel(1)
+	if chBefore.LogoURL != "" {
+		t.Fatalf("Logo URL should be empty before restore")
+	}
+
+	// 4. Restore via POST /api/restore
+	var b bytes.Buffer
+	mw := multipart.NewWriter(&b)
+	part, err := mw.CreateFormFile("backup", "dvb-backup.zip")
+	if err != nil {
+		t.Fatalf("CreateFormFile error: %v", err)
+	}
+	if _, err := part.Write(zipBytes); err != nil {
+		t.Fatalf("Write part error: %v", err)
+	}
+	mw.Close()
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/restore", &b)
+	restoreReq.Header.Set("Content-Type", mw.FormDataContentType())
+	restoreW := httptest.NewRecorder()
+	mux.ServeHTTP(restoreW, restoreReq)
+
+	if restoreW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from /api/restore, got %d: %s", restoreW.Code, restoreW.Body.String())
+	}
+
+	// 5. Verify restored state
+	settingMode := database.GetSetting("transcoder_mode", "")
+	if settingMode != "vaapi" {
+		t.Errorf("Expected restored transcoder_mode 'vaapi', got '%s'", settingMode)
+	}
+	settingBitrate := database.GetSetting("video_bitrate", "")
+	if settingBitrate != "4500k" {
+		t.Errorf("Expected restored video_bitrate '4500k', got '%s'", settingBitrate)
+	}
+
+	chRestored, err := database.GetChannel(1)
+	if err != nil {
+		t.Fatalf("GetChannel(1) error: %v", err)
+	}
+	if chRestored.LogoURL != "/api/logos/ch_1.png" {
+		t.Errorf("Expected restored logo URL '/api/logos/ch_1.png', got '%s'", chRestored.LogoURL)
+	}
+
+	restoredLogoBytes, err := os.ReadFile(filepath.Join(logosDir, "ch_1.png"))
+	if err != nil || !bytes.Equal(restoredLogoBytes, testLogoData) {
+		t.Errorf("Restored logo file content mismatch: err=%v, got=%s", err, string(restoredLogoBytes))
 	}
 }

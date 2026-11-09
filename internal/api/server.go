@@ -1,6 +1,8 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
@@ -14,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -116,6 +119,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, webDir string) {
 	mux.HandleFunc("/api/recordings", s.handleRecordings)
 	mux.HandleFunc("/api/recordings/instant", s.handleRecordingInstant)
 	mux.HandleFunc("/api/recordings/", s.handleRecordingDetail)
+	mux.HandleFunc("/api/backup", s.handleBackup)
+	mux.HandleFunc("/api/restore", s.handleRestore)
 
 	// HDHomeRun Emulation (Native Plex & Jellyfin Tuner Support)
 	mux.HandleFunc("/discover.json", s.handleHDHRDiscover)
@@ -201,6 +206,16 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if r.URL.Query().Get("enabled") == "true" {
+			var enabled []db.Channel
+			for _, c := range channels {
+				if c.Enabled {
+					enabled = append(enabled, c)
+				}
+			}
+			jsonResponse(w, http.StatusOK, enabled)
+			return
+		}
 		jsonResponse(w, http.StatusOK, channels)
 
 	case http.MethodPost:
@@ -278,11 +293,57 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle Channel Toggle: POST /api/channels/{id}/toggle
+	if len(parts) > 1 && parts[1] == "toggle" && r.Method == http.MethodPost {
+		c, err := s.db.GetChannel(id)
+		if err != nil {
+			jsonError(w, "channel not found", http.StatusNotFound)
+			return
+		}
+		c.Enabled = !c.Enabled
+		if err := s.db.SaveChannel(c); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, c)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		c, err := s.db.GetChannel(id)
 		if err != nil {
 			jsonError(w, "channel not found", http.StatusNotFound)
+			return
+		}
+		jsonResponse(w, http.StatusOK, c)
+
+	case http.MethodPatch, http.MethodPut:
+		c, err := s.db.GetChannel(id)
+		if err != nil {
+			jsonError(w, "channel not found", http.StatusNotFound)
+			return
+		}
+		var req struct {
+			Enabled *bool   `json:"enabled"`
+			Name    *string `json:"name"`
+			Number  *int    `json:"number"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Enabled != nil {
+			c.Enabled = *req.Enabled
+		}
+		if req.Name != nil && *req.Name != "" {
+			c.Name = *req.Name
+		}
+		if req.Number != nil {
+			c.Number = *req.Number
+		}
+		if err := s.db.SaveChannel(c); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, http.StatusOK, c)
@@ -3215,4 +3276,194 @@ setTimeout(function() { initHbbtvMocks(); fitHbbTV(); }, 400);
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	backup, err := s.db.CreateBackupData()
+	if err != nil {
+		jsonError(w, "failed to create backup: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if r.URL.Query().Get("format") == "json" {
+		jsonResponse(w, http.StatusOK, backup)
+		return
+	}
+
+	timestamp := time.Now().Format("2006-01-02-150405")
+	filename := fmt.Sprintf("dvb-web-backup-%s.zip", timestamp)
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+
+	zipWriter := zip.NewWriter(w)
+	defer zipWriter.Close()
+
+	// 1. Add backup.json
+	jsonData, err := json.MarshalIndent(backup, "", "  ")
+	if err != nil {
+		jsonError(w, "failed to encode backup json: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonEntry, err := zipWriter.Create("backup.json")
+	if err != nil {
+		return
+	}
+	if _, err := jsonEntry.Write(jsonData); err != nil {
+		return
+	}
+
+	// 2. Add logos from dataDir/logos
+	logosDir := filepath.Join(s.db.DataDir(), "logos")
+	if entries, err := os.ReadDir(logosDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			filePath := filepath.Join(logosDir, entry.Name())
+			fileData, err := os.ReadFile(filePath)
+			if err != nil {
+				continue
+			}
+			logoEntry, err := zipWriter.Create(path.Join("logos", entry.Name()))
+			if err != nil {
+				continue
+			}
+			_, _ = logoEntry.Write(fileData)
+		}
+	}
+}
+
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var backup *db.BackupData
+	var zipBytes []byte
+	logosRestored := 0
+
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		// Limit to 50MB max for backup upload
+		if err := r.ParseMultipartForm(50 << 20); err != nil {
+			jsonError(w, "file too large or invalid multipart", http.StatusBadRequest)
+			return
+		}
+		file, handler, err := r.FormFile("backup")
+		if err != nil {
+			jsonError(w, "backup file field is required", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		data, err := io.ReadAll(file)
+		if err != nil {
+			jsonError(w, "failed to read backup file", http.StatusBadRequest)
+			return
+		}
+
+		filename := strings.ToLower(handler.Filename)
+		if strings.HasSuffix(filename, ".json") {
+			var b db.BackupData
+			if err := json.Unmarshal(data, &b); err != nil {
+				jsonError(w, "invalid backup JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			backup = &b
+		} else {
+			zipBytes = data
+		}
+	} else if strings.HasPrefix(contentType, "application/json") {
+		var b db.BackupData
+		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+			jsonError(w, "invalid backup JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		backup = &b
+	} else {
+		// Read raw body (e.g. raw zip stream)
+		data, err := io.ReadAll(io.LimitReader(r.Body, 50<<20))
+		if err != nil {
+			jsonError(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		zipBytes = data
+	}
+
+	logosDir := filepath.Join(s.db.DataDir(), "logos")
+	_ = os.MkdirAll(logosDir, 0755)
+
+	if zipBytes != nil {
+		zipReader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+		if err != nil {
+			jsonError(w, "invalid zip archive: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Find backup.json / manifest.json and extract logos
+		for _, f := range zipReader.File {
+			cleanName := filepath.Clean(f.Name)
+			if cleanName == "backup.json" || cleanName == "manifest.json" {
+				rc, err := f.Open()
+				if err == nil {
+					jsonBytes, err := io.ReadAll(rc)
+					rc.Close()
+					if err == nil {
+						var b db.BackupData
+						if err := json.Unmarshal(jsonBytes, &b); err == nil {
+							backup = &b
+						}
+					}
+				}
+			} else if strings.HasPrefix(f.Name, "logos/") || strings.HasPrefix(f.Name, "logos\\") {
+				rel := strings.TrimPrefix(strings.TrimPrefix(f.Name, "logos/"), "logos\\")
+				if rel == "" || strings.HasSuffix(rel, "/") || strings.HasSuffix(rel, "\\") {
+					continue
+				}
+				cleanRel := filepath.Clean(rel)
+				if strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
+					continue // Security: prevent zip-slip
+				}
+				destPath := filepath.Join(logosDir, cleanRel)
+				_ = os.MkdirAll(filepath.Dir(destPath), 0755)
+
+				rc, err := f.Open()
+				if err == nil {
+					outFile, err := os.Create(destPath)
+					if err == nil {
+						_, _ = io.Copy(outFile, rc)
+						outFile.Close()
+						logosRestored++
+					}
+					rc.Close()
+				}
+			}
+		}
+	}
+
+	if backup == nil {
+		jsonError(w, "backup archive does not contain a valid backup.json or manifest.json", http.StatusBadRequest)
+		return
+	}
+
+	chRestored, setRestored, recRestored, err := s.db.RestoreBackup(backup)
+	if err != nil {
+		jsonError(w, "failed to restore database: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":              "ok",
+		"channels_restored":   chRestored,
+		"settings_restored":   setRestored,
+		"logos_restored":      logosRestored,
+		"recordings_restored": recRestored,
+	})
 }

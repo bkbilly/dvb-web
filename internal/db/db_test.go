@@ -285,3 +285,68 @@ func TestEPGDeduplication(t *testing.T) {
 		t.Errorf("Expected merged titles, got %+v", events[0].Titles)
 	}
 }
+
+func TestProcessScanResults_PreserveDisabledChannel(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "dvb-db-scan-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	database, err := db.Open(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// Initial channel: user manually disabled it (hide channel)
+	ch := &db.Channel{
+		Name:      "Shopping Channel",
+		Number:    5,
+		Frequency: 506000000,
+		ServiceID: 1234,
+		Enabled:   false,
+	}
+	if err := database.SaveChannel(ch); err != nil {
+		t.Fatalf("SaveChannel error: %v", err)
+	}
+
+	// Rescan finds the channel again along with a new channel
+	scanned := []db.Channel{
+		{
+			Name:      "Shopping Channel Updated",
+			Frequency: 506000000,
+			ServiceID: 1234,
+		},
+		{
+			Name:      "Brand New Sports HD",
+			Frequency: 506000000,
+			ServiceID: 5678,
+		},
+	}
+
+	diff, err := database.ProcessScanResults(scanned)
+	if err != nil {
+		t.Fatalf("ProcessScanResults error: %v", err)
+	}
+
+	if len(diff.NewChannels) != 1 {
+		t.Fatalf("Expected 1 new channel, got %d", len(diff.NewChannels))
+	}
+	if diff.NewChannels[0].ServiceID != 5678 {
+		t.Errorf("Expected new channel ServiceID 5678, got %d", diff.NewChannels[0].ServiceID)
+	}
+
+	if len(diff.UpdatedChannels) != 1 {
+		t.Fatalf("Expected 1 updated channel, got %d", len(diff.UpdatedChannels))
+	}
+
+	// Verify the disabled channel stayed disabled in the database!
+	updatedCh, err := database.GetChannel(ch.ID)
+	if err != nil {
+		t.Fatalf("GetChannel error: %v", err)
+	}
+	if updatedCh.Enabled {
+		t.Errorf("Expected disabled channel to stay disabled (Enabled=false) after rescan, but it was re-enabled!")
+	}
+}
