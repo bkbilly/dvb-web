@@ -2433,30 +2433,6 @@ input:checked + .slider:before {
   flex-shrink: 0;
 }
 
-.admin-ch-type-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.25rem;
-  padding: 0.3rem 0.6rem;
-  font-size: 0.8rem;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: all 0.15s ease;
-}
-
-.admin-ch-type-btn.btn-outline-primary {
-  background: rgba(59, 130, 246, 0.15);
-  border: 1px solid rgba(59, 130, 246, 0.4);
-  color: #93c5fd;
-}
-
-.admin-ch-type-btn.btn-outline-primary:hover {
-  background: rgba(59, 130, 246, 0.28);
-  border-color: #3b82f6;
-  color: #bfdbfe;
-}
-
 .admin-ch-toggle-btn {
   display: inline-flex;
   align-items: center;
@@ -2537,7 +2513,6 @@ input:checked + .slider:before {
     min-width: 18px;
   }
 
-  .admin-ch-type-btn,
   .admin-ch-toggle-btn,
   .admin-ch-del-btn {
     padding: 0.25rem 0.45rem;

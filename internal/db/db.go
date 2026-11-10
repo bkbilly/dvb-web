@@ -429,15 +429,6 @@ func (d *Database) UpdateChannelLogo(id int64, logoURL string) error {
 	return err
 }
 
-func (d *Database) UpdateChannelRadio(id int64, isRadio bool) error {
-	val := 0
-	if isRadio {
-		val = 1
-	}
-	_, err := d.db.Exec("UPDATE channels SET is_radio = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", val, id)
-	return err
-}
-
 func (d *Database) UpdateChannelTeletext(id int64, hasTeletext bool) error {
 	val := 0
 	if hasTeletext {

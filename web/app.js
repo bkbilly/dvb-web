@@ -5490,11 +5490,7 @@ function renderAdminChannelList() {
         </div>
       </div>
       <div class="admin-ch-actions">
-        <button class="btn btn-sm admin-ch-type-btn ${c.is_radio ? 'btn-outline-primary' : 'btn-secondary'}"
-                onclick="toggleChannelRadio(${c.id})" 
-                title="Click to toggle between TV and Radio">
-          ${c.is_radio ? '📻 Radio' : '📺 TV'}
-        </button>
+        <span class="badge-tag" style="margin-right:0.25rem;">${c.is_radio ? '📻 Radio' : '📺 TV'}</span>
         <button class="btn btn-sm admin-ch-toggle-btn ${isHidden ? 'btn-outline-warning' : 'btn-secondary'}" 
                 onclick="toggleChannelEnabled(${c.id})" 
                 title="${isHidden ? 'Click to show in Live TV & TV Guide' : 'Click to hide/disable channel'}">
@@ -5658,39 +5654,6 @@ window.toggleChannelEnabled = async function(channelId) {
       if (epgTab && timelineStartTime && timelineEndTime) {
         renderChannelsColumn();
         renderProgramRows(timelineStartTime, timelineEndTime);
-      }
-    } else {
-      const data = await res.json().catch(() => ({}));
-      showToast('⚠️ Failed to update channel: ' + (data.error || 'Server error'), 'error');
-    }
-  } catch (err) {
-    showToast('⚠️ Error: ' + err.message, 'error');
-  }
-};
-
-window.toggleChannelRadio = async function(channelId) {
-  const ch = channels.find(c => c.id === channelId);
-  if (!ch) return;
-  const newRadio = !ch.is_radio;
-  try {
-    const res = await fetch(`/api/channels/${channelId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_radio: newRadio })
-    });
-    if (res.ok) {
-      ch.is_radio = newRadio;
-      showToast(newRadio ? `📻 Channel "${ch.name}" switched to Radio` : `📺 Channel "${ch.name}" switched to TV`, 'success');
-      renderAdminChannelList();
-      renderChannelList();
-      const epgTab = document.getElementById('tab-epg');
-      if (epgTab && timelineStartTime && timelineEndTime) {
-        renderChannelsColumn();
-        renderProgramRows(timelineStartTime, timelineEndTime);
-      }
-      if (activeChannel && activeChannel.id === channelId) {
-        activeChannel.is_radio = newRadio;
-        updateRadioOverlay(activeChannel);
       }
     } else {
       const data = await res.json().catch(() => ({}));
