@@ -176,7 +176,40 @@ func (p *Parser) processEITSection(sec []byte, channelMap map[int]int64) {
 					lang := normalizeLang(string(data[1:4]))
 					if lang != "" {
 						lengthOfItems := int(data[4])
+						var itemTexts []string
+						if lengthOfItems > 0 && 5+lengthOfItems <= len(data) {
+							itemOffset := 5
+							itemEnd := 5 + lengthOfItems
+							for itemOffset < itemEnd {
+								itemDescLen := int(data[itemOffset])
+								itemOffset++
+								if itemOffset+itemDescLen > itemEnd {
+									break
+								}
+								itemDesc := strings.TrimSpace(DecodeDVBString(data[itemOffset : itemOffset+itemDescLen]))
+								itemOffset += itemDescLen
+
+								if itemOffset >= itemEnd {
+									break
+								}
+								itemValLen := int(data[itemOffset])
+								itemOffset++
+								if itemOffset+itemValLen > itemEnd {
+									break
+								}
+								itemVal := strings.TrimSpace(DecodeDVBString(data[itemOffset : itemOffset+itemValLen]))
+								itemOffset += itemValLen
+
+								if itemDesc != "" && itemVal != "" {
+									itemTexts = append(itemTexts, itemDesc+": "+itemVal)
+								} else if itemVal != "" {
+									itemTexts = append(itemTexts, itemVal)
+								}
+							}
+						}
+
 						textOffset := 5 + lengthOfItems
+						var text string
 						if textOffset < len(data) {
 							textLen := int(data[textOffset])
 							start := textOffset + 1
@@ -185,12 +218,40 @@ func (p *Parser) processEITSection(sec []byte, channelMap map[int]int64) {
 								end = len(data)
 							}
 							if start <= len(data) {
-								text := DecodeDVBString(data[start:end])
-								if text != "" {
-									// In DVB SI, consecutive extended event descriptors for the same language
-									// are chunks of the continuous text description split across 248 bytes.
-									// They must be concatenated directly without adding line breaks.
-									extDescriptions[lang] = extDescriptions[lang] + text
+								text = strings.TrimSpace(DecodeDVBString(data[start:end]))
+							}
+						}
+
+						combined := text
+						if len(itemTexts) > 0 {
+							itemsStr := strings.Join(itemTexts, " - ")
+							if combined != "" {
+								combined = itemsStr + " - " + combined
+							} else {
+								combined = itemsStr
+							}
+						}
+
+						if combined != "" {
+							// In DVB SI, consecutive extended event descriptors for the same language
+							// are chunks of the continuous text description split across 248 bytes.
+							if extDescriptions[lang] != "" {
+								extDescriptions[lang] = extDescriptions[lang] + " " + combined
+							} else {
+								extDescriptions[lang] = combined
+							}
+						}
+
+						// If titles[lang] is not set, try to derive it from Title/Track/Song items
+						if titles[lang] == "" && len(itemTexts) > 0 {
+							for _, it := range itemTexts {
+								lower := strings.ToLower(it)
+								if strings.HasPrefix(lower, "title:") || strings.HasPrefix(lower, "track:") || strings.HasPrefix(lower, "song:") {
+									parts := strings.SplitN(it, ":", 2)
+									if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+										titles[lang] = strings.TrimSpace(parts[1])
+										break
+									}
 								}
 							}
 						}
@@ -234,7 +295,9 @@ func (p *Parser) processEITSection(sec []byte, channelMap map[int]int64) {
 	}
 
 	if len(events) > 0 {
-		_ = p.db.SaveEPGEvents(events)
+		if p.db != nil {
+			_ = p.db.SaveEPGEvents(events)
+		}
 		if p.onUpdate != nil {
 			p.onUpdate(events)
 		}

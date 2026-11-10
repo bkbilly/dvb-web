@@ -145,7 +145,7 @@
       is_radio: 1,
       has_teletext: 0,
       hbbtv_url: '',
-      logo_url: ''
+      logo_url: 'logo.png'
     },
     {
       id: 9,
@@ -181,6 +181,15 @@
     { startH: 3, startM: 0, durH: 3, durM: 0, titleEn: 'World News Overnight', titleGr: 'Διεθνείς Ειδήσεις', descEn: 'Global headline updates and documentary features through the night.', descGr: 'Συνεχής ενημέρωση με διεθνή θέματα.' }
   ];
 
+  const MOCK_RADIO_TEMPLATES = [
+    { durM: 45, title: 'Queen - Bohemian Rhapsody', desc: 'Artist: Queen - Album: A Night at the Opera (1975)' },
+    { durM: 40, title: 'Pink Floyd - Comfortably Numb', desc: 'Artist: Pink Floyd - Album: The Wall' },
+    { durM: 50, title: 'David Bowie - Heroes', desc: 'Artist: David Bowie - Album: "Heroes"' },
+    { durM: 35, title: 'Fleetwood Mac - Dreams', desc: 'Artist: Fleetwood Mac - Album: Rumours' },
+    { durM: 45, title: 'The Beatles - Here Comes The Sun', desc: 'Artist: The Beatles - Album: Abbey Road' },
+    { durM: 50, title: 'Dire Straits - Sultans of Swing', desc: 'Artist: Dire Straits - Album: Dire Straits' }
+  ];
+
   function generateEPGEvents(channelId, fromDate, toDate) {
     const events = [];
     let curDay = new Date(fromDate);
@@ -188,6 +197,42 @@
 
     const endDay = new Date(toDate);
     endDay.setDate(endDay.getDate() + 1);
+
+    const isRadio = (channelId === 8 || channelId === 9);
+
+    if (isRadio) {
+      let tCursor = new Date(curDay);
+      let rIdx = (channelId * 3) % MOCK_RADIO_TEMPLATES.length;
+      while (tCursor < endDay) {
+        const rTpl = MOCK_RADIO_TEMPLATES[rIdx % MOCK_RADIO_TEMPLATES.length];
+        rIdx++;
+        const s = new Date(tCursor);
+        const e = new Date(s.getTime() + rTpl.durM * 60000);
+        tCursor = e;
+
+        if (e > fromDate && s < toDate) {
+          events.push({
+            id: channelId * 100000 + Math.floor(s.getTime() / 60000),
+            channel_id: channelId,
+            event_id: Math.floor(s.getTime() / 60000) % 65535,
+            start_time: s.toISOString(),
+            end_time: e.toISOString(),
+            titles: {
+              eng: rTpl.title,
+              ell: rTpl.title,
+              gre: rTpl.title
+            },
+            descriptions: {
+              eng: rTpl.desc,
+              ell: rTpl.desc,
+              gre: rTpl.desc
+            },
+            genres: ['Music/Radio']
+          });
+        }
+      }
+      return events;
+    }
 
     const chOffsetMin = ((channelId * 17) % 45); // slight schedule diversity per channel
 

@@ -96,10 +96,17 @@
             <!-- Radio Broadcast Overlay Card -->
             <div id="radio-overlay" class="radio-overlay hidden">
               <div class="radio-card">
-                <div class="radio-icon-pulse">📻</div>
+                <div id="radio-station-art" class="radio-station-art">
+                  <img id="radio-station-logo" src="" alt="Station Logo" class="radio-station-logo hidden" />
+                  <div id="radio-icon-pulse" class="radio-icon-pulse">📻</div>
+                </div>
                 <h2 id="radio-station-name" class="radio-title">Radio Station</h2>
                 <div class="radio-badge-tag">Digital Audio Broadcast</div>
-                <div id="radio-now-playing" class="radio-now-show">Live Audio Stream</div>
+                <div class="radio-meta-container">
+                  <div id="radio-track-title" class="radio-track-title">Live Broadcast</div>
+                  <div id="radio-track-artist" class="radio-track-artist hidden"></div>
+                </div>
+                <div id="radio-now-playing" class="radio-now-show hidden">Live Audio Stream</div>
                 <div class="radio-equalizer">
                   <span class="eq-bar bar-1"></span>
                   <span class="eq-bar bar-2"></span>

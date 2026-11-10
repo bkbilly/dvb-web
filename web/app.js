@@ -941,6 +941,70 @@ function handleWSMessage(msg) {
 let player = null;
 let currentStreamingChannelId = null;
 
+function parseRadioMetadata(channel, lang) {
+  if (!channel) return { title: 'Digital Audio Broadcast', artist: '' };
+
+  const nowPlaying = channel.now_playing;
+  if (!nowPlaying) {
+    return { title: 'Digital Audio Broadcast', artist: '' };
+  }
+
+  const rawTitle = (getLocalized(nowPlaying.titles, lang) || '').trim();
+  const rawDesc = (getLocalized(nowPlaying.descriptions, lang) || '').trim();
+
+  if (!rawTitle && !rawDesc) {
+    return { title: 'Live Radio Broadcast', artist: '' };
+  }
+
+  let parsedArtist = '';
+  let parsedTitle = rawTitle;
+
+  // 1. Check if description has explicit "Artist: <val>" and/or "Title/Track: <val>"
+  // E.g. from EIT extended event descriptor: "Artist: Queen - Track: Bohemian Rhapsody"
+  const artistMatch = rawDesc.match(/(?:Artist|Performer|Καλλιτέχνης|Interpret)\s*[:=-]\s*([^-\n\r;]+)/i);
+  const trackMatch = rawDesc.match(/(?:Track|Song|Title|Τραγούδι|Titel)\s*[:=-]\s*([^-\n\r;]+)/i);
+
+  if (artistMatch && artistMatch[1]) {
+    parsedArtist = artistMatch[1].trim();
+  }
+  if (trackMatch && trackMatch[1] && (!parsedTitle || parsedTitle.toLowerCase().includes('radio') || parsedTitle.toLowerCase().includes('broadcast'))) {
+    parsedTitle = trackMatch[1].trim();
+  }
+
+  // 2. If artist is still not found, check delimiters in the title
+  // Broadcast conventions: "Artist - Title", "Artist : Title", "Artist / Title", or "Title by Artist"
+  if (!parsedArtist && parsedTitle) {
+    const byMatch = parsedTitle.match(/^["']?(.+?)["']?\s+(?:by|από|von)\s+["']?(.+?)["']?$/i);
+    if (byMatch) {
+      return { title: byMatch[1].trim(), artist: byMatch[2].trim() };
+    }
+
+    const separators = [' - ', ' – ', ' — ', ' : ', ' / '];
+    for (const sep of separators) {
+      if (parsedTitle.includes(sep)) {
+        const parts = parsedTitle.split(sep);
+        if (parts.length >= 2) {
+          const p1 = parts[0].trim();
+          const p2 = parts.slice(1).join(sep).trim();
+          if (p1 && p2) {
+            return { title: p2, artist: p1 };
+          }
+        }
+      }
+    }
+
+    // 3. If title has no separator, check if description is a short artist name
+    if (rawDesc && rawDesc.length < 50 && !rawDesc.includes('\n') && !rawDesc.toLowerCase().includes(rawTitle.toLowerCase())) {
+      parsedArtist = rawDesc;
+    }
+  }
+
+  return {
+    title: parsedTitle || rawTitle || 'Live Radio Broadcast',
+    artist: parsedArtist
+  };
+}
+
 function updateRadioOverlay(channel) {
   const overlay = document.getElementById('radio-overlay');
   const arWrap = document.getElementById('aspect-dropdown-wrap');
@@ -948,13 +1012,49 @@ function updateRadioOverlay(channel) {
 
   if (channel && channel.is_radio) {
     overlay.classList.remove('hidden');
-    const stationName = document.getElementById('radio-station-name');
-    const nowPlaying = document.getElementById('radio-now-playing');
-    if (stationName) stationName.textContent = channel.name;
-    if (nowPlaying) {
-      const showTitle = channel.now_playing ? getLocalized(channel.now_playing.titles, currentLanguage) : 'Digital Audio Broadcast';
-      nowPlaying.textContent = showTitle;
+
+    // Station Image (Logo) with fallback to animated icon
+    const logoEl = document.getElementById('radio-station-logo');
+    const iconEl = document.getElementById('radio-icon-pulse');
+    if (channel.logo_url) {
+      if (logoEl) {
+        logoEl.src = channel.logo_url;
+        logoEl.classList.remove('hidden');
+        logoEl.onerror = () => {
+          logoEl.classList.add('hidden');
+          if (iconEl) iconEl.classList.remove('hidden');
+        };
+      }
+      if (iconEl) iconEl.classList.add('hidden');
+    } else {
+      if (logoEl) logoEl.classList.add('hidden');
+      if (iconEl) iconEl.classList.remove('hidden');
     }
+
+    // Station Name
+    const stationName = document.getElementById('radio-station-name');
+    if (stationName) stationName.textContent = channel.name;
+
+    // Track Title and Artist (from DVB EIT broadcast metadata)
+    const { title, artist } = parseRadioMetadata(channel, currentLanguage);
+    const trackTitleEl = document.getElementById('radio-track-title');
+    const trackArtistEl = document.getElementById('radio-track-artist');
+    const nowPlaying = document.getElementById('radio-now-playing');
+
+    if (trackTitleEl) trackTitleEl.textContent = title;
+    if (trackArtistEl) {
+      if (artist) {
+        trackArtistEl.textContent = `🎵 ${artist}`;
+        trackArtistEl.classList.remove('hidden');
+      } else {
+        trackArtistEl.textContent = '';
+        trackArtistEl.classList.add('hidden');
+      }
+    }
+    if (nowPlaying) {
+      nowPlaying.textContent = artist ? `${artist} - ${title}` : title;
+    }
+
     if (arWrap) arWrap.classList.add('hidden');
   } else {
     overlay.classList.add('hidden');
