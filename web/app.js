@@ -1005,12 +1005,22 @@ function parseRadioMetadata(channel, lang) {
   };
 }
 
+function isChannelAudioOnly(channel) {
+  if (!channel || !channel.is_radio) return false;
+  // Visual radio stations (like Zeppelin or Kosmos) broadcast a live H.264 video slide
+  // with the station logo, album artwork, and real-time artist/song title.
+  // If the channel has a video PID or a video stream was detected, it is NOT audio-only.
+  if (channel.video_pid && channel.video_pid > 0) return false;
+  if (availableChannelTracks && (availableChannelTracks.video_pid > 0 || availableChannelTracks.video_codec)) return false;
+  return true;
+}
+
 function updateRadioOverlay(channel) {
   const overlay = document.getElementById('radio-overlay');
   const arWrap = document.getElementById('aspect-dropdown-wrap');
   if (!overlay) return;
 
-  if (channel && channel.is_radio) {
+  if (isChannelAudioOnly(channel)) {
     overlay.classList.remove('hidden');
 
     // Station Image (Logo) with fallback to animated icon
@@ -6143,18 +6153,24 @@ async function fetchAndRenderChannelTracks(channelId) {
     const res = await fetch(`/api/channels/${channelId}/tracks`);
     if (res.ok) {
       availableChannelTracks = await res.json();
+      if (availableChannelTracks && availableChannelTracks.video_pid && activeChannel) {
+        activeChannel.video_pid = availableChannelTracks.video_pid;
+      }
       renderTrackMenus();
       updateInteractiveFeaturesUI(activeChannel);
+      updateRadioOverlay(activeChannel);
     } else {
       availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
       renderTrackMenus();
       updateInteractiveFeaturesUI(activeChannel);
+      updateRadioOverlay(activeChannel);
     }
   } catch (e) {
     console.warn('[Tracks] Failed to fetch channel tracks:', e);
     availableChannelTracks = { audio_tracks: [], subtitle_tracks: [] };
     renderTrackMenus();
     updateInteractiveFeaturesUI(activeChannel);
+    updateRadioOverlay(activeChannel);
   }
 }
 

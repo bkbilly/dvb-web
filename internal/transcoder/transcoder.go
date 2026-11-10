@@ -240,7 +240,9 @@ type PipelineConfig struct {
 	InputPipe        io.Reader    // Piped TS reader (preferred for safe multi-consumer fanning)
 	UseStdinPipe     bool         // If true, creates stdin pipe for direct writing via Pipeline.Stdin()
 	IsMock           bool         // If mock, generates test pattern
-	IsRadio          bool         // True for audio-only radio channels (no video stream in DVB)
+	IsRadio          bool         // True for audio-only or visual radio channels
+	HasVideo         bool         // True if broadcast stream has video (e.g. TV channel or visual radio slide)
+	VideoPID         int          // DVB Video PID (> 0 if broadcast contains video stream)
 	ServiceID        int          // DVB Program / Service ID
 	ChannelName      string       // Display name for logging
 	VideoCodec       string       // Broadcast video codec (e.g. "h264", "mpeg2video")
@@ -290,6 +292,13 @@ func (p *Pipeline) HWType() HardwareType {
 		return HW_NONE
 	}
 	return p.hwType
+}
+
+func (p *Pipeline) Args() []string {
+	if p == nil || p.cmd == nil {
+		return nil
+	}
+	return p.cmd.Args
 }
 
 func (p *Pipeline) StderrText() string {
@@ -347,277 +356,7 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		cfg.HWType = HW_NONE
 	}
 
-	bitrate := cfg.VideoBitrate
-	if bitrate == "" {
-		bitrate = "2500k"
-	}
-
-	var args []string
-	args = append(args, "-hide_banner")
-	if cfg.InputPipe == nil && !cfg.UseStdinPipe {
-		args = append(args, "-nostdin")
-	}
-	args = append(args, "-loglevel", "warning")
-
-	// Hardware input initialization for VA-API
-	if !cfg.IsMock && hw == HW_VAAPI {
-		if cfg.SubtitleTrack < 0 {
-			args = append(args,
-				"-hwaccel", "vaapi",
-				"-hwaccel_device", d.vaapiDevice,
-				"-hwaccel_output_format", "vaapi",
-			)
-		} else {
-			// When rendering subtitles, keep decoded frames in system memory for overlay filter
-			args = append(args,
-				"-hwaccel", "vaapi",
-				"-hwaccel_device", d.vaapiDevice,
-			)
-		}
-	}
-
-	// Live MPEG-TS input options to ensure PAT/PMT program maps are properly discovered
-	if !cfg.IsMock {
-		args = append(args,
-			"-f", "mpegts",
-			"-analyzeduration", "4000000",
-			"-probesize", "5000000",
-			"-err_detect", "ignore_err",
-			"-fflags", "+genpts+nobuffer",
-			"-flags", "low_delay",
-		)
-	}
-
-	// Input source
-	if cfg.IsMock {
-		if cfg.IsRadio {
-			args = append(args,
-				"-f", "lavfi", "-re", "-i", "color=c=0x0f172a:s=1280x720:r=10",
-				"-f", "lavfi", "-re", "-i", "aevalsrc=exprs='0.03*(0.75+0.25*sin(2*PI*0.25*t))*(sin(2*PI*220*t)+sin(2*PI*329.63*t)+0.5*sin(2*PI*110*t))|0.03*(0.75+0.25*sin(2*PI*0.25*t))*(sin(2*PI*277.18*t)+sin(2*PI*440*t)+0.5*sin(2*PI*110*t))':channel_layout=stereo:sample_rate=48000",
-			)
-		} else {
-			args = append(args,
-				"-f", "lavfi", "-re", "-i", "testsrc=size=1280x720:rate=25",
-				"-f", "lavfi", "-re", "-i", "aevalsrc=exprs='0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*261.63*t)+sin(2*PI*392*t)+0.5*sin(2*PI*130.81*t))|0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*329.63*t)+sin(2*PI*523.25*t)+0.5*sin(2*PI*130.81*t))':channel_layout=stereo:sample_rate=48000",
-			)
-		}
-	} else if cfg.InputPipe != nil || cfg.UseStdinPipe {
-		args = append(args, "-i", "pipe:0")
-	} else {
-		args = append(args, "-i", cfg.InputPath)
-	}
-
-	// Stream mapping: multiplex Video and Audio together into one single stream
-	audioIdx := cfg.AudioTrackIdx
-	if audioIdx < 0 {
-		audioIdx = 0
-	}
-	subIdx := cfg.SubtitleTrack
-
-	videoFilter := buildVideoFilter(cfg.VideoResolution)
-
-	if hw == HW_DIRECT {
-		if cfg.IsMock {
-			// Mock synthetic sources cannot use stream copy (-c:v copy requires encoded packets)
-			args = append(args,
-				"-map", "0:v:0",
-				"-map", "1:a:0",
-				"-c:v", "libx264",
-				"-preset", "ultrafast",
-				"-tune", "zerolatency",
-				"-b:v", "1000k",
-			)
-		} else {
-			if cfg.ServiceID > 0 {
-				args = append(args,
-					"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
-					"-map", fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx),
-				)
-			} else {
-				args = append(args,
-					"-map", "0:v:0?",
-					"-map", fmt.Sprintf("0:a:%d?", audioIdx),
-				)
-			}
-			args = append(args,
-				"-c:v", "copy",
-			)
-		}
-	} else if cfg.IsMock {
-		if cfg.IsRadio {
-			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
-		} else if subIdx >= 0 {
-			args = append(args,
-				"-filter_complex", "[0:v]drawtext=text='[DVB Live Subtitles - CC]':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=6:x=(w-text_w)/2:y=h-80[v]",
-				"-map", "[v]",
-				"-map", "1:a:0",
-			)
-		} else {
-			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
-		}
-	} else if cfg.IsRadio {
-		// Radio station (audio-only): synthesize a lightweight static video background
-		// so browser <video> engines maintain flawless timing and synchronized playback
-		audioMap := fmt.Sprintf("0:a:%d?", audioIdx)
-		if cfg.ServiceID > 0 {
-			audioMap = fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
-		}
-		args = append(args,
-			"-filter_complex", "color=c=0x0f172a:s=1280x720:r=10[v]",
-			"-map", "[v]",
-			"-map", audioMap,
-		)
-	} else if cfg.ServiceID > 0 {
-		audioMap := fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
-		if subIdx >= 0 {
-			subOffsetSec := float64(cfg.SubtitleOffsetMs) / 1000.0
-			subPtsChain := ""
-			if subOffsetSec != 0 {
-				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
-			}
-			filter := fmt.Sprintf(
-				"[0:p:%d:v:0]%s[main];"+
-					"[0:p:%d:s:%d]%sformat=yuva420p[sub];"+
-					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
-				cfg.ServiceID, videoFilter, cfg.ServiceID, subIdx, subPtsChain,
-			)
-			args = append(args,
-				"-filter_complex", filter,
-				"-map", "[outv]",
-				"-map", audioMap,
-			)
-		} else {
-			if hw == HW_VAAPI {
-				if cfg.VideoResolution == "720p" {
-					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1,scale_vaapi=w=-2:h=720")
-				} else {
-					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1")
-				}
-			} else {
-				args = append(args, "-vf", videoFilter)
-			}
-			args = append(args,
-				"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
-				"-map", audioMap,
-			)
-		}
-	} else {
-		if subIdx >= 0 {
-			subOffsetSec := float64(cfg.SubtitleOffsetMs) / 1000.0
-			subPtsChain := ""
-			if subOffsetSec != 0 {
-				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
-			}
-			filter := fmt.Sprintf(
-				"[0:v:0]%s[main];"+
-					"[0:s:%d]%sformat=yuva420p[sub];"+
-					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
-				videoFilter, subIdx, subPtsChain,
-			)
-			args = append(args,
-				"-filter_complex", filter,
-				"-map", "[outv]",
-				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
-			)
-		} else {
-			if hw == HW_VAAPI {
-				if cfg.VideoResolution == "720p" {
-					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1,scale_vaapi=w=-2:h=720")
-				} else {
-					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1")
-				}
-			} else {
-				args = append(args, "-vf", videoFilter)
-			}
-			args = append(args,
-				"-map", "0:v:0?",
-				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
-			)
-		}
-	}
-
-	if hw != HW_DIRECT {
-		if cfg.IsRadio {
-			// Radio uses minimal CPU static frame encoding (10 fps, ~15 kbps)
-			args = append(args,
-				"-c:v", "libx264",
-				"-preset", "ultrafast",
-				"-tune", "stillimage",
-				"-threads", "2",
-				"-b:v", "64k",
-				"-g", "25",
-				"-bf", "0",
-				"-pix_fmt", "yuv420p",
-			)
-		} else {
-			switch hw {
-			case HW_NVENC:
-				args = append(args,
-					"-c:v", "h264_nvenc",
-					"-preset", "p1",
-					"-tune", "ull",
-					"-zerolatency", "1",
-					"-b:v", bitrate,
-					"-g", "15",
-					"-bf", "0",
-					"-pix_fmt", "yuv420p",
-				)
-			case HW_VAAPI:
-				args = append(args,
-					"-c:v", "h264_vaapi",
-					"-b:v", bitrate,
-					"-g", "15",
-					"-bf", "0",
-				)
-			case HW_V4L2M2M:
-				args = append(args,
-					"-c:v", "h264_v4l2m2m",
-					"-b:v", bitrate,
-					"-g", "15",
-				)
-			default:
-				// Universal CPU fallback with optimized preset and thread throttling
-				preset := cfg.VideoPreset
-				if preset == "" {
-					preset = "ultrafast"
-				}
-				cpuThreads := runtime.NumCPU()
-				if cpuThreads > 4 {
-					cpuThreads = 4
-				}
-				args = append(args,
-					"-c:v", "libx264",
-					"-preset", preset,
-					"-tune", "zerolatency",
-					"-threads", fmt.Sprintf("%d", cpuThreads),
-					"-b:v", bitrate,
-					"-maxrate", bitrate,
-					"-bufsize", bitrate,
-					"-g", "15",
-					"-bf", "0",
-					"-pix_fmt", "yuv420p",
-				)
-			}
-		}
-	}
-
-	audioBitrate := "128k"
-	if cfg.IsRadio || hw == HW_DIRECT {
-		audioBitrate = "192k" // Higher fidelity
-	}
-
-	// Unified MPEG-TS output with AAC stereo audio (natural PTS preserved for perfect A/V sync)
-	args = append(args,
-		"-c:a", "aac",
-		"-b:a", audioBitrate,
-		"-ar", "48000",
-		"-ac", "2",
-		"-f", "mpegts",
-		"-muxdelay", "0",
-		"-muxpreload", "0",
-		"-pes_payload_size", "0",
-		"pipe:1",
-	)
+	args := d.BuildPipelineArgs(cfg, hw)
 
 	cmd := exec.CommandContext(ctx, d.ffmpegPath, args...)
 	var stdin io.WriteCloser
@@ -726,4 +465,282 @@ func (p *Pipeline) Stop() {
 	} else {
 		log.Printf("[Transcoder] Pipeline stopped")
 	}
+}
+
+func (d *Detector) BuildPipelineArgs(cfg PipelineConfig, hw HardwareType) []string {
+	bitrate := cfg.VideoBitrate
+	if bitrate == "" {
+		bitrate = "2500k"
+	}
+
+	var args []string
+	args = append(args, "-hide_banner")
+	if cfg.InputPipe == nil && !cfg.UseStdinPipe {
+		args = append(args, "-nostdin")
+	}
+	args = append(args, "-loglevel", "warning")
+
+	// Hardware input initialization for VA-API
+	if !cfg.IsMock && hw == HW_VAAPI {
+		if cfg.SubtitleTrack < 0 {
+			args = append(args,
+				"-hwaccel", "vaapi",
+				"-hwaccel_device", d.vaapiDevice,
+				"-hwaccel_output_format", "vaapi",
+			)
+		} else {
+			// When rendering subtitles, keep decoded frames in system memory for overlay filter
+			args = append(args,
+				"-hwaccel", "vaapi",
+				"-hwaccel_device", d.vaapiDevice,
+			)
+		}
+	}
+
+	// Live MPEG-TS input options to ensure PAT/PMT program maps and still-picture video slides are properly discovered
+	if !cfg.IsMock {
+		args = append(args,
+			"-f", "mpegts",
+			"-analyzeduration", "8000000",
+			"-probesize", "10000000",
+			"-err_detect", "ignore_err",
+			"-fflags", "+genpts+nobuffer",
+			"-flags", "low_delay",
+		)
+	}
+
+	// Input source
+	if cfg.IsMock {
+		if cfg.IsRadio {
+			args = append(args,
+				"-f", "lavfi", "-re", "-i", "color=c=0x0f172a:s=1280x720:r=10",
+				"-f", "lavfi", "-re", "-i", "aevalsrc=exprs='0.03*(0.75+0.25*sin(2*PI*0.25*t))*(sin(2*PI*220*t)+sin(2*PI*329.63*t)+0.5*sin(2*PI*110*t))|0.03*(0.75+0.25*sin(2*PI*0.25*t))*(sin(2*PI*277.18*t)+sin(2*PI*440*t)+0.5*sin(2*PI*110*t))':channel_layout=stereo:sample_rate=48000",
+			)
+		} else {
+			args = append(args,
+				"-f", "lavfi", "-re", "-i", "testsrc=size=1280x720:rate=25",
+				"-f", "lavfi", "-re", "-i", "aevalsrc=exprs='0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*261.63*t)+sin(2*PI*392*t)+0.5*sin(2*PI*130.81*t))|0.025*(0.7+0.3*sin(2*PI*0.2*t))*(sin(2*PI*329.63*t)+sin(2*PI*523.25*t)+0.5*sin(2*PI*130.81*t))':channel_layout=stereo:sample_rate=48000",
+			)
+		}
+	} else if cfg.InputPipe != nil || cfg.UseStdinPipe {
+		args = append(args, "-i", "pipe:0")
+	} else {
+		args = append(args, "-i", cfg.InputPath)
+	}
+
+	// Stream mapping: multiplex Video and Audio together into one single stream
+	audioIdx := cfg.AudioTrackIdx
+	if audioIdx < 0 {
+		audioIdx = 0
+	}
+	subIdx := cfg.SubtitleTrack
+
+	videoFilter := buildVideoFilter(cfg.VideoResolution)
+	isAudioOnlyRadio := cfg.IsRadio && !cfg.HasVideo && cfg.VideoPID == 0 && cfg.VideoCodec == ""
+
+	if hw == HW_DIRECT {
+		if cfg.IsMock {
+			// Mock synthetic sources cannot use stream copy (-c:v copy requires encoded packets)
+			args = append(args,
+				"-map", "0:v:0",
+				"-map", "1:a:0",
+				"-c:v", "libx264",
+				"-preset", "ultrafast",
+				"-tune", "zerolatency",
+				"-b:v", "1000k",
+			)
+		} else {
+			if cfg.ServiceID > 0 {
+				args = append(args,
+					"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
+					"-map", fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx),
+				)
+			} else {
+				args = append(args,
+					"-map", "0:v:0?",
+					"-map", fmt.Sprintf("0:a:%d?", audioIdx),
+				)
+			}
+			args = append(args,
+				"-c:v", "copy",
+			)
+		}
+	} else if cfg.IsMock {
+		if cfg.IsRadio {
+			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
+		} else if subIdx >= 0 {
+			args = append(args,
+				"-filter_complex", "[0:v]drawtext=text='[DVB Live Subtitles - CC]':fontcolor=white:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=6:x=(w-text_w)/2:y=h-80[v]",
+				"-map", "[v]",
+				"-map", "1:a:0",
+			)
+		} else {
+			args = append(args, "-map", "0:v:0", "-map", "1:a:0")
+		}
+	} else if isAudioOnlyRadio {
+		// Radio station (audio-only): synthesize a lightweight static video background
+		// so browser <video> engines maintain flawless timing and synchronized playback
+		audioMap := fmt.Sprintf("0:a:%d?", audioIdx)
+		if cfg.ServiceID > 0 {
+			audioMap = fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
+		}
+		args = append(args,
+			"-filter_complex", "color=c=0x0f172a:s=1280x720:r=10[v]",
+			"-map", "[v]",
+			"-map", audioMap,
+		)
+	} else if cfg.ServiceID > 0 {
+		audioMap := fmt.Sprintf("0:p:%d:a:%d?", cfg.ServiceID, audioIdx)
+		if subIdx >= 0 {
+			subOffsetSec := float64(cfg.SubtitleOffsetMs) / 1000.0
+			subPtsChain := ""
+			if subOffsetSec != 0 {
+				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
+			}
+			filter := fmt.Sprintf(
+				"[0:p:%d:v:0]%s[main];"+
+					"[0:p:%d:s:%d]%sformat=yuva420p[sub];"+
+					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
+				cfg.ServiceID, videoFilter, cfg.ServiceID, subIdx, subPtsChain,
+			)
+			args = append(args,
+				"-filter_complex", filter,
+				"-map", "[outv]",
+				"-map", audioMap,
+			)
+		} else {
+			if hw == HW_VAAPI {
+				if cfg.VideoResolution == "720p" {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1,scale_vaapi=w=-2:h=720")
+				} else {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1")
+				}
+			} else {
+				args = append(args, "-vf", videoFilter)
+			}
+			args = append(args,
+				"-map", fmt.Sprintf("0:p:%d:v:0?", cfg.ServiceID),
+				"-map", audioMap,
+			)
+		}
+	} else {
+		if subIdx >= 0 {
+			subOffsetSec := float64(cfg.SubtitleOffsetMs) / 1000.0
+			subPtsChain := ""
+			if subOffsetSec != 0 {
+				subPtsChain = fmt.Sprintf("setpts=PTS+(%.3f)/TB,", subOffsetSec)
+			}
+			filter := fmt.Sprintf(
+				"[0:v:0]%s[main];"+
+					"[0:s:%d]%sformat=yuva420p[sub];"+
+					"[main][sub]overlay=x='if(eq(w,W),0,(W-w)/2)':y='if(eq(h,H),0,H-h-40)':eof_action=pass:repeatlast=0[outv]",
+				videoFilter, subIdx, subPtsChain,
+			)
+			args = append(args,
+				"-filter_complex", filter,
+				"-map", "[outv]",
+				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
+			)
+		} else {
+			if hw == HW_VAAPI {
+				if cfg.VideoResolution == "720p" {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1,scale_vaapi=w=-2:h=720")
+				} else {
+					args = append(args, "-vf", "deinterlace_vaapi=rate=frame:auto=1")
+				}
+			} else {
+				args = append(args, "-vf", videoFilter)
+			}
+			args = append(args,
+				"-map", "0:v:0?",
+				"-map", fmt.Sprintf("0:a:%d?", audioIdx),
+			)
+		}
+	}
+
+	// Output video codec & parameters
+	if hw != HW_DIRECT {
+		if isAudioOnlyRadio {
+			// Radio (audio-only) uses minimal CPU static frame encoding (10 fps, ~15 kbps)
+			args = append(args,
+				"-c:v", "libx264",
+				"-preset", "ultrafast",
+				"-tune", "stillimage",
+				"-threads", "2",
+				"-b:v", "64k",
+				"-g", "25",
+				"-bf", "0",
+				"-pix_fmt", "yuv420p",
+			)
+		} else {
+			switch hw {
+			case HW_NVENC:
+				args = append(args,
+					"-c:v", "h264_nvenc",
+					"-preset", "p1",
+					"-tune", "ull",
+					"-zerolatency", "1",
+					"-b:v", bitrate,
+					"-g", "15",
+					"-bf", "0",
+					"-pix_fmt", "yuv420p",
+				)
+			case HW_VAAPI:
+				args = append(args,
+					"-c:v", "h264_vaapi",
+					"-b:v", bitrate,
+					"-g", "15",
+					"-bf", "0",
+				)
+			case HW_V4L2M2M:
+				args = append(args,
+					"-c:v", "h264_v4l2m2m",
+					"-b:v", bitrate,
+					"-g", "15",
+				)
+			default:
+				// Universal CPU fallback with optimized preset and thread throttling
+				preset := cfg.VideoPreset
+				if preset == "" {
+					preset = "ultrafast"
+				}
+				cpuThreads := runtime.NumCPU()
+				if cpuThreads > 4 {
+					cpuThreads = 4
+				}
+				args = append(args,
+					"-c:v", "libx264",
+					"-preset", preset,
+					"-tune", "zerolatency",
+					"-threads", fmt.Sprintf("%d", cpuThreads),
+					"-b:v", bitrate,
+					"-maxrate", bitrate,
+					"-bufsize", bitrate,
+					"-g", "15",
+					"-bf", "0",
+					"-pix_fmt", "yuv420p",
+				)
+			}
+		}
+	}
+
+	audioBitrate := "128k"
+	if cfg.IsRadio || hw == HW_DIRECT {
+		audioBitrate = "192k" // Higher fidelity
+	}
+
+	// Unified MPEG-TS output with AAC stereo audio (natural PTS preserved for perfect A/V sync)
+	args = append(args,
+		"-c:a", "aac",
+		"-b:a", audioBitrate,
+		"-ar", "48000",
+		"-ac", "2",
+		"-f", "mpegts",
+		"-muxdelay", "0",
+		"-muxpreload", "0",
+		"-pes_payload_size", "0",
+		"pipe:1",
+	)
+
+	return args
 }
