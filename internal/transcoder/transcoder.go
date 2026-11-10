@@ -263,8 +263,9 @@ func buildVideoFilter(resolution string) string {
 	} else if resolution == "1080p" {
 		scaleExpr = "scale=w='trunc(min(ih*dar,1920)/2)*2':h='min(ih,1080)':flags=bicubic,setsar=1"
 	}
-	// mode=0 outputs 1 frame per frame (25/30 fps) to conserve CPU/GPU and prevent buffering lags
-	return "bwdif=mode=0:parity=auto:deint=interlaced," + scaleExpr
+	// mode=0 outputs 1 frame per frame (25/30 fps) to conserve CPU/GPU and prevent buffering lags.
+	// fps=fps=25 ensures low-framerate/still-picture broadcast slides are repeated at a steady 25 fps.
+	return "bwdif=mode=0:parity=auto:deint=interlaced," + scaleExpr + ",fps=fps=25"
 }
 
 type Pipeline struct {
@@ -379,9 +380,8 @@ func (d *Detector) StartPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	if !cfg.IsMock {
 		args = append(args,
 			"-f", "mpegts",
-			"-analyzeduration", "2000000",
-			"-probesize", "2500000",
-			"-fpsprobesize", "0",
+			"-analyzeduration", "4000000",
+			"-probesize", "5000000",
 			"-err_detect", "ignore_err",
 			"-fflags", "+genpts+nobuffer",
 			"-flags", "low_delay",

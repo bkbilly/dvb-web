@@ -710,7 +710,7 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 
 				// If reading failed and direct stream or hardware encoding was in use without having produced valid stream output,
 				// attempt an in-flight fallback to CPU encoding (libx264) so the stream recovers for viewers.
-				if totalBytesRead == 0 && activePipeline.HWType() != transcoder.HW_NONE {
+				if totalBytesRead <= 65536 && activePipeline.HWType() != transcoder.HW_NONE {
 					_, exitCode := activePipeline.ExitStatus()
 					log.Printf("[ChannelStream] Stream mode (%s) failed during stream startup (exit %d): %s. Falling back to CPU encoding (libx264)...",
 						activePipeline.HWType(), exitCode, activePipeline.StderrText())

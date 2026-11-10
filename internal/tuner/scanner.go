@@ -319,7 +319,18 @@ func (d *scanDemuxer) channels(freq int64, deliverySys string, nextNum *int) []d
 			}
 			pids := d.servicePIDs[sid]
 			sType := d.serviceTypes[sid]
-			isRadio := (sType == 0x02 || sType == 0x07 || sType == 0x0A)
+			isRadio := (sType == 0x02 || sType == 0x07 || sType == 0x0A || pids.vPID == 0)
+			if !isRadio {
+				nameLower := strings.ToLower(name)
+				if strings.Contains(nameLower, "radio") || strings.Contains(nameLower, "fm") ||
+					strings.Contains(nameLower, "ραδιόφωνο") || strings.Contains(nameLower, "zeppelin") ||
+					strings.Contains(nameLower, "kosmos") || strings.Contains(nameLower, "ερα ") ||
+					strings.Contains(nameLower, "era ") || strings.Contains(nameLower, "πρώτο") ||
+					strings.Contains(nameLower, "δεύτερο") || strings.Contains(nameLower, "τρίτο") ||
+					strings.Contains(nameLower, "φωνή της ελλάδας") || strings.Contains(nameLower, "voice of greece") {
+					isRadio = true
+				}
+			}
 			results = append(results, db.Channel{
 				Name:           name,
 				Number:         *nextNum,

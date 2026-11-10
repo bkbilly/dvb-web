@@ -309,6 +309,22 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle Channel Type Toggle (TV/Radio): POST /api/channels/{id}/type
+	if len(parts) > 1 && parts[1] == "type" && r.Method == http.MethodPost {
+		c, err := s.db.GetChannel(id)
+		if err != nil {
+			jsonError(w, "channel not found", http.StatusNotFound)
+			return
+		}
+		c.IsRadio = !c.IsRadio
+		if err := s.db.SaveChannel(c); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, http.StatusOK, c)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		c, err := s.db.GetChannel(id)
@@ -326,6 +342,7 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		var req struct {
 			Enabled *bool   `json:"enabled"`
+			IsRadio *bool   `json:"is_radio"`
 			Name    *string `json:"name"`
 			Number  *int    `json:"number"`
 		}
@@ -335,6 +352,9 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Enabled != nil {
 			c.Enabled = *req.Enabled
+		}
+		if req.IsRadio != nil {
+			c.IsRadio = *req.IsRadio
 		}
 		if req.Name != nil && *req.Name != "" {
 			c.Name = *req.Name

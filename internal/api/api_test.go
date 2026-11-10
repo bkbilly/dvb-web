@@ -634,6 +634,34 @@ func TestChannelToggleAndHideAPI(t *testing.T) {
 	if err != nil || !chReEnabled.Enabled {
 		t.Errorf("Expected channel 1 to be re-enabled, but got err=%v, enabled=%v", err, chReEnabled.Enabled)
 	}
+
+	// 4. Toggle channel 1 type (TV/Radio) via POST /api/channels/1/type
+	typeReq := httptest.NewRequest(http.MethodPost, "/api/channels/1/type", nil)
+	typeW := httptest.NewRecorder()
+	mux.ServeHTTP(typeW, typeReq)
+	if typeW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from POST /type, got %d", typeW.Code)
+	}
+	var toggledType db.Channel
+	_ = json.NewDecoder(typeW.Body).Decode(&toggledType)
+	if !toggledType.IsRadio {
+		t.Errorf("Expected channel 1 to become radio after /type toggle")
+	}
+
+	// 5. Toggle back via PATCH /api/channels/1 with {"is_radio": false}
+	patchRadioBody := strings.NewReader(`{"is_radio": false}`)
+	patchRadioReq := httptest.NewRequest(http.MethodPatch, "/api/channels/1", patchRadioBody)
+	patchRadioReq.Header.Set("Content-Type", "application/json")
+	patchRadioW := httptest.NewRecorder()
+	mux.ServeHTTP(patchRadioW, patchRadioReq)
+	if patchRadioW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from PATCH is_radio, got %d", patchRadioW.Code)
+	}
+	var patchedRadio db.Channel
+	_ = json.NewDecoder(patchRadioW.Body).Decode(&patchedRadio)
+	if patchedRadio.IsRadio {
+		t.Errorf("Expected channel 1 is_radio to be false after PATCH")
+	}
 }
 
 func TestBackupAndRestoreAPI(t *testing.T) {

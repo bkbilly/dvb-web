@@ -227,6 +227,26 @@ func (d *Database) migrate() error {
 	_, _ = d.db.Exec("UPDATE channels SET service_id = 3600 WHERE frequency = 522000000 AND service_id = 1600;")
 	_, _ = d.db.Exec("UPDATE channels SET service_id = 3700 WHERE frequency = 522000000 AND service_id = 1700;")
 
+	// Ensure channels that are known radio services or have no video PID are classified as is_radio
+	_, _ = d.db.Exec(`
+		UPDATE channels 
+		SET is_radio = 1 
+		WHERE is_radio = 0 AND (
+			video_pid = 0 
+			OR LOWER(name) LIKE '%radio%' 
+			OR LOWER(name) LIKE '%fm%' 
+			OR LOWER(name) LIKE '%ραδιόφωνο%' 
+			OR LOWER(name) LIKE '%zeppelin%' 
+			OR LOWER(name) LIKE '%kosmos%' 
+			OR LOWER(name) LIKE '%ερα %' 
+			OR LOWER(name) LIKE '%era %' 
+			OR LOWER(name) LIKE '%πρώτο πρόγραμμα%' 
+			OR LOWER(name) LIKE '%δεύτερο πρόγραμμα%' 
+			OR LOWER(name) LIKE '%τρίτο πρόγραμμα%' 
+			OR LOWER(name) LIKE '%φωνή της ελλάδας%'
+		);
+	`)
+
 	// Clean up any corrupt dates, legacy time formats, or duplicate events
 	_, _ = d.db.Exec(`
 		UPDATE epg_events SET start_time = substr(start_time, 1, 19) WHERE start_time LIKE '% +0000 UTC';
@@ -406,6 +426,15 @@ func (d *Database) SaveChannel(c *Channel) error {
 
 func (d *Database) UpdateChannelLogo(id int64, logoURL string) error {
 	_, err := d.db.Exec("UPDATE channels SET logo_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", logoURL, id)
+	return err
+}
+
+func (d *Database) UpdateChannelRadio(id int64, isRadio bool) error {
+	val := 0
+	if isRadio {
+		val = 1
+	}
+	_, err := d.db.Exec("UPDATE channels SET is_radio = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", val, id)
 	return err
 }
 
