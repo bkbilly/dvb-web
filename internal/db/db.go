@@ -438,11 +438,6 @@ func (d *Database) UpdateChannelTeletext(id int64, hasTeletext bool) error {
 	return err
 }
 
-func (d *Database) UpdateChannelVideoPID(id int64, videoPID int) error {
-	_, err := d.db.Exec("UPDATE channels SET video_pid = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND video_pid = 0", videoPID, id)
-	return err
-}
-
 func (d *Database) DeleteChannel(id int64) error {
 	_, err := d.db.Exec("DELETE FROM channels WHERE id = ?", id)
 	return err

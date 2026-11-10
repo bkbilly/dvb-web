@@ -56,7 +56,6 @@ type TrackInfo struct {
 
 type ChannelTracks struct {
 	VideoCodec     string      `json:"video_codec,omitempty"`
-	VideoPID       int         `json:"video_pid,omitempty"`
 	AudioTracks    []TrackInfo `json:"audio_tracks"`
 	SubtitleTracks []TrackInfo `json:"subtitle_tracks"`
 	HasTeletext    bool        `json:"has_teletext"`
@@ -598,14 +597,11 @@ func (p *Pool) startChannelStreamLocked(t *Tuner, channel *db.Channel, audioTrac
 		tracksCacheMu.RUnlock()
 	}
 
-	hasVideo := channel.VideoPID > 0 || videoCodec != ""
 	cfg := transcoder.PipelineConfig{
 		InputPath:        t.DVRPath,
 		UseStdinPipe:     !t.IsMock,
 		IsMock:           t.IsMock,
 		IsRadio:          channel.IsRadio,
-		HasVideo:         hasVideo,
-		VideoPID:         channel.VideoPID,
 		ServiceID:        channel.ServiceID,
 		ChannelName:      channel.Name,
 		VideoCodec:       videoCodec,
@@ -1725,7 +1721,6 @@ func (t *Tuner) FeedPMTChunk(chunk []byte, channelMap map[int]int64) {
 			var audioTracks []TrackInfo
 			var subTracks []TrackInfo
 			var videoCodec string
-			vPID := 0
 			hasTeletext := false
 			aIdx := 0
 			sIdx := 0
@@ -1733,7 +1728,6 @@ func (t *Tuner) FeedPMTChunk(chunk []byte, channelMap map[int]int64) {
 			pos := esStart
 			for pos+5 <= esEnd {
 				streamType := payload[pos]
-				elemPID := (int(payload[pos+1]&0x1F) << 8) | int(payload[pos+2])
 				esInfoLen := (int(payload[pos+3]&0x0F) << 8) | int(payload[pos+4])
 				pos += 5
 				if pos+esInfoLen > esEnd {
@@ -1750,13 +1744,10 @@ func (t *Tuner) FeedPMTChunk(chunk []byte, channelMap map[int]int64) {
 				switch streamType {
 				case 0x1B:
 					videoCodec = "h264"
-					vPID = elemPID
 				case 0x24:
 					videoCodec = "hevc"
-					vPID = elemPID
 				case 0x01, 0x02:
 					videoCodec = "mpeg2video"
-					vPID = elemPID
 				case 0x03, 0x04:
 					isAudio = true
 				case 0x0F, 0x11:
@@ -1833,7 +1824,6 @@ func (t *Tuner) FeedPMTChunk(chunk []byte, channelMap map[int]int64) {
 			if len(audioTracks) > 0 || len(subTracks) > 0 || videoCodec != "" {
 				dt := ChannelTracks{
 					VideoCodec:     videoCodec,
-					VideoPID:       vPID,
 					AudioTracks:    audioTracks,
 					SubtitleTracks: subTracks,
 					HasTeletext:    hasTeletext,
@@ -1953,10 +1943,6 @@ func (p *Pool) getChannelTracksLocked(channel *db.Channel) ChannelTracks {
 				if channel.HasTeletext != det.HasTeletext {
 					channel.HasTeletext = det.HasTeletext
 					_ = p.db.UpdateChannelTeletext(channel.ID, det.HasTeletext)
-				}
-				if channel.VideoPID == 0 && det.VideoPID > 0 {
-					channel.VideoPID = det.VideoPID
-					_ = p.db.UpdateChannelVideoPID(channel.ID, det.VideoPID)
 				}
 
 				tracksCacheMu.Lock()
